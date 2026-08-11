@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "matcher": "MCP:handoff_create_task",
+        "command": "python3 cursor/inject-session.py"
+      }
+    ],
+    "stop": [
+      {
+        "command": "python3 cursor/wait-handoff.py",
+        "timeout": 500,
+        "loop_limit": null
+      }
+    ]
+  }
+}

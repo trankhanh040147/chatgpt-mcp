@@ -1,0 +1,35 @@
+{
+  "name": "cursor-chatgpt-handoff",
+  "version": "1.0.0",
+  "description": "Cursor ↔ ChatGPT Handoff MVP — MCP task bridge with Playwright dispatcher",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "handoff": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc && mkdir -p dist/db && cp src/db/schema.sql dist/db/schema.sql",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "mcp": "node dist/index.js mcp",
+    "worker": "node dist/index.js worker",
+    "remote-mcp": "node dist/index.js remote-mcp",
+    "all": "node dist/index.js all",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "dotenv": "^16.4.7",
+    "playwright": "^1.50.1",
+    "ulid": "^2.3.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

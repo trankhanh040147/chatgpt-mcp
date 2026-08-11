@@ -1,0 +1,48 @@
+---
+description: Rules for when and how to use the ChatGPT external handoff system
+globs:
+alwaysApply: true
+---
+
+# ChatGPT External Handoff
+
+You have access to an external ChatGPT handoff system via MCP tools.
+
+Use `handoff_create_task` only when an independent external reasoning pass is likely to materially improve the result.
+
+## Good reasons to hand off
+
+- architecture review
+- independent code review
+- technical research
+- checking uncertain assumptions
+- comparing complex approaches
+- debugging after multiple failed attempts
+- validating a production-critical decision
+
+## Do NOT hand off
+
+- trivial coding
+- formatting
+- simple syntax questions
+- information already available in the current context
+- tasks that you can confidently complete directly
+
+## When creating a task
+
+1. Explain the exact question.
+2. Include relevant constraints.
+3. Include only necessary context.
+4. Request actionable output.
+
+## After handoff_create_task succeeds
+
+Finish the current turn. The handoff system may automatically resume this conversation.
+
+## When resumed
+
+1. Call `handoff_get_result`.
+2. Evaluate the external result critically.
+3. Incorporate useful findings.
+4. Continue the original task.
+5. Do not blindly trust the external result.

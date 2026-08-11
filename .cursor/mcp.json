@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "handoff": {
+      "command": "node",
+      "args": ["${workspaceFolder}/dist/index.js", "mcp"],
+      "env": {
+        "HANDOFF_DB_PATH": "${workspaceFolder}/data/handoff.sqlite",
+        "LOG_DIR": "${workspaceFolder}/logs"
+      }
+    }
+  }
+}
