@@ -160,24 +160,79 @@ export class ChatGptBrowser {
   async submitTaskId(taskId: string): Promise<void> {
     const page = this.getPage();
     const message = DISPATCH_MESSAGE(taskId);
+    const marker = `TASK_ID=${taskId}`;
+
+    // If a prior attempt already posted this exact task id, do not send again.
+    const alreadySent = await page
+      .locator(`text=${marker}`)
+      .first()
+      .isVisible({ timeout: 1500 })
+      .catch(() => false);
+    if (alreadySent) {
+      log({
+        event: "INFO",
+        component: "browser-worker",
+        taskId,
+        message: "Dispatch message already present in chat; skipping resend",
+      });
+      return;
+    }
 
     const composer = page.locator(selectors.composer).first();
     await composer.waitFor({ state: "visible", timeout: 30000 });
-    await composer.click();
-    // ProseMirror often ignores locator.fill(); clear + type instead.
+    await composer.scrollIntoViewIfNeeded().catch(() => undefined);
+
+    // ChatGPT overlays often block actionability while ProseMirror stays visible.
+    await composer.evaluate((el) => {
+      (el as HTMLElement).focus();
+    });
+    try {
+      await composer.click({ timeout: 5000 });
+    } catch {
+      await composer.click({ force: true, timeout: 5000 });
+    }
+
     await page.keyboard.press(
       process.platform === "darwin" ? "Meta+A" : "Control+A"
     );
+    await page.keyboard.press("Backspace");
     await page.keyboard.type(message, { delay: 5 });
+
+    const typed = ((await composer.innerText().catch(() => "")) ?? "").replace(
+      /\s+/g,
+      " "
+    );
+    if (!typed.includes(marker)) {
+      throw new Error(
+        `Composer did not retain dispatch text for ${taskId} (got: ${typed.slice(0, 80)})`
+      );
+    }
 
     const sendButton = page.locator(selectors.sendButton).first();
     if (await sendButton.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await sendButton.click();
+      try {
+        await sendButton.click({ timeout: 5000 });
+      } catch {
+        await sendButton.click({ force: true, timeout: 5000 });
+      }
     } else {
       await page.keyboard.press("Enter");
     }
 
-    await page.waitForTimeout(1000);
+    // Acknowledge: either composer clears or the marker appears in the thread.
+    const ackDeadline = Date.now() + 8000;
+    while (Date.now() < ackDeadline) {
+      const inThread = await page
+        .locator(`text=${marker}`)
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (inThread) break;
+      const composerText = ((await composer.innerText().catch(() => "")) ?? "")
+        .trim();
+      if (!composerText.includes(marker)) break;
+      await page.waitForTimeout(250);
+    }
   }
 
   async detectRateLimit(): Promise<boolean> {

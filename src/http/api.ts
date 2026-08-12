@@ -36,6 +36,19 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         return;
       }
 
+      if (req.method === "GET" && url.pathname === "/worker") {
+        const state = repo.getWorkerState();
+        // Minimal schema for harness/diagnostics — no raw paths or full error blobs.
+        sendJson(res, 200, {
+          status: state.status,
+          activeTask: Boolean(state.currentTaskId),
+          errorCode: state.error
+            ? state.error.split(":")[0]?.slice(0, 64) ?? "ERROR"
+            : null,
+        });
+        return;
+      }
+
       if (req.method === "GET" && url.pathname.startsWith("/tasks/")) {
         const taskId = url.pathname.slice("/tasks/".length);
         const status = taskService.getTaskStatus(taskId);

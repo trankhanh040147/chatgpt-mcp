@@ -37,14 +37,23 @@ export function resolveUserPath(raw: string): string {
   return resolve(trimmed);
 }
 
+/** Per-user data root. Override with CHATGPT_MCP_HOME (absolute or ~/…). */
+export function chatgptMcpHome(): string {
+  return resolveUserPath(
+    process.env.CHATGPT_MCP_HOME?.trim() || join(homedir(), ".chatgpt-mcp")
+  );
+}
+
 export function loadConfig(): AppConfig {
   const rateLimitRaw =
     process.env.RATE_LIMIT_BACKOFF_MS ?? "300000,900000,1800000";
   const workerUrl = process.env.CHATGPT_WORKER_URL?.trim() ?? "";
+  const home = chatgptMcpHome();
 
   return {
     dbPath: resolveUserPath(
-      process.env.HANDOFF_DB_PATH ?? "./data/handoff.sqlite"
+      process.env.HANDOFF_DB_PATH?.trim() ||
+        join(home, "data", "handoff.sqlite")
     ),
     httpPort: Number(process.env.HANDOFF_HTTP_PORT ?? 8787),
     cdpEndpoint:
@@ -56,7 +65,9 @@ export function loadConfig(): AppConfig {
       process.env.DISPATCH_APPROVAL_TIMEOUT_MS ?? 300000
     ),
     rateLimitBackoffMs: rateLimitRaw.split(",").map((v) => Number(v.trim())),
-    logDir: resolveUserPath(process.env.LOG_DIR ?? "./logs"),
+    logDir: resolveUserPath(
+      process.env.LOG_DIR?.trim() || join(home, "logs")
+    ),
     remoteMcpPort: Number(process.env.HANDOFF_REMOTE_MCP_PORT ?? 8790),
     remoteMcpToken: process.env.HANDOFF_REMOTE_MCP_TOKEN,
     remoteMcpDisableAuth: process.env.HANDOFF_REMOTE_MCP_DISABLE_AUTH === "1",

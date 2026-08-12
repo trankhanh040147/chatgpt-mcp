@@ -17,6 +17,7 @@ export function initDatabase(dbPath: string): DatabaseSync {
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA busy_timeout = 5000");
 
   const schema = readFileSync(join(__dirname, "schema.sql"), "utf-8");
   db.exec(schema);

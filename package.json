@@ -16,7 +16,11 @@
     "worker": "node dist/index.js worker",
     "remote-mcp": "node dist/index.js remote-mcp",
     "all": "node dist/index.js all",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "e2e:reliability": "tsx scripts/e2e-reliability.ts",
+    "e2e:reliability:20": "tsx scripts/e2e-reliability.ts --runs=20",
+    "setup": "tsx scripts/setup.ts",
+    "check": "tsx scripts/check.ts"
   },
   "engines": {
     "node": ">=22.5"

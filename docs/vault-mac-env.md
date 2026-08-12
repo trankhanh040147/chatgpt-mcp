@@ -1,7 +1,8 @@
-# vault-mac env note (moved)
+# Maintainer env inventory (optional)
 
-Canonical env inventory lives in Obsidian vault-mac-1:
+Operator-specific secrets and live URLs belong in a **private** notes store
+(e.g. a local Obsidian vault `configs/` note) — not in this repository.
 
-`/Users/vulcanlabs/src/gh/obsidian-vault/vault-mac-1/configs/chatgpt-mcp-env.md`
+Public install path: `npm run setup` → `~/.chatgpt-mcp` + printed Cursor MCP JSON.
 
-Do not duplicate secrets here.
+Do not commit `.env`, tokens, or personal absolute paths.
