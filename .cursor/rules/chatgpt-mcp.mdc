@@ -1,12 +1,14 @@
 ---
-description: Rules for when and how to use the ChatGPT external handoff system
+description: Rules for when and how to use the chatgpt-mcp external handoff system
 globs:
 alwaysApply: true
 ---
 
-# ChatGPT External Handoff
+# chatgpt-mcp
 
 You have access to an external ChatGPT handoff system via MCP tools.
+
+Prefer the user skill `chatgpt-mcp` (`/chatgpt-mcp`; alias `/chatgpt-handoff`).
 
 Use `handoff_create_task` only when an independent external reasoning pass is likely to materially improve the result.
 

@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "handoff": {
+    "chatgpt-mcp": {
       "command": "node",
       "args": ["${workspaceFolder}/dist/index.js", "mcp"],
       "env": {

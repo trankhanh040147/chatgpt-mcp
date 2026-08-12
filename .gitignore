@@ -9,3 +9,4 @@ logs/
 *.sqlite-shm
 .DS_Store
 .gitnexus/
+*-handoff-*.zip

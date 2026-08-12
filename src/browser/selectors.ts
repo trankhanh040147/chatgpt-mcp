@@ -3,15 +3,16 @@
  * Update these when ChatGPT UI changes — never scatter selectors elsewhere.
  */
 export const selectors = {
-  /** Main message composer (contenteditable or textarea) */
+  /**
+   * Main message composer. Prefer the visible ProseMirror `#prompt-textarea`
+   * div — ChatGPT also mounts a hidden fallback `<textarea name="prompt-textarea">`
+   * that must not win `.first()`.
+   */
   composer:
-    '[contenteditable="true"][data-placeholder], #prompt-textarea, textarea[placeholder]',
+    '#prompt-textarea[contenteditable="true"], div#prompt-textarea[role="textbox"], [contenteditable="true"].ProseMirror',
   /** Send / submit button */
   sendButton:
     'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send"]',
-  /** Sidebar conversation links */
-  conversationLink: (title: string) =>
-    `a[href*="/c/"]:has-text("${title}"), nav a:has-text("${title}")`,
   /** New chat button */
   newChatButton:
     'a[href="/"], button:has-text("New chat"), [data-testid="create-new-chat-button"]',

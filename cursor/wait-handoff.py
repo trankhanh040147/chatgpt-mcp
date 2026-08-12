@@ -21,7 +21,8 @@ def env_int(name: str, default: int) -> int:
 
 
 def db_path() -> str:
-    return os.environ.get("HANDOFF_DB_PATH", "./data/handoff.sqlite")
+    raw = os.environ.get("HANDOFF_DB_PATH", "./data/handoff.sqlite")
+    return os.path.abspath(os.path.expanduser(raw))
 
 
 def http_base() -> str:

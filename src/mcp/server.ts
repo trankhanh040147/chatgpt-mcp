@@ -17,7 +17,7 @@ export async function startMcpServer(options: McpServerOptions): Promise<void> {
 
   const server = new McpServer(
     {
-      name: "cursor-chatgpt-handoff",
+      name: "chatgpt-mcp",
       version: "1.0.0",
     },
     {

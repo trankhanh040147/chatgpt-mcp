@@ -69,7 +69,7 @@ export function startRemoteMcpServer(options: RemoteMcpOptions): void {
       const body = await readJsonBody(req);
 
       const mcpServer = new McpServer(
-        { name: "cursor-chatgpt-handoff-remote", version: "1.0.0" },
+        { name: "chatgpt-mcp-remote", version: "1.0.0" },
         { capabilities: { tools: {} } }
       );
       registerHandoffTools(mcpServer, taskService);

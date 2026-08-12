@@ -4,17 +4,24 @@ import { TaskService } from "../tasks/task.service.js";
 import { WorkerStateManager } from "./worker-state.js";
 import { ChatGptBrowser } from "./chatgpt.js";
 import { log } from "../logging/logger.js";
+import type { WorkerStatus } from "../tasks/task.types.js";
 
 export interface BrowserWorkerOptions {
   dbPath: string;
-  profilePath: string;
+  cdpEndpoint: string;
+  workerUrl: string;
   chatGptUrl: string;
-  workerConversationTitle: string;
   pollIntervalMs: number;
   approvalTimeoutMs: number;
   rateLimitBackoffMs: number[];
-  browserChannel?: string;
 }
+
+const BLOCKING_STATUSES: WorkerStatus[] = [
+  "NEEDS_APPROVAL",
+  "SESSION_LOST",
+  "ERROR",
+  "BUSY",
+];
 
 export class BrowserWorker {
   private running = false;
@@ -30,10 +37,9 @@ export class BrowserWorker {
     const workerState = new WorkerStateManager(repo);
 
     const browser = new ChatGptBrowser({
-      profilePath: this.options.profilePath,
+      cdpEndpoint: this.options.cdpEndpoint,
+      workerUrl: this.options.workerUrl,
       chatGptUrl: this.options.chatGptUrl,
-      workerConversationTitle: this.options.workerConversationTitle,
-      channel: this.options.browserChannel,
     });
     this.browser = browser;
 
@@ -41,12 +47,12 @@ export class BrowserWorker {
     workerState.setStatus("STARTING");
 
     try {
-      await browser.launch();
+      await browser.connect();
 
-      const loggedIn = await browser.ensureLoggedIn();
-      if (!loggedIn) {
+      const sessionReady = await browser.ensureSessionReady();
+      if (!sessionReady) {
         workerState.setStatus("SESSION_LOST", {
-          error: "Manual login required",
+          error: "SESSION_NOT_READY: log into ChatGPT in the attached Chrome",
         });
         return;
       }
@@ -57,7 +63,7 @@ export class BrowserWorker {
       log({
         event: "INFO",
         component: "browser-worker",
-        message: "Browser worker ready",
+        message: "Browser worker ready (CDP attach)",
       });
 
       while (this.running) {
@@ -81,7 +87,7 @@ export class BrowserWorker {
     this.running = false;
   }
 
-  /** Closes the persistent browser context so cookies/session data flush to disk. */
+  /** Disconnects CDP; does not quit the user's Chrome. */
   async close(): Promise<void> {
     this.running = false;
     await this.browser?.close();
@@ -92,9 +98,8 @@ export class BrowserWorker {
     workerState: WorkerStateManager,
     browser: ChatGptBrowser
   ): Promise<void> {
-    workerState.setStatus("READY");
-
     const status = workerState.getStatus();
+
     if (status === "RATE_LIMITED") {
       const backoff =
         this.options.rateLimitBackoffMs[this.rateLimitRetryIndex] ??
@@ -105,9 +110,17 @@ export class BrowserWorker {
         this.options.rateLimitBackoffMs.length - 1
       );
       workerState.setStatus("READY");
+      return;
     }
 
-    if (!workerState.isReady()) return;
+    // Do not claim new work while blocked or still busy with a task.
+    if (BLOCKING_STATUSES.includes(status)) {
+      return;
+    }
+
+    if (status !== "READY") {
+      return;
+    }
 
     const task = taskService.claimNextQueued();
     if (!task) {
@@ -122,7 +135,11 @@ export class BrowserWorker {
       if (rateLimited) {
         taskService.markDispatchFailed(task.id, "Rate limited");
         workerState.setStatus("RATE_LIMITED");
-        log({ event: "RATE_LIMITED", component: "browser-worker", taskId: task.id });
+        log({
+          event: "RATE_LIMITED",
+          component: "browser-worker",
+          taskId: task.id,
+        });
         return;
       }
 
@@ -156,10 +173,17 @@ export class BrowserWorker {
     while (Date.now() < deadline && this.running) {
       const { status } = taskService.getTaskStatus(taskId);
 
-      if (status === "COMPLETED" || status === "PROCESSING") {
+      if (status === "COMPLETED") {
         workerState.setStatus("READY", { currentTaskId: null });
         this.rateLimitRetryIndex = 0;
         return;
+      }
+
+      // ChatGPT has claimed the task — stay BUSY (concurrency = 1).
+      if (status === "PROCESSING") {
+        workerState.setStatus("BUSY", { currentTaskId: taskId });
+        await sleep(this.options.pollIntervalMs);
+        continue;
       }
 
       if (status === "FAILED" || status === "TIMED_OUT") {
@@ -171,9 +195,12 @@ export class BrowserWorker {
     }
 
     const { status } = taskService.getTaskStatus(taskId);
-    if (status === "DISPATCHED") {
+    if (status === "DISPATCHED" || status === "PROCESSING") {
       taskService.markWaitingApproval(taskId);
       workerState.setStatus("NEEDS_APPROVAL", { currentTaskId: taskId });
+    } else if (status === "COMPLETED") {
+      workerState.setStatus("READY", { currentTaskId: null });
+      this.rateLimitRetryIndex = 0;
     } else {
       workerState.setStatus("READY", { currentTaskId: null });
     }

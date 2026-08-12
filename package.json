@@ -1,10 +1,11 @@
 {
-  "name": "cursor-chatgpt-handoff",
+  "name": "chatgpt-mcp",
   "version": "1.0.0",
-  "description": "Cursor ↔ ChatGPT Handoff MVP — MCP task bridge with Playwright dispatcher",
+  "description": "chatgpt-mcp — Cursor ↔ ChatGPT MCP task bridge with Playwright dispatcher",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
+    "chatgpt-mcp": "dist/index.js",
     "handoff": "dist/index.js"
   },
   "scripts": {
@@ -23,7 +24,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "dotenv": "^16.4.7",
-    "playwright": "^1.50.1",
+    "playwright": "^1.62.1",
     "ulid": "^2.3.0",
     "zod": "^3.24.2"
   },

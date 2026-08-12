@@ -79,8 +79,8 @@ TypeScript
 Playwright chỉ chịu trách nhiệm:
 
 ```text
-✓ mở/activate ChatGPT
-✓ mở worker conversation
+✓ attach vào Chrome đang chạy (CDP)
+✓ goto CHATGPT_WORKER_URL
 ✓ nhập task_id
 ✓ submit message
 ```
@@ -88,6 +88,8 @@ Playwright chỉ chịu trách nhiệm:
 Không chịu trách nhiệm:
 
 ```text
+✗ launch dedicated automation profile
+✗ automating ChatGPT / Google login
 ✗ đọc ChatGPT response
 ✗ click Copy response
 ✗ parse markdown response
@@ -192,7 +194,7 @@ và cần recovery ở V2 hoặc một manual resume nhỏ.
 ┌──────────────────────────────────────┐
 │          Cursor IDE Agent            │
 │                                      │
-│ .cursor/rules/chatgpt-handoff.mdc    │
+│ .cursor/rules/chatgpt-mcp.mdc        │
 └──────────────────┬───────────────────┘
                    │
                    │ MCP create_task()
@@ -293,7 +295,7 @@ MVP business logic không phụ thuộc transport.
 # 7. Project Structure
 
 ```text
-cursor-chatgpt-handoff/
+chatgpt-mcp/
 │
 ├── package.json
 ├── tsconfig.json
@@ -338,7 +340,7 @@ cursor-chatgpt-handoff/
 ├── .cursor/
 │   ├── hooks.json
 │   └── rules/
-│       └── chatgpt-handoff.mdc
+│       └── chatgpt-mcp.mdc
 │
 ├── data/
 │   └── handoff.sqlite
@@ -656,7 +658,7 @@ Không trả result.
 File:
 
 ```text
-.cursor/rules/chatgpt-handoff.mdc
+.cursor/rules/chatgpt-mcp.mdc
 ```
 
 Content:
@@ -1107,34 +1109,27 @@ generated class names
 
 # 22. Browser Session
 
-Persistent Playwright profile:
+Attach to an already-running Chrome via CDP.
+
+Chrome 136+ does **not** honor `--remote-debugging-port` / `--remote-debugging-pipe` against the default user-data-dir. The worker therefore attaches to a dedicated CDP Chrome (`--user-data-dir` pointing at a non-standard directory). The user must sign into ChatGPT in **that** window. Do not copy the Default profile (different encryption key). Chrome 144+ `chrome://inspect/#remote-debugging` Auto Connect is a different protocol (chrome-devtools-mcp); it is not this worker's Playwright `connectOverCDP(http://127.0.0.1:9222)` path.
 
 ```text
-./data/chatgpt-profile/
+CHATGPT_CDP_ENDPOINT=http://127.0.0.1:9222
+CHATGPT_WORKER_URL=https://chatgpt.com/c/<worker-chat-id>
 ```
 
 Startup:
 
 ```ts
-chromium.launchPersistentContext(profilePath, {
-  headless: false
-});
+const browser = await chromium.connectOverCDP(cdpEndpoint);
+// navigate to CHATGPT_WORKER_URL — no sidebar title lookup
 ```
 
-MVP should run headed.
-
-Reason:
-
-```text
-easier login
-easier approval
-easier debugging
-easier recovery
-```
+Do **not** use `launchPersistentContext()` as the worker's browser launcher. A dedicated `--user-data-dir` for CDP is required by Chrome 136+ and is not the same as Playwright launching its own automation profile.
 
 Do not implement credential/password automation.
 
-User manually logs in once.
+If the attached Chrome is logged out → `SESSION_NOT_READY` / fail. No login fallback to bundled Chromium.
 
 ---
 

@@ -22,7 +22,7 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString("utf-8");
 }
 
-export function startHttpApi(options: HttpApiOptions): void {
+export function startHttpApi(options: HttpApiOptions): Promise<void> {
   initDatabase(options.dbPath);
   const repo = new TaskRepository(getDatabase());
   const taskService = new TaskService(repo);
@@ -90,11 +90,27 @@ export function startHttpApi(options: HttpApiOptions): void {
     }
   });
 
-  server.listen(options.port, "127.0.0.1", () => {
-    log({
-      event: "INFO",
-      component: "http-api",
-      message: `Status API listening on http://127.0.0.1:${options.port}`,
+  return new Promise((resolve, reject) => {
+    server.once("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE") {
+        reject(
+          new Error(
+            `Port ${options.port} already in use — a worker is already running. ` +
+              `Check: curl -s http://127.0.0.1:${options.port}/health  ` +
+              `Do not start a second \`npm run worker\`.`
+          )
+        );
+        return;
+      }
+      reject(err);
+    });
+    server.listen(options.port, "127.0.0.1", () => {
+      log({
+        event: "INFO",
+        component: "http-api",
+        message: `Status API listening on http://127.0.0.1:${options.port}`,
+      });
+      resolve();
     });
   });
 }
