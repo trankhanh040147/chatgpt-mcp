@@ -1,7 +1,12 @@
 {
   "name": "chatgpt-mcp",
-  "version": "1.0.0",
-  "description": "chatgpt-mcp — Cursor ↔ ChatGPT MCP task bridge with Playwright dispatcher",
+  "version": "0.1.0-preview.1",
+  "description": "Cursor ↔ ChatGPT MCP handoff (macOS supported, Linux experimental)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trankhanh040147/chatgpt-mcp.git"
+  },
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -20,13 +25,14 @@
     "e2e:reliability": "tsx scripts/e2e-reliability.ts",
     "e2e:reliability:20": "tsx scripts/e2e-reliability.ts --runs=20",
     "setup": "tsx scripts/setup.ts",
-    "check": "tsx scripts/check.ts"
+    "check": "tsx scripts/check.ts",
+    "chrome-cdp": "node scripts/start-chrome-cdp.mjs"
   },
   "engines": {
     "node": ">=22.5"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "dotenv": "^16.4.7",
     "playwright": "^1.62.1",
     "ulid": "^2.3.0",

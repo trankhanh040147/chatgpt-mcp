@@ -1,23 +1,25 @@
 # chatgpt-mcp
 
-**Status:** macOS developer preview (not production). Unofficial — not affiliated with OpenAI or Cursor.
+**Status:** developer preview `0.1.0-preview.1` (not production). Unofficial — not affiliated with OpenAI or Cursor.
 
-Bridge Cursor IDE Agent with ChatGPT Web for external reasoning, research, and review — without scraping ChatGPT output.
+**Platforms:** **Supported** macOS · **Experimental** Linux desktop (Ubuntu) · Windows not supported.
+
+chatgpt-mcp lets Cursor delegate a task to a dedicated ChatGPT Web worker through MCP and receive the result back — CDP only sends the task ID, never scrapes the answer.
 
 ```
 Cursor create_task → SQLite → Browser worker (CDP attach) types TASK_ID →
 ChatGPT get_task / submit_result via MCP → Cursor stop hook resumes → get_result
 ```
 
-See [docs/spec.md](docs/spec.md) for the full specification.
-See [docs/architecture.md](docs/architecture.md) for how MCP and this handoff flow work.
+See [docs/spec.md](docs/spec.md) · [docs/architecture.md](docs/architecture.md) · [docs/connect-chatgpt.md](docs/connect-chatgpt.md)
 
 ## Prerequisites
 
-- macOS + Node.js 22.5+ (uses the built-in `node:sqlite` module)
-- Python 3 (for Cursor hooks in this repo)
-- **Google Chrome** with CDP on a **dedicated** user-data-dir (see below). Chrome 136+ will **not** honor `--remote-debugging-port` on your daily Default profile.
-- ChatGPT account with **Developer Mode** + MCP **write** where your plan/workspace allows it (Plus may be read-only — check current OpenAI docs)
+- Node.js 22.5+ (built-in `node:sqlite`)
+- Python 3 (Cursor hooks in this repo)
+- Google Chrome / Chromium with CDP on a **dedicated** user-data-dir (Chrome 136+ will **not** debug the Default profile)
+- ChatGPT **Developer Mode** + MCP write where your plan/workspace allows it
+- Linux experimental: graphical session (`DISPLAY` or `WAYLAND_DISPLAY`); not WSL/headless
 
 ## Quick Start
 
@@ -27,8 +29,8 @@ npm run build
 npm run setup          # creates ~/.chatgpt-mcp + prints Cursor MCP JSON
 # edit .env → set CHATGPT_WORKER_URL
 
-./scripts/start-chrome-cdp.sh   # login ChatGPT in THAT window
-npm run remote-mcp              # + HTTPS tunnel for ChatGPT connector
+./scripts/start-chrome-cdp.sh   # macOS/Linux: dedicated profile under ~/.chatgpt-mcp/chrome-profile
+npm run remote-mcp              # loopback :8790/mcp — prefer Secure MCP Tunnel (see docs/connect-chatgpt.md)
 npm run worker
 npm run check                   # preflight
 ```
@@ -37,11 +39,22 @@ Paste the JSON from `npm run setup` into `~/.cursor/mcp.json`, then reload Curso
 
 ## Limitations (read before opening issues)
 
-- macOS-only preview; Windows/Linux not supported yet
+- macOS supported; Linux **experimental** (Ubuntu desktop + Google Chrome stable — not Snap/WSL/headless); Windows unsupported
 - One user, one dedicated Chrome profile, one worker chat, one concurrent handoff
 - No login/CAPTCHA/approval automation; UI selectors can break when ChatGPT changes
-- Do not send sensitive code over an unauthenticated public tunnel — prefer Secure MCP Tunnel; ngrok is a fallback for non-sensitive evaluation only
-- Transport canary (local): 10/10 consecutive PASS observed; full ≥18/20 gate optional for release claims
+- For private tasks use **OpenAI Secure MCP Tunnel**. Public no-auth tunnels are evaluation-only — do **not** tunnel `:8787` (status/worker). Only expose `/mcp` on `:8790`
+- MCP stack: `@modelcontextprotocol/sdk@1.30.0` (Streamable HTTP + stdio). Compatibility pin — not a “latest-spec SOTA” claim
+- Transport canary (maintainer): 10/10 consecutive PASS; full ≥18/20 gate optional for stronger claims
+
+### Existing Chrome profile users
+
+If you already use `~/chrome-chatgpt-debug`, keep it:
+
+```bash
+export CHATGPT_CDP_USER_DATA_DIR=~/chrome-chatgpt-debug
+```
+
+The launcher will also auto-prefer that legacy directory when it exists and the new `$CHATGPT_MCP_HOME/chrome-profile` does not. Profiles are **not** copied automatically — close Chrome before changing directories.
 
 ## Use from other Cursor conversations
 
@@ -55,14 +68,14 @@ Say: `handoff sang ChatGPT: <câu hỏi>` or `chạy task ChatGPT: <prompt>`. Th
 
 ## First-Time ChatGPT Setup
 
-1. Run `./scripts/start-chrome-cdp.sh` (dedicated `$HOME/chrome-chatgpt-debug`). Do **not** point `--user-data-dir` at `~/Library/Application Support/Google/Chrome`.
-2. Log into ChatGPT manually in **that** window (no automation). Daily Chrome stays untouched and cannot be attached.
+1. Run `./scripts/start-chrome-cdp.sh` (dedicated `$CHATGPT_MCP_HOME/chrome-profile`, or legacy `CHATGPT_CDP_USER_DATA_DIR`). Do **not** use your daily Default Chrome profile.
+2. Log into ChatGPT manually in **that** window (no automation).
 3. Enable **Developer Mode** in ChatGPT settings.
-4. Connect the remote MCP server (Secure MCP Tunnel or HTTPS tunnel → `npm run remote-mcp` on `:8790/mcp`).
+4. Connect remote MCP — **prefer Secure MCP Tunnel** ([docs/connect-chatgpt.md](docs/connect-chatgpt.md)). Avoid public tunnels for private code.
 5. Open/create the worker conversation and copy its URL into `CHATGPT_WORKER_URL`.
 6. Paste the worker instructions from [docs/spec.md §17](docs/spec.md).
 7. Run `npm run worker` — it attaches via CDP and navigates to that URL.
-8. Test `handoff_get_task` / `handoff_submit_result`; approve MCP write for the conversation.
+8. Approve MCP write tools (`handoff_get_task`, `handoff_submit_result`) for the conversation.
 
 The worker **never** launches a dedicated Playwright profile and **never** automates login. If the attached Chrome is logged out, it fails with `SESSION_NOT_READY`.
 

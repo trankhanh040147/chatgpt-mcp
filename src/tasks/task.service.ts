@@ -63,14 +63,26 @@ export class TaskService {
   submitResult(input: SubmitResultInput): {
     success: boolean;
     status: "COMPLETED";
+    idempotent?: boolean;
   } {
     const task = this.repo.getTaskById(input.taskId);
     if (!task) {
       throw new Error(`Task not found: ${input.taskId}`);
     }
 
+    const sanitizedResult = sanitizeSecrets(input.result);
+    const metadata = input.metadata
+      ? (sanitizeContext(
+          input.metadata as Record<string, unknown>
+        ) as HandoffResultMetadata)
+      : undefined;
+
     if (task.status === "COMPLETED") {
-      return { success: true, status: "COMPLETED" };
+      return this.reconcileCompletedSubmit(
+        task,
+        sanitizedResult,
+        input.taskId
+      );
     }
 
     if (
@@ -83,22 +95,46 @@ export class TaskService {
       );
     }
 
-    const sanitizedResult = sanitizeSecrets(input.result);
-    const metadata = input.metadata
-      ? (sanitizeContext(
-          input.metadata as Record<string, unknown>
-        ) as HandoffResultMetadata)
-      : undefined;
+    const changed = this.repo.saveResultIfOpen(
+      input.taskId,
+      sanitizedResult,
+      metadata
+    );
+    if (changed === 1) {
+      logTransition("task-service", input.taskId, task.status, "COMPLETED");
+      log({
+        event: "RESULT_RECEIVED",
+        component: "task-service",
+        taskId: input.taskId,
+      });
+      return { success: true, status: "COMPLETED" };
+    }
 
-    this.repo.saveResult(input.taskId, sanitizedResult, metadata);
-    logTransition("task-service", input.taskId, task.status, "COMPLETED");
-    log({
-      event: "RESULT_RECEIVED",
-      component: "task-service",
-      taskId: input.taskId,
-    });
+    // Lost race — another submit completed first.
+    const again = this.repo.getTaskById(input.taskId);
+    if (!again) {
+      throw new Error(`Task not found: ${input.taskId}`);
+    }
+    return this.reconcileCompletedSubmit(again, sanitizedResult, input.taskId);
+  }
 
-    return { success: true, status: "COMPLETED" };
+  private reconcileCompletedSubmit(
+    task: HandoffTask,
+    incomingResult: string,
+    taskId: string
+  ): { success: boolean; status: "COMPLETED"; idempotent?: boolean } {
+    if (task.status !== "COMPLETED") {
+      throw new Error(
+        `Cannot submit result for task in status ${task.status}`
+      );
+    }
+    const existing = task.result ?? "";
+    if (existing === incomingResult) {
+      return { success: true, status: "COMPLETED", idempotent: true };
+    }
+    throw new Error(
+      `Task already completed with a different result (idempotent conflict): ${taskId}`
+    );
   }
 
   getResult(taskId: string): {

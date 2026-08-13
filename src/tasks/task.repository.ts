@@ -129,16 +129,21 @@ export class TaskRepository {
       .run(...values);
   }
 
-  saveResult(
+  /**
+   * First completion only. Returns rows changed (0 or 1).
+   * Callers must handle 0 as race/already-completed and reload.
+   */
+  saveResultIfOpen(
     id: string,
     result: string,
     metadata?: HandoffResultMetadata
-  ): void {
-    this.db
+  ): number {
+    const info = this.db
       .prepare(
         `UPDATE handoff_tasks
          SET status = ?, result = ?, result_metadata_json = ?, completed_at = ?
-         WHERE id = ?`
+         WHERE id = ?
+           AND status IN ('DISPATCHED', 'PROCESSING', 'WAITING_APPROVAL')`
       )
       .run(
         "COMPLETED",
@@ -147,6 +152,16 @@ export class TaskRepository {
         new Date().toISOString(),
         id
       );
+    return Number(info.changes ?? 0);
+  }
+
+  /** @deprecated Prefer saveResultIfOpen for concurrent-safe completion. */
+  saveResult(
+    id: string,
+    result: string,
+    metadata?: HandoffResultMetadata
+  ): void {
+    this.saveResultIfOpen(id, result, metadata);
   }
 
   findPendingByConversation(conversationId: string): HandoffTask | null {

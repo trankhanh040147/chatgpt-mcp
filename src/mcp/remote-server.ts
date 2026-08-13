@@ -69,8 +69,14 @@ export function startRemoteMcpServer(options: RemoteMcpOptions): void {
       const body = await readJsonBody(req);
 
       const mcpServer = new McpServer(
-        { name: "chatgpt-mcp-remote", version: "1.0.0" },
-        { capabilities: { tools: {} } }
+        { name: "chatgpt-mcp-remote", version: "0.1.0" },
+        {
+          capabilities: { tools: {} },
+          instructions:
+            "Fetch only the task ID supplied in the chat (TASK_ID=ho_…). " +
+            "Complete that task, then submit exactly one result for the same ID. " +
+            "Never enumerate or guess task IDs.",
+        }
       );
       registerHandoffTools(mcpServer, taskService);
 

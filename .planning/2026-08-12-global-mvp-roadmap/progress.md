@@ -1,13 +1,20 @@
-# Progress — E2E harness P0 + public pre-release prep
+# Progress — MVP release implementation
 
-## Session: 2026-08-12
+## 2026-08-13
 
-### Phase: E2E harness
-- Status: complete enough (user: 10 PASS)
-- Live E2E + review fixes applied
+### Implemented
+- Cross-platform CDP launcher `scripts/start-chrome-cdp.mjs` (+ `.sh` wrapper)
+- Legacy profile auto-prefer `~/chrome-chatgpt-debug`; CDP ready poll
+- MCP tool annotations, bounds, server instructions; shared `registerHandoffTools`
+- Conditional `saveResultIfOpen` + idempotent/conflict `submitResult`
+- SDK pin `1.30.0`; package `0.1.0-preview.1`
+- `docs/connect-chatgpt.md` Secure Tunnel first; README platform badges + migration
+- `npm run check` platform/sdk/desktop
 
-### Phase: Public pre-release prep (day 2)
-- Status: in_progress → done locally
-- Added: MIT LICENSE, CHATGPT_MCP_HOME defaults, `npm run setup` / `check`
-- README: developer preview + limitations; scrubbed vault path note
-- Next product step: freeze benchmark fixtures OR publicize repo after commit/push
+### Self-review
+- Handoff `ho_01KZW6HQG7JQT6KZ0YQMW35PS4` → ship-with-fixes → applied
+
+### Still deferred
+- Ubuntu live E2E (label remains experimental)
+- Full ≥18/20 gate / A/B benchmark
+- OAuth / SDK v2

@@ -1,15 +1,14 @@
 #!/usr/bin/env npx tsx
 /**
- * Preflight checks for chatgpt-mcp (macOS developer preview).
- * Exit 0 only if all required checks pass.
+ * Preflight checks for chatgpt-mcp.
+ * Supported: macOS. Experimental: Linux desktop (DISPLAY/Wayland).
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 
-const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const repoRoot = process.cwd();
 loadEnv({ path: join(repoRoot, ".env") });
 
 function resolveUserPath(raw: string): string {
@@ -20,7 +19,6 @@ function resolveUserPath(raw: string): string {
 }
 
 type Row = { name: string; ok: boolean; detail: string };
-
 const rows: Row[] = [];
 
 function check(name: string, ok: boolean, detail: string): void {
@@ -35,6 +33,45 @@ async function main(): Promise<void> {
     "node",
     major > 22 || (major === 22 && minor >= 5),
     `v${process.versions.node} (need >=22.5)`
+  );
+
+  const platformOk =
+    process.platform === "darwin" || process.platform === "linux";
+  check(
+    "platform",
+    platformOk,
+    `${process.platform} (${process.platform === "darwin" ? "supported" : process.platform === "linux" ? "experimental" : "unsupported"})`
+  );
+
+  if (process.platform === "linux") {
+    const hasDisplay = Boolean(
+      process.env.DISPLAY || process.env.WAYLAND_DISPLAY
+    );
+    check(
+      "desktop",
+      hasDisplay,
+      hasDisplay
+        ? `DISPLAY=${process.env.DISPLAY ?? ""} WAYLAND=${process.env.WAYLAND_DISPLAY ?? ""}`
+        : "NO_DESKTOP_SESSION — need DISPLAY or WAYLAND_DISPLAY"
+    );
+  }
+
+  let sdkVersion = "unknown";
+  try {
+    const pkgPath = join(
+      repoRoot,
+      "node_modules/@modelcontextprotocol/sdk/package.json"
+    );
+    sdkVersion =
+      (JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string })
+        .version ?? "unknown";
+  } catch {
+    /* ignore */
+  }
+  check(
+    "mcp_sdk",
+    sdkVersion.startsWith("1.30."),
+    `@modelcontextprotocol/sdk@${sdkVersion} (expect 1.30.x)`
   );
 
   const dist = join(repoRoot, "dist", "index.js");
@@ -101,13 +138,12 @@ async function main(): Promise<void> {
     const res = await fetch(`http://127.0.0.1:${remotePort}/mcp`, {
       method: "GET",
     });
-    // Any HTTP response means something is listening (405/404/401 ok).
     check("remote_mcp", res.status > 0, `:${remotePort} status=${res.status}`);
   } catch {
     check(
       "remote_mcp",
       false,
-      `:${remotePort} not up — npm run remote-mcp (needed for ChatGPT)`
+      `:${remotePort} not up — npm run remote-mcp (ChatGPT connector / Secure MCP Tunnel)`
     );
   }
 
