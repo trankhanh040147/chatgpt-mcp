@@ -1,5 +1,7 @@
 # Revised MVP — fast · easy · benchmark proof
 
+> Historical execution plan. Current version scope and exit criteria: [docs/roadmap.md](../../docs/roadmap.md).
+
 **Date:** 2026-08-12  
 **Handoff:** `ho_01KZV6SPJ24GRE68VJV5B7AGVQ`  
 **Supersedes emphasis of:** prior “heavy P0 before any public tag” plan
@@ -43,10 +45,10 @@ Marketplace, Windows/Linux, OAuth/hosted relay, dashboard, multi-worker, polishe
 
 1. ~~Live E2E → 20-run harness backbone~~ (10/10 PASS accepted)
 2. ~~Scrub + portable paths + LICENSE~~ (`setup`/`check`/`CHATGPT_MCP_HOME`)
-3. setup/start/check + 3 fresh-user timing tests ← **next**
-4. Freeze benchmark fixtures/prompts/rubric
-5–6. Run + blind score
-7. Publish table + tag preview only if numbers exist
+3. ~~setup/start/check + timing protocol~~ (`npm run start`; docs/onboarding-timing.md; stranger slots open)
+4. ~~Freeze benchmark fixtures/prompts/rubric~~ (`docs/benchmark/` bench-v1)
+5–6. Run + blind score ← **next** (20 runs; do not invent README table)
+7. Publish table + tag only if numbers exist
 
 ## Critical note
 
