@@ -9,7 +9,7 @@ This system lets **Cursor** ask **ChatGPT** for an independent pass (research, r
 - Cursor creates a **task** via MCP.
 - A local **browser worker** only types a short `TASK_ID` into a dedicated ChatGPT chat.
 - ChatGPT reads the full prompt and writes the answer back **through MCP tools**.
-- Cursor polls (or a stop hook waits) and then continues with `handoff_get_result`.
+- Cursor polls (or a stop hook **long-polls** `GET /tasks/:id/wait`) and then continues with `handoff_get_result`.
 
 **MCP** here means *Model Context Protocol*: a standard way for an AI client to call **tools** on a server (like a plugin API), not a ChatGPT “GPT store plugin” from the old Plugins marketplace.
 
@@ -68,17 +68,18 @@ Cursor handoff_get_result → continue work
 | Piece | Job |
 |-------|-----|
 | **Cursor MCP (stdio)** | Create/poll/fetch tasks for the coding agent |
-| **SQLite** | Single source of truth for task status + result |
-| **Browser worker** | Attaches to Chrome via CDP; opens worker URL; submits `TASK_ID` |
 | **Remote MCP (HTTP)** | Lets ChatGPT call `get_task` / `submit_result` from the cloud |
-| **Tunnel (e.g. ngrok)** | Gives ChatGPT a public HTTPS URL to localhost `:8790` |
-| **Stop hook** (this repo only) | After create_task, polls until done and injects a follow-up |
+| **Tunnel (e.g. Secure MCP Tunnel / ngrok)** | Gives ChatGPT a public HTTPS URL to localhost `:8790` |
+| **SQLite** | Single source of truth for task status + result |
+| **Browser worker** | Attaches to Chrome via CDP; opens worker URL; types `TASK_ID` only |
+| **Stop hook** (Cursor, this repo) | Optional UX: long-poll until done and inject follow-up. Not required for correctness — `taskId` + status/result tools suffice. |
+| **Session id** | Optional `clientSessionId` (Cursor injects `cursorConversationId` alias). If omitted → stored as `unscoped`; auto-resume will not attach. |
 
 ### Tools
 
 | Tool | Caller | Purpose |
 |------|--------|---------|
-| `handoff_create_task` | Cursor | Create task → `QUEUED` |
+| `handoff_create_task` | Coding agent | Create task → `QUEUED` (optional `clientSessionId`) |
 | `handoff_get_task_status` | Both | Poll status without full result |
 | `handoff_get_result` | Cursor | Read completed answer |
 | `handoff_get_task` | ChatGPT | Load full prompt + context |

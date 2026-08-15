@@ -29,5 +29,9 @@ After the connector works:
 
 1. Open a dedicated ChatGPT conversation in the **CDP Chrome** profile
 2. Set `CHATGPT_WORKER_URL` to that chat URL
-3. Paste worker instructions from [spec.md §17](spec.md)
-4. `npm run worker` types only `TASK_ID=ho_…` into that chat
+3. Paste worker instructions from [spec.md §17](spec.md) (includes submit-authorization rules for schema/EXPLAIN content)
+4. `npm run worker` types only `TASK_ID=ho_…` plus a short submit-policy hint into that chat
+
+If ChatGPT replies with “Submission was blocked… approve sending…” instead of calling `handoff_submit_result`, that is a **model soft-refuse**, not a server rejection. Re-paste §17 instructions, ensure remote-mcp was restarted after policy updates, then reply in the worker chat: `Approved — submit the full technical result for this TASK_ID via handoff_submit_result now.`
+
+**Queue note:** after the approval wait timeout (~120s default), the worker marks the task **`TIMED_OUT`** (not `WAITING_APPROVAL`) and immediately claims the next QUEUED task. Cursor's stop hook waits at most ~180s and fires **one** followup (`loop_limit: 1`).
