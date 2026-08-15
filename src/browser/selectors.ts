@@ -2,6 +2,7 @@
  * Centralized ChatGPT UI selectors.
  * Update these when ChatGPT UI changes — never scatter selectors elsewhere.
  */
+
 export const selectors = {
   /**
    * Main message composer. Prefer the visible ProseMirror `#prompt-textarea`
@@ -13,6 +14,9 @@ export const selectors = {
   /** Send / submit button */
   sendButton:
     'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send"]',
+  /** Streaming / thinking — composer will drop typed text while this is visible. */
+  stopButton:
+    'button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"], button[aria-label="Stop"]',
   /** New chat button */
   newChatButton:
     'a[href="/"], button:has-text("New chat"), [data-testid="create-new-chat-button"]',
@@ -33,5 +37,5 @@ export const selectors = {
   rateLimitBanner: ':text("rate limit"), :text("Rate limit"), :text("too many requests")',
 } as const;
 
-export const DISPATCH_MESSAGE = (taskId: string): string =>
-  `Process Cursor handoff TASK_ID=${taskId}.\n\nUse the Handoff MCP tools and follow the worker instructions.`;
+/** One line only — long dispatch text is truncated by ChatGPT's composer. */
+export const DISPATCH_MESSAGE = (taskId: string): string => `TASK_ID=${taskId}`;

@@ -61,8 +61,13 @@ export interface CreateTaskInput {
   type: HandoffTaskType;
   prompt: string;
   context?: HandoffTaskContext;
+  /** Host session / correlation key. Optional for portable MCP hosts. */
   cursorConversationId: string;
 }
+
+/** Sentinel when the host does not supply a session id (manual poll by taskId). */
+export const UNSCOPED_CLIENT_SESSION_ID = "unscoped";
+
 
 export interface SubmitResultInput {
   taskId: string;

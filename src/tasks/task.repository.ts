@@ -169,7 +169,7 @@ export class TaskRepository {
       .prepare(
         `SELECT * FROM handoff_tasks
          WHERE cursor_conversation_id = ?
-           AND status IN ('QUEUED', 'DISPATCHING', 'DISPATCHED', 'PROCESSING', 'WAITING_APPROVAL', 'RATE_LIMITED')
+           AND status IN ('QUEUED', 'DISPATCHING', 'DISPATCHED', 'PROCESSING', 'RATE_LIMITED')
          ORDER BY created_at ASC
          LIMIT 1`
       )
@@ -308,6 +308,38 @@ export class TaskRepository {
          WHERE status = 'DISPATCHED'
            AND dispatched_at IS NOT NULL
            AND dispatched_at < ?`
+      )
+      .all(beforeIso) as unknown as TaskRow[];
+    return rows.map(rowToTask);
+  }
+
+  findStaleOpenTasks(beforeIso: string): HandoffTask[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM handoff_tasks
+         WHERE (
+           (status = 'DISPATCHED' AND dispatched_at IS NOT NULL AND dispatched_at < ?)
+           OR (status = 'PROCESSING' AND processing_at IS NOT NULL AND processing_at < ?)
+         )`
+      )
+      .all(beforeIso, beforeIso) as unknown as TaskRow[];
+    return rows.map(rowToTask);
+  }
+
+  findLegacyWaitingApproval(): HandoffTask[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM handoff_tasks WHERE status = 'WAITING_APPROVAL'`)
+      .all() as unknown as TaskRow[];
+    return rows.map(rowToTask);
+  }
+
+  /** Mid-claim crash: status DISPATCHING but worker died before DISPATCHED. */
+  findStuckDispatching(beforeIso: string): HandoffTask[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM handoff_tasks
+         WHERE status = 'DISPATCHING'
+           AND created_at < ?`
       )
       .all(beforeIso) as unknown as TaskRow[];
     return rows.map(rowToTask);

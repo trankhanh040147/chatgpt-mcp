@@ -1,5 +1,6 @@
 import type { Browser, BrowserContext, Page } from "playwright";
 import { selectors, DISPATCH_MESSAGE } from "./selectors.js";
+import { SUBMIT_NUDGE_MESSAGE } from "../mcp/worker-policy.js";
 import { log } from "../logging/logger.js";
 
 export interface ChatGptBrowserOptions {
@@ -48,6 +49,15 @@ export class ChatGptBrowser {
     }
 
     this.page =
+      this.context
+        .pages()
+        .find((p) => {
+          const workerUrl = this.options.workerUrl;
+          if (workerUrl && p.url().startsWith(workerUrl.split("?")[0]!)) {
+            return true;
+          }
+          return /chatgpt\.com\/c\//i.test(p.url());
+        }) ??
       this.context
         .pages()
         .find((p) => /chatgpt\.com/i.test(p.url())) ??
@@ -128,13 +138,18 @@ export class ChatGptBrowser {
       );
     }
 
-    await page.goto(workerUrl, { waitUntil: "domcontentloaded" });
-    await page
-      .waitForLoadState("networkidle", { timeout: 15000 })
-      .catch(() => {});
-    await page.waitForTimeout(1500);
+    // Reloading mid-stream drops composer text and can steal TASK_ID.
+    if (!sameWorkerChat(page.url(), workerUrl)) {
+      await page.goto(workerUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 30_000,
+      });
+      await page
+        .waitForLoadState("networkidle", { timeout: 15_000 })
+        .catch(() => {});
+      await page.waitForTimeout(1500);
+    }
 
-    // ChatGPT redirects unknown/inaccessible chats back to /.
     const current = page.url();
     if (!/\/c\/[a-z0-9-]+/i.test(current)) {
       await this.screenshotOnFailure("worker-url-redirected");
@@ -180,23 +195,8 @@ export class ChatGptBrowser {
 
     const composer = page.locator(selectors.composer).first();
     await composer.waitFor({ state: "visible", timeout: 30000 });
-    await composer.scrollIntoViewIfNeeded().catch(() => undefined);
-
-    // ChatGPT overlays often block actionability while ProseMirror stays visible.
-    await composer.evaluate((el) => {
-      (el as HTMLElement).focus();
-    });
-    try {
-      await composer.click({ timeout: 5000 });
-    } catch {
-      await composer.click({ force: true, timeout: 5000 });
-    }
-
-    await page.keyboard.press(
-      process.platform === "darwin" ? "Meta+A" : "Control+A"
-    );
-    await page.keyboard.press("Backspace");
-    await page.keyboard.type(message, { delay: 5 });
+    await this.waitForComposerIdle(page);
+    await this.fillComposer(page, composer, message);
 
     const typed = ((await composer.innerText().catch(() => "")) ?? "").replace(
       /\s+/g,
@@ -235,6 +235,72 @@ export class ChatGptBrowser {
     }
   }
 
+  /** Short reminder to call handoff_submit_result (best-effort, idempotent per nudge stage). */
+  async sendSubmitNudge(taskId: string): Promise<void> {
+    const page = this.getPage();
+    const message = SUBMIT_NUDGE_MESSAGE(taskId);
+    const marker = `TASK_ID=${taskId}`;
+
+    const composer = page.locator(selectors.composer).first();
+    await composer.waitFor({ state: "visible", timeout: 15000 });
+    await this.waitForComposerIdle(page);
+    await this.fillComposer(page, composer, message);
+
+    const sendButton = page.locator(selectors.sendButton).first();
+    if (await sendButton.isVisible({ timeout: 3000 }).catch(() => false)) {
+      try {
+        await sendButton.click({ timeout: 5000 });
+      } catch {
+        await sendButton.click({ force: true, timeout: 5000 });
+      }
+    } else {
+      await page.keyboard.press("Enter");
+    }
+
+    log({
+      event: "INFO",
+      component: "browser-worker",
+      taskId,
+      message: `Sent submit nudge (${marker})`,
+    });
+  }
+
+  /** Wait until ChatGPT is not streaming — Send stays disabled while composer is empty. */
+  private async waitForComposerIdle(page: Page): Promise<void> {
+    const stop = page.locator(selectors.stopButton).first();
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      const streaming = await stop.isVisible({ timeout: 400 }).catch(() => false);
+      if (!streaming) return;
+      await page.waitForTimeout(500);
+    }
+    throw new Error(
+      "ChatGPT is still generating after 60s — wait for the composer to idle, then retry"
+    );
+  }
+
+  private async fillComposer(
+    page: Page,
+    composer: ReturnType<Page["locator"]>,
+    message: string
+  ): Promise<void> {
+    await composer.scrollIntoViewIfNeeded().catch(() => undefined);
+    await composer.evaluate((el) => {
+      (el as HTMLElement).focus();
+    });
+    try {
+      await composer.click({ timeout: 5000 });
+    } catch {
+      await composer.click({ force: true, timeout: 5000 });
+    }
+
+    await page.keyboard.press(
+      process.platform === "darwin" ? "Meta+A" : "Control+A"
+    );
+    await page.keyboard.press("Backspace");
+    await page.keyboard.insertText(message);
+  }
+
   async detectRateLimit(): Promise<boolean> {
     const page = this.getPage();
     const banner = page.locator(selectors.rateLimitBanner).first();
@@ -264,4 +330,12 @@ export class ChatGptBrowser {
     this.context = null;
     this.page = null;
   }
+}
+
+function sameWorkerChat(currentUrl: string, workerUrl: string): boolean {
+  const idOf = (url: string): string | undefined =>
+    url.match(/\/c\/([a-z0-9-]+)/i)?.[1]?.toLowerCase();
+  const current = idOf(currentUrl);
+  const expected = idOf(workerUrl);
+  return Boolean(current && expected && current === expected);
 }

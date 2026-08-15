@@ -197,6 +197,35 @@ export class TaskService {
     });
   }
 
+  /** Submit window expired — terminal so Cursor stop hook and queue can move on. */
+  markSubmitTimedOut(taskId: string, reason?: string): void {
+    const task = this.repo.getTaskById(taskId);
+    if (!task) return;
+    if (
+      task.status === "COMPLETED" ||
+      task.status === "TIMED_OUT" ||
+      task.status === "FAILED" ||
+      task.status === "CANCELLED"
+    ) {
+      return;
+    }
+
+    const error =
+      reason ??
+      "ChatGPT did not call handoff_submit_result within the approval window. " +
+        "Approve MCP write in the worker ChatGPT tab or retry the handoff.";
+
+    assertTransition(task.status, "TIMED_OUT");
+    this.repo.updateTaskStatus(taskId, "TIMED_OUT", { error });
+    logTransition("browser-worker", taskId, task.status, "TIMED_OUT");
+    log({
+      event: "TASK_TIMED_OUT",
+      component: "browser-worker",
+      taskId,
+      message: error,
+    });
+  }
+
   markReadyButCursorIdle(taskId: string): void {
     const task = this.repo.getTaskById(taskId);
     if (!task || task.status !== "COMPLETED") return;

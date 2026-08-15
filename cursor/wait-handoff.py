@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Poll handoff status and return followup_message when a task completes."""
+"""Wait for handoff completion and return followup_message for Cursor stop hook.
+
+Prefers GET /tasks/:id/wait (server long-poll). Falls back to local polling if
+the worker is an older build without that route.
+"""
 
 from __future__ import annotations
 
@@ -55,7 +59,7 @@ def find_pending_task(conversation_id: str) -> dict | None:
             WHERE cursor_conversation_id = ?
               AND status IN (
                 'QUEUED', 'DISPATCHING', 'DISPATCHED',
-                'PROCESSING', 'WAITING_APPROVAL', 'RATE_LIMITED'
+                'PROCESSING', 'RATE_LIMITED'
               )
             ORDER BY created_at ASC
             LIMIT 1
@@ -92,6 +96,30 @@ def get_task_status(task_id: str) -> str | None:
         conn.close()
 
 
+def wait_task_status(task_id: str, timeout_seconds: int) -> str | None:
+    """Block until terminal status via server long-poll. None = use local fallback."""
+    tick_ms = env_int("HANDOFF_WAIT_TICK_MS", 250)
+    url = (
+        f"{http_base()}/tasks/{urllib.parse.quote(task_id)}/wait"
+        f"?timeoutSeconds={timeout_seconds}&tickMs={tick_ms}"
+    )
+    # urllib timeout must exceed server long-poll budget.
+    http_timeout = timeout_seconds + 15
+    try:
+        with urllib.request.urlopen(url, timeout=http_timeout) as resp:
+            if resp.status == 404:
+                return None
+            payload = json.loads(resp.read().decode("utf-8"))
+            status = payload.get("status")
+            return status if isinstance(status, str) else None
+    except urllib.error.HTTPError as err:
+        if err.code == 404:
+            return None
+        return get_task_status(task_id)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return None
+
+
 def mark_ready_but_cursor_idle(task_id: str) -> None:
     url = f"{http_base()}/tasks/mark-idle"
     body = json.dumps({"taskId": task_id}).encode("utf-8")
@@ -118,6 +146,42 @@ def mark_ready_but_cursor_idle(task_id: str) -> None:
             conn.close()
 
 
+def completed_followup(task_id: str) -> str:
+    return json.dumps(
+        {
+            "followup_message": (
+                f"External ChatGPT handoff {task_id} completed. "
+                f"Call handoff_get_result with taskId {task_id}, "
+                "evaluate the result, and continue the original task. "
+                "Do not poll handoff_get_task_status again."
+            )
+        }
+    )
+
+
+def failed_followup(task_id: str, status: str) -> str:
+    return json.dumps(
+        {
+            "followup_message": (
+                f"External ChatGPT handoff {task_id} ended with status {status}. "
+                "Call handoff_get_result (or inspect worker logs / failure-*.png) to see the error, "
+                "tell the user what failed, and either retry the handoff or continue without it. "
+                "Do not keep polling status."
+            )
+        }
+    )
+
+
+def poll_locally(task_id: str, timeout: int, poll_interval: float) -> str | None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status = get_task_status(task_id)
+        if status in ("COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"):
+            return status
+        time.sleep(poll_interval)
+    return get_task_status(task_id)
+
+
 def main() -> None:
     event = json.load(sys.stdin)
     conversation_id = event.get("conversation_id")
@@ -132,51 +196,32 @@ def main() -> None:
         return
 
     task_id = pending["id"]
-    timeout = env_int("HANDOFF_WAIT_TIMEOUT", 480)
-    poll_interval = env_int("HANDOFF_POLL_INTERVAL", 2)
-    deadline = time.time() + timeout
+    timeout = env_int("HANDOFF_WAIT_TIMEOUT", 180)
+    poll_interval = float(os.environ.get("HANDOFF_POLL_INTERVAL", "0.5"))
 
-    while time.time() < deadline:
-        status = get_task_status(task_id)
-        if status == "COMPLETED":
-            print(
-                json.dumps(
-                    {
-                        "followup_message": (
-                            f"External ChatGPT handoff {task_id} completed. "
-                            f"Call handoff_get_result with taskId {task_id}, "
-                            "evaluate the result, and continue the original task."
-                        )
-                    }
-                )
-            )
-            return
-        if status in ("FAILED", "TIMED_OUT", "CANCELLED"):
-            print("{}")
-            return
-        time.sleep(poll_interval)
+    status = wait_task_status(task_id, timeout)
+    if status is None:
+        status = poll_locally(task_id, timeout, poll_interval)
 
-    final_status = get_task_status(task_id)
-    if final_status == "COMPLETED":
-        print(
-            json.dumps(
-                {
-                    "followup_message": (
-                        f"External ChatGPT handoff {task_id} completed. "
-                        f"Call handoff_get_result with taskId {task_id}, "
-                        "evaluate the result, and continue the original task."
-                    )
-                }
-            )
-        )
+    if status == "COMPLETED":
+        print(completed_followup(task_id))
         return
 
-    # Timed out — if result arrives later, mark for manual recovery
+    if status in ("FAILED", "TIMED_OUT", "CANCELLED"):
+        print(failed_followup(task_id, status))
+        return
+
+    # Timed out while still non-terminal — one followup (loop_limit caps repeats).
     later_status = get_task_status(task_id)
     if later_status == "COMPLETED":
         mark_ready_but_cursor_idle(task_id)
+        print(completed_followup(task_id))
+        return
+    if later_status in ("FAILED", "TIMED_OUT", "CANCELLED", "WAITING_APPROVAL"):
+        print(failed_followup(task_id, later_status))
+        return
 
-    print("{}")
+    print(failed_followup(task_id, later_status or "TIMEOUT"))
 
 
 if __name__ == "__main__":

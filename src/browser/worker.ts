@@ -16,17 +16,19 @@ export interface BrowserWorkerOptions {
   rateLimitBackoffMs: number[];
 }
 
-const BLOCKING_STATUSES: WorkerStatus[] = [
-  "NEEDS_APPROVAL",
-  "SESSION_LOST",
-  "ERROR",
-  "BUSY",
-];
+const BLOCKING_STATUSES: WorkerStatus[] = ["SESSION_LOST", "ERROR"];
+
+/** Nudge ChatGPT if submit has not landed by these elapsed ms since dispatch. */
+const NUDGE_AT_MS = [30_000, 90_000] as const;
 
 export class BrowserWorker {
   private running = false;
   private rateLimitRetryIndex = 0;
   private browser: ChatGptBrowser | null = null;
+  /** In-flight task polled across ticks — worker stays READY for HTTP but won't claim another. */
+  private activeTaskId: string | null = null;
+  private activeTaskStartedAt = 0;
+  private nudgeStage = 0;
 
   constructor(private readonly options: BrowserWorkerOptions) {}
 
@@ -54,11 +56,17 @@ export class BrowserWorker {
         workerState.setStatus("SESSION_LOST", {
           error: "SESSION_NOT_READY: log into ChatGPT in the attached Chrome",
         });
-        return;
+        while (this.running) {
+          await sleep(10_000);
+          const ok = await browser.ensureSessionReady();
+          if (ok) break;
+        }
+        if (!this.running) return;
       }
 
       await browser.openWorkerConversation();
-      workerState.setStatus("READY");
+      this.recoverOnStart(taskService, workerState);
+      workerState.setStatus("READY", { currentTaskId: null, error: null });
 
       log({
         event: "INFO",
@@ -87,7 +95,6 @@ export class BrowserWorker {
     this.running = false;
   }
 
-  /** Disconnects CDP; does not quit the user's Chrome. */
   async close(): Promise<void> {
     this.running = false;
     await this.browser?.close();
@@ -98,6 +105,11 @@ export class BrowserWorker {
     workerState: WorkerStateManager,
     browser: ChatGptBrowser
   ): Promise<void> {
+    if (this.activeTaskId) {
+      await this.pollActiveTask(taskService, workerState, browser);
+      return;
+    }
+
     const status = workerState.getStatus();
 
     if (status === "RATE_LIMITED") {
@@ -113,7 +125,6 @@ export class BrowserWorker {
       return;
     }
 
-    // Do not claim new work while blocked or still busy with a task.
     if (BLOCKING_STATUSES.includes(status)) {
       return;
     }
@@ -124,7 +135,7 @@ export class BrowserWorker {
 
     const task = taskService.claimNextQueued();
     if (!task) {
-      await this.checkStaleDispatched(taskService, workerState);
+      await this.checkStaleOpenTasks(taskService);
       return;
     }
 
@@ -146,79 +157,143 @@ export class BrowserWorker {
       await browser.openWorkerConversation();
       await browser.submitTaskId(task.id);
       taskService.markDispatched(task.id);
-      workerState.setStatus("BUSY", { currentTaskId: task.id });
 
-      await this.waitForCompletionOrApproval(
-        taskService,
-        workerState,
-        task.id
-      );
+      this.activeTaskId = task.id;
+      this.activeTaskStartedAt = Date.now();
+      this.nudgeStage = 0;
+      workerState.setStatus("BUSY", { currentTaskId: task.id });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await browser.screenshotOnFailure(task.id);
       taskService.markDispatchFailed(task.id, message);
-      workerState.setStatus("ERROR", { error: message, currentTaskId: null });
-      await sleep(5000);
+      log({
+        event: "WARN",
+        component: "browser-worker",
+        taskId: task.id,
+        message: `Dispatch failed (will retry if remaining): ${message}`,
+      });
       workerState.setStatus("READY", { currentTaskId: null, error: null });
     }
   }
 
-  private async waitForCompletionOrApproval(
+  private async pollActiveTask(
     taskService: TaskService,
     workerState: WorkerStateManager,
-    taskId: string
+    browser: ChatGptBrowser
   ): Promise<void> {
-    const deadline = Date.now() + this.options.approvalTimeoutMs;
+    const taskId = this.activeTaskId!;
+    const elapsed = Date.now() - this.activeTaskStartedAt;
+    const { status } = taskService.getTaskStatus(taskId);
 
-    while (Date.now() < deadline && this.running) {
-      const { status } = taskService.getTaskStatus(taskId);
-
-      if (status === "COMPLETED") {
-        workerState.setStatus("READY", { currentTaskId: null });
-        this.rateLimitRetryIndex = 0;
-        return;
-      }
-
-      // ChatGPT has claimed the task — stay BUSY (concurrency = 1).
-      if (status === "PROCESSING") {
-        workerState.setStatus("BUSY", { currentTaskId: taskId });
-        await sleep(this.options.pollIntervalMs);
-        continue;
-      }
-
-      if (status === "FAILED" || status === "TIMED_OUT") {
-        workerState.setStatus("READY", { currentTaskId: null });
-        return;
-      }
-
-      await sleep(this.options.pollIntervalMs);
+    if (status === "COMPLETED") {
+      this.clearActiveTask(workerState);
+      this.rateLimitRetryIndex = 0;
+      return;
     }
 
-    const { status } = taskService.getTaskStatus(taskId);
-    if (status === "DISPATCHED" || status === "PROCESSING") {
-      taskService.markWaitingApproval(taskId);
-      workerState.setStatus("NEEDS_APPROVAL", { currentTaskId: taskId });
-    } else if (status === "COMPLETED") {
-      workerState.setStatus("READY", { currentTaskId: null });
-      this.rateLimitRetryIndex = 0;
-    } else {
-      workerState.setStatus("READY", { currentTaskId: null });
+    if (
+      status === "FAILED" ||
+      status === "TIMED_OUT" ||
+      status === "CANCELLED"
+    ) {
+      this.clearActiveTask(workerState);
+      return;
+    }
+
+    workerState.setStatus("BUSY", { currentTaskId: taskId });
+
+    if (this.nudgeStage < NUDGE_AT_MS.length) {
+      const nextAt = NUDGE_AT_MS[this.nudgeStage]!;
+      if (elapsed >= nextAt) {
+        try {
+          await browser.sendSubmitNudge(taskId);
+        } catch {
+          // Nudge is best-effort; timeout path still fails the task.
+        }
+        this.nudgeStage += 1;
+      }
+    }
+
+    if (elapsed >= this.options.approvalTimeoutMs) {
+      taskService.markSubmitTimedOut(taskId);
+      this.clearActiveTask(workerState);
+      log({
+        event: "TASK_TIMED_OUT",
+        component: "browser-worker",
+        taskId,
+        message:
+          "Submit approval window expired — task TIMED_OUT; worker free for next QUEUED task",
+      });
     }
   }
 
-  private async checkStaleDispatched(
+  private clearActiveTask(workerState: WorkerStateManager): void {
+    this.activeTaskId = null;
+    this.activeTaskStartedAt = 0;
+    this.nudgeStage = 0;
+    workerState.setStatus("READY", { currentTaskId: null, error: null });
+  }
+
+  private recoverOnStart(
     taskService: TaskService,
     workerState: WorkerStateManager
-  ): Promise<void> {
+  ): void {
+    const repo = new TaskRepository(getDatabase());
+    const nowIso = new Date(Date.now() + 1000).toISOString();
+    const staleIso = new Date(
+      Date.now() - this.options.approvalTimeoutMs
+    ).toISOString();
+
+    for (const task of repo.findStuckDispatching(nowIso)) {
+      taskService.markDispatchFailed(
+        task.id,
+        "Recovered stuck DISPATCHING on worker start"
+      );
+    }
+
+    for (const task of repo.findStaleOpenTasks(staleIso)) {
+      taskService.markSubmitTimedOut(
+        task.id,
+        "Recovered stale in-flight task on worker start"
+      );
+    }
+
+    for (const task of repo.findLegacyWaitingApproval()) {
+      taskService.markSubmitTimedOut(
+        task.id,
+        "Recovered legacy WAITING_APPROVAL on worker start"
+      );
+    }
+
+    const prev = workerState.getStatus();
+    if (prev !== "READY") {
+      log({
+        event: "INFO",
+        component: "browser-worker",
+        message: `recoverOnStart: clearing worker status ${prev} → READY`,
+      });
+    }
+    this.clearActiveTask(workerState);
+  }
+
+  private async checkStaleOpenTasks(taskService: TaskService): Promise<void> {
     const repo = new TaskRepository(getDatabase());
     const threshold = new Date(
       Date.now() - this.options.approvalTimeoutMs
     ).toISOString();
-    const stale = repo.findStaleDispatched(threshold);
 
-    for (const task of stale) {
-      taskService.markWaitingApproval(task.id);
-      workerState.setStatus("NEEDS_APPROVAL", { currentTaskId: task.id });
+    for (const task of repo.findStaleOpenTasks(threshold)) {
+      taskService.markSubmitTimedOut(
+        task.id,
+        "Stale in-flight task timed out while worker idle"
+      );
+    }
+
+    for (const task of repo.findLegacyWaitingApproval()) {
+      taskService.markSubmitTimedOut(
+        task.id,
+        "Legacy WAITING_APPROVAL cleared while worker idle"
+      );
     }
   }
 }
@@ -231,6 +306,13 @@ export async function startBrowserWorker(
   options: BrowserWorkerOptions
 ): Promise<BrowserWorker> {
   const worker = new BrowserWorker(options);
-  void worker.start();
+  void worker.start().catch((err) => {
+    const message = err instanceof Error ? err.message : String(err);
+    log({
+      event: "ERROR",
+      component: "browser-worker",
+      message: `Worker start failed (process stays up for /health): ${message}`,
+    });
+  });
   return worker;
 }

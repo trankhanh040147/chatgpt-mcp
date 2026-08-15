@@ -19,6 +19,7 @@ export type LogEvent =
   | "WORKER_NEEDS_APPROVAL"
   | "RATE_LIMITED"
   | "TASK_FAILED"
+  | "TASK_TIMED_OUT"
   | "STATE_TRANSITION"
   | "INFO"
   | "WARN"

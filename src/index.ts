@@ -62,7 +62,7 @@ export function loadConfig(): AppConfig {
     chatGptUrl: process.env.CHATGPT_URL ?? "https://chatgpt.com",
     pollIntervalMs: Number(process.env.DISPATCH_POLL_INTERVAL_MS ?? 2000),
     approvalTimeoutMs: Number(
-      process.env.DISPATCH_APPROVAL_TIMEOUT_MS ?? 300000
+      process.env.DISPATCH_APPROVAL_TIMEOUT_MS ?? 120000
     ),
     rateLimitBackoffMs: rateLimitRaw.split(",").map((v) => Number(v.trim())),
     logDir: resolveUserPath(

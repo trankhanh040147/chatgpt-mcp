@@ -22,6 +22,17 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString("utf-8");
 }
 
+const TERMINAL_WAIT_STATUSES = new Set([
+  "COMPLETED",
+  "FAILED",
+  "TIMED_OUT",
+  "CANCELLED",
+]);
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function startHttpApi(options: HttpApiOptions): Promise<void> {
   initDatabase(options.dbPath);
   const repo = new TaskRepository(getDatabase());
@@ -49,8 +60,64 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         return;
       }
 
+      // Long-poll: GET /tasks/:id/wait?timeoutSeconds=480
+      // Must be matched before the plain /tasks/:id status route.
+      const waitMatch = url.pathname.match(/^\/tasks\/([^/]+)\/wait$/);
+      if (req.method === "GET" && waitMatch) {
+        const taskId = decodeURIComponent(waitMatch[1] ?? "");
+        const timeoutSeconds = Math.min(
+          600,
+          Math.max(1, Number(url.searchParams.get("timeoutSeconds") ?? 480))
+        );
+        const tickMs = Math.min(
+          2000,
+          Math.max(
+            100,
+            Number(
+              url.searchParams.get("tickMs") ??
+                process.env.HANDOFF_WAIT_TICK_MS ??
+                250
+            )
+          )
+        );
+        const deadline = Date.now() + timeoutSeconds * 1000;
+
+        let lastStatus: string | null = null;
+        while (Date.now() < deadline) {
+          if (req.destroyed) return;
+          try {
+            const { status } = taskService.getTaskStatus(taskId);
+            lastStatus = status;
+            if (TERMINAL_WAIT_STATUSES.has(status)) {
+              sendJson(res, 200, { status, timedOut: false });
+              return;
+            }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (message.includes("Task not found")) {
+              sendJson(res, 404, { error: message });
+              return;
+            }
+            throw err;
+          }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          await sleep(Math.min(tickMs, remaining));
+        }
+
+        sendJson(res, 200, {
+          status: lastStatus,
+          timedOut: true,
+        });
+        return;
+      }
+
       if (req.method === "GET" && url.pathname.startsWith("/tasks/")) {
         const taskId = url.pathname.slice("/tasks/".length);
+        if (!taskId || taskId.includes("/")) {
+          sendJson(res, 404, { error: "Not found" });
+          return;
+        }
         const status = taskService.getTaskStatus(taskId);
         sendJson(res, 200, status);
         return;
@@ -102,6 +169,11 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
       sendJson(res, 500, { error: message });
     }
   });
+
+  // Stop hook may long-poll up to ~500s; disable default request timeouts.
+  server.requestTimeout = 0;
+  server.headersTimeout = 0;
+  server.timeout = 0;
 
   return new Promise((resolve, reject) => {
     server.once("error", (err: NodeJS.ErrnoException) => {
