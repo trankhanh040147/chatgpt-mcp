@@ -8,7 +8,7 @@ alwaysApply: true
 
 You have access to an external ChatGPT handoff system via MCP tools.
 
-Prefer the user skill `chatgpt-mcp` (`/chatgpt-mcp`; alias `/chatgpt-handoff`).
+Prefer the user skill `chatgpt-mcp` (`/chatgpt-mcp`).
 
 Use `handoff_create_task` only when an independent external reasoning pass is likely to materially improve the result.
 
@@ -39,12 +39,13 @@ Use `handoff_create_task` only when an independent external reasoning pass is li
 
 ## After handoff_create_task succeeds
 
-Finish the current turn. The handoff system may automatically resume this conversation.
+**Finish the current turn immediately in every Cursor conversation.** Do **not** call `handoff_get_task_status` in a loop. User-level `~/.cursor/hooks` + this repo’s stop hook long-poll and resume with `followup_message`.
 
 ## When resumed
 
-1. Call `handoff_get_result`.
+1. Call `handoff_get_result` (use the taskId from the followup).
 2. Evaluate the external result critically.
 3. Incorporate useful findings.
 4. Continue the original task.
 5. Do not blindly trust the external result.
+6. Do **not** poll status again after resume.

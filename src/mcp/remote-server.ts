@@ -5,6 +5,7 @@ import { initDatabase, getDatabase } from "../db/sqlite.js";
 import { TaskRepository } from "../tasks/task.repository.js";
 import { TaskService } from "../tasks/task.service.js";
 import { registerHandoffTools } from "./tools/index.js";
+import { WORKER_MCP_INSTRUCTIONS } from "./worker-policy.js";
 import { log } from "../logging/logger.js";
 
 export interface RemoteMcpOptions {
@@ -72,10 +73,7 @@ export function startRemoteMcpServer(options: RemoteMcpOptions): void {
         { name: "chatgpt-mcp-remote", version: "0.1.0" },
         {
           capabilities: { tools: {} },
-          instructions:
-            "Fetch only the task ID supplied in the chat (TASK_ID=ho_…). " +
-            "Complete that task, then submit exactly one result for the same ID. " +
-            "Never enumerate or guess task IDs.",
+          instructions: WORKER_MCP_INSTRUCTIONS,
         }
       );
       registerHandoffTools(mcpServer, taskService);

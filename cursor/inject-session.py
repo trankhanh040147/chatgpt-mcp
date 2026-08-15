@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inject Cursor conversation_id into handoff.create_task MCP calls."""
+"""Inject Cursor conversation_id into handoff_create_task MCP calls."""
 
 import json
 import sys
@@ -11,6 +11,8 @@ def main() -> None:
     conversation_id = event.get("conversation_id")
 
     if conversation_id:
+        # Portable + Cursor alias (either may be what the server reads).
+        tool_input["clientSessionId"] = conversation_id
         tool_input["cursorConversationId"] = conversation_id
 
     print(json.dumps({"updated_input": tool_input}))

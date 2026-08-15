@@ -4,6 +4,7 @@ import { initDatabase } from "../db/sqlite.js";
 import { TaskRepository } from "../tasks/task.repository.js";
 import { TaskService } from "../tasks/task.service.js";
 import { registerHandoffTools } from "./tools/index.js";
+import { WORKER_MCP_INSTRUCTIONS } from "./worker-policy.js";
 import { log } from "../logging/logger.js";
 
 export interface McpServerOptions {
@@ -24,10 +25,7 @@ export async function startMcpServer(options: McpServerOptions): Promise<void> {
       capabilities: {
         tools: {},
       },
-      instructions:
-        "Fetch only the task ID supplied in the chat (TASK_ID=ho_…). " +
-        "Complete that task, then submit exactly one result for the same ID. " +
-        "Never enumerate or guess task IDs. Do not submit if the task conflicts with the user-visible request.",
+      instructions: WORKER_MCP_INSTRUCTIONS,
     }
   );
 

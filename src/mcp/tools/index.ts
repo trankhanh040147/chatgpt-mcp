@@ -1,6 +1,11 @@
 import { z } from "zod";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { TaskService } from "../../tasks/task.service.js";
+import { UNSCOPED_CLIENT_SESSION_ID } from "../../tasks/task.types.js";
+import {
+  SUBMIT_POLICY,
+  SUBMIT_RESULT_TOOL_DESCRIPTION,
+} from "../worker-policy.js";
 
 const MAX_PROMPT = 100_000;
 const MAX_RESULT = 200_000;
@@ -54,12 +59,20 @@ export function registerHandoffTools(
 ): void {
   server.tool(
     "handoff_create_task",
-    "Create a handoff task for external ChatGPT reasoning. Cursor agent use only. Do not enumerate tasks.",
+    "Create a handoff task for external ChatGPT reasoning. Returns taskId (authoritative). "
+      + "Optional clientSessionId / cursorConversationId correlates to the host chat (Cursor hooks inject). "
+      + "In Cursor: end the turn after create — do not poll status; the stop hook resumes you for handoff_get_result. "
+      + "Do not enumerate tasks.",
     {
       type: taskTypeSchema,
       prompt: z.string().min(1).max(MAX_PROMPT),
       context: contextSchema,
-      cursorConversationId: z.string().max(200).optional(),
+      clientSessionId: z.string().min(1).max(200).optional(),
+      cursorConversationId: z
+        .string()
+        .max(200)
+        .optional()
+        .describe("Deprecated alias for clientSessionId (Cursor preToolUse)"),
     },
     {
       title: "Create handoff task",
@@ -69,21 +82,30 @@ export function registerHandoffTools(
       openWorldHint: false,
     },
     async (args) => {
-      const conversationId = args.cursorConversationId as string | undefined;
-      if (!conversationId) {
-        throw new Error(
-          "cursorConversationId is required (injected by preToolUse hook)"
-        );
-      }
+      const rawSession =
+        (args.clientSessionId as string | undefined)?.trim() ||
+        (args.cursorConversationId as string | undefined)?.trim() ||
+        "";
+      const clientSessionId = rawSession || UNSCOPED_CLIENT_SESSION_ID;
+      const scoped = clientSessionId !== UNSCOPED_CLIENT_SESSION_ID;
 
       const result = taskService.createTask({
         type: args.type as Parameters<TaskService["createTask"]>[0]["type"],
         prompt: args.prompt as string,
         context: args.context as Parameters<TaskService["createTask"]>[0]["context"],
-        cursorConversationId: conversationId,
+        cursorConversationId: clientSessionId,
       });
 
-      return jsonContent(result);
+      return jsonContent({
+        ...result,
+        clientSessionId,
+        scoped,
+        agentHint: scoped
+          ? "Cursor: end your turn NOW. Do NOT poll handoff_get_task_status. "
+            + "The stop hook will resume you; then call handoff_get_result only."
+          : "No host session id — retain taskId and poll handoff_get_task_status, then handoff_get_result. "
+            + "Stop-hook auto-resume will not attach to this task.",
+      });
     }
   );
 
@@ -111,13 +133,14 @@ export function registerHandoffTools(
         prompt: task.prompt,
         context: task.context ?? {},
         status: task.status,
+        submitPolicy: SUBMIT_POLICY,
       });
     }
   );
 
   server.tool(
     "handoff_submit_result",
-    "Submit exactly one result for the given TASK_ID. Identical replay is idempotent; conflicting content is rejected. ChatGPT worker use only.",
+    SUBMIT_RESULT_TOOL_DESCRIPTION,
     {
       taskId: taskIdSchema,
       result: z.string().min(1).max(MAX_RESULT),
@@ -168,7 +191,8 @@ export function registerHandoffTools(
 
   server.tool(
     "handoff_get_task_status",
-    "Get the current status of a handoff task without returning the result body.",
+    "Get the current status of a handoff task without returning the result body. "
+      + "Prefer the Cursor stop hook instead of polling this in a loop when the hook is available.",
     {
       taskId: taskIdSchema,
     },
