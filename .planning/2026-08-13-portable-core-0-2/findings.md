@@ -19,7 +19,7 @@ Before claiming “0.1 released,” need at minimum: commit+push local batch, pr
 
 ## Next version (agreed)
 
-Roadmap target is now **0.3.0** portable core (see `docs/roadmap.md`). Local package still says `0.2.0-preview.0` until rename at tag time. Multi-worker deferred to **0.5.0**; agent UX is **0.2.0**.
+Roadmap target for this plan is now **0.5.0** portable core (see `docs/roadmap.md` after 2026-08-15 reorder). Local package may still say `0.2.0-preview.0`. **Next product:** **0.2.0** multi-worker; assisted provision is **0.3.0**; agent UX is **0.4.0**.
 
 ## Code coupling to remove
 

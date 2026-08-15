@@ -3,7 +3,7 @@
 ## Goal
 Ship host-neutral handoff create semantics (`clientSessionId` optional; `taskId` authoritative) as the next architecture milestone after documenting that `0.1.0-preview.1` is only partially released.
 
-**Roadmap target:** [0.3.0 portable core](../../docs/roadmap.md#version-ladder) · ASAP UX is [0.2.0 agent UX](../../docs/roadmap.md#020--agent-ux-asap) (own feature version; not a 0.1 patch).
+**Roadmap target:** [0.5.0 portable core](../../docs/roadmap.md#version-ladder) (deferred). **Product next:** [0.2.0 multi-worker](../../docs/roadmap.md#020--static-multi-worker-next) → [0.3.0 assisted provisioning](../../docs/roadmap.md#030--assisted-provisioning-auto-create-workers).
 
 ## Next Step
 Smoke-create without session id (optional); then user can commit/tag when ready.
