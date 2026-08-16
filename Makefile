@@ -33,8 +33,8 @@ HANDOFF_PATHS := \
 .DEFAULT_GOAL := help
 
 .PHONY: help install build setup chrome up up-bg down restart status wait-ready \
-	check recover recover-clean recover-all clear-tasks clear-task \
-	logs worker-bg remote-bg e2e-1 e2e-20 handoff-zip
+	check doctor recover recover-clean recover-all clear-tasks clear-task \
+	logs worker-bg remote-bg status-api-bg test-leases e2e-1 e2e-20 e2e-dual handoff-zip
 
 help: ## Show targets
 	@echo "chatgpt-mcp — quick ops"
@@ -66,7 +66,7 @@ chrome: ## Start dedicated CDP Chrome (idempotent)
 up: build ## Foreground stack: CDP + remote-mcp + worker (Ctrl+C stops services)
 	npm run start
 
-up-bg: build ## Background remote-mcp + worker (Chrome unchanged)
+up-bg: build ## Background: status-api + browser-worker + remote-mcp
 	@mkdir -p $(LOG_DIR)
 	@if lsof -nP -iTCP:$(REMOTE_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 		echo "remote-mcp already on :$(REMOTE_PORT)"; \
@@ -76,27 +76,50 @@ up-bg: build ## Background remote-mcp + worker (Chrome unchanged)
 		echo "remote-mcp → :$(REMOTE_PORT) (pid $$!)"; \
 	fi
 	@if lsof -nP -iTCP:$(HTTP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
-		echo "worker already on :$(HTTP_PORT)"; \
+		echo "status-api already on :$(HTTP_PORT)"; \
 	else \
-		nohup $(NODE) $(DIST) worker >> $(LOG_DIR)/worker.log 2>&1 & \
-		echo $$! > $(LOG_DIR)/worker.pid; \
-		echo "worker → :$(HTTP_PORT) (pid $$!)"; \
+		nohup $(NODE) $(DIST) status-api >> $(LOG_DIR)/status-api.log 2>&1 & \
+		echo $$! > $(LOG_DIR)/status-api.pid; \
+		echo "status-api → :$(HTTP_PORT) (pid $$!)"; \
+	fi
+	@if [ -f $(LOG_DIR)/browser-worker-supervise.pid ] && kill -0 $$(cat $(LOG_DIR)/browser-worker-supervise.pid) 2>/dev/null; then \
+		echo "browser-worker supervise already running (pid $$(cat $(LOG_DIR)/browser-worker-supervise.pid))"; \
+	elif [ -f $(LOG_DIR)/browser-worker.pid ] && kill -0 $$(cat $(LOG_DIR)/browser-worker.pid) 2>/dev/null; then \
+		echo "browser-worker already running (pid $$(cat $(LOG_DIR)/browser-worker.pid))"; \
+	else \
+		chmod +x scripts/supervise-browser-worker.sh; \
+		nohup bash scripts/supervise-browser-worker.sh >/dev/null 2>&1 & \
+		echo $$! > $(LOG_DIR)/browser-worker-supervise.pid; \
+		echo "browser-worker supervise → pid $$!"; \
 	fi
 	@echo "Run: make status && make wait-ready && make check"
 
-down: ## Stop background worker + remote-mcp (Chrome CDP stays up)
+down: ## Stop status-api + browser-worker + remote-mcp (Chrome CDP stays up)
+	-pkill -f 'supervise-browser-worker.sh' 2>/dev/null || true
 	-pkill -f 'node dist/index.js worker' 2>/dev/null || true
+	-pkill -f 'node dist/index.js browser-worker' 2>/dev/null || true
+	-pkill -f 'node dist/index.js status-api' 2>/dev/null || true
 	-pkill -f 'node dist/index.js remote-mcp' 2>/dev/null || true
-	-rm -f $(LOG_DIR)/worker.pid $(LOG_DIR)/remote-mcp.pid
-	@echo "Stopped worker (:$(HTTP_PORT)) and remote-mcp (:$(REMOTE_PORT))."
+	-rm -f $(LOG_DIR)/worker.pid $(LOG_DIR)/remote-mcp.pid $(LOG_DIR)/status-api.pid $(LOG_DIR)/browser-worker.pid $(LOG_DIR)/browser-worker-supervise.pid
+	@echo "Stopped status-api (:$(HTTP_PORT)), browser-worker, remote-mcp (:$(REMOTE_PORT))."
 
-restart: down up-bg ## Restart background worker + remote-mcp
+restart: down up-bg ## Restart background stack (split status-api + browser-worker)
 
-status: ## Health + worker_state + listening ports
-	@curl -sf $(HEALTH_URL)/health 2>/dev/null && echo "  ← /health" || echo "worker: DOWN (:$(HTTP_PORT))"
+status: ## Health + /workers + listening ports
+	@curl -sf $(HEALTH_URL)/health 2>/dev/null && echo "  ← /health" || echo "status-api: DOWN (:$(HTTP_PORT))"
 	@curl -sf $(HEALTH_URL)/worker 2>/dev/null || echo "GET /worker failed"
+	@curl -sf $(HEALTH_URL)/workers 2>/dev/null || echo "GET /workers failed"
 	@echo ""
 	@lsof -nP -iTCP:$(HTTP_PORT),$(REMOTE_PORT),9222 -sTCP:LISTEN 2>/dev/null || echo "(no listeners on :$(HTTP_PORT) :$(REMOTE_PORT) :9222)"
+
+doctor: build ## Topology + schema + status-api health
+	npm run doctor
+
+test-leases: ## Lease/fencing unit tests (no browser)
+	npm run test:leases
+
+e2e-dual: ## Live dual-worker canary (needs 2 CDP + start-dual-stack.sh)
+	HANDOFF_WORKERS_FILE=$${HANDOFF_WORKERS_FILE:-$(CURDIR)/data/workers.json} npm run e2e:dual
 
 wait-ready: ## Wait until GET /worker reports READY (120s default)
 	@chmod +x scripts/wait-ready.sh
@@ -122,14 +145,24 @@ clear-task: clear-tasks ## Alias of clear-tasks
 logs: ## Tail handoff.log
 	@tail -f $(LOG_DIR)/handoff.log
 
-worker-bg: build ## Background worker only
+worker-bg: build ## Background worker (status-api + one browser; single-worker default)
 	@mkdir -p $(LOG_DIR)
 	@if lsof -nP -iTCP:$(HTTP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
-		echo "worker already on :$(HTTP_PORT)"; \
+		echo "worker/status-api already on :$(HTTP_PORT)"; \
 	else \
 		nohup $(NODE) $(DIST) worker >> $(LOG_DIR)/worker.log 2>&1 & \
 		echo $$! > $(LOG_DIR)/worker.pid; \
 		echo "worker pid $$!"; \
+	fi
+
+status-api-bg: build ## Background status-api only (HTTP + lease reaper)
+	@mkdir -p $(LOG_DIR)
+	@if lsof -nP -iTCP:$(HTTP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
+		echo "status-api already on :$(HTTP_PORT)"; \
+	else \
+		nohup $(NODE) $(DIST) status-api >> $(LOG_DIR)/status-api.log 2>&1 & \
+		echo $$! > $(LOG_DIR)/status-api.pid; \
+		echo "status-api pid $$!"; \
 	fi
 
 remote-bg: build ## Background remote-mcp only

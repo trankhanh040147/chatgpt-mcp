@@ -4,13 +4,12 @@ import { sanitizeContext, sanitizeSecrets } from "./sanitize.js";
 import { assertTransition } from "./task-state.js";
 import { log, logTransition } from "../logging/logger.js";
 import type {
+  ClaimResult,
   CreateTaskInput,
   HandoffTask,
   HandoffResultMetadata,
   SubmitResultInput,
 } from "./task.types.js";
-
-const MAX_DISPATCH_RETRIES = 3;
 
 export class TaskService {
   constructor(private readonly repo: TaskRepository) {}
@@ -30,6 +29,8 @@ export class TaskService {
       status: "QUEUED",
       retryCount: 0,
       createdAt: now,
+      dispatchAttempt: 0,
+      nudgeAttempt: 0,
     };
 
     this.repo.insertTask(task);
@@ -95,6 +96,12 @@ export class TaskService {
       );
     }
 
+    if (!task.dispatchStartedAt) {
+      throw new Error(
+        `Cannot submit result for task ${input.taskId}: dispatch fence not set`
+      );
+    }
+
     const changed = this.repo.saveResultIfOpen(
       input.taskId,
       sanitizedResult,
@@ -110,7 +117,6 @@ export class TaskService {
       return { success: true, status: "COMPLETED" };
     }
 
-    // Lost race — another submit completed first.
     const again = this.repo.getTaskById(input.taskId);
     if (!again) {
       throw new Error(`Task not found: ${input.taskId}`);
@@ -162,6 +168,7 @@ export class TaskService {
     return { status: task.status };
   }
 
+  /** @deprecated Prefer markDispatchStarted (fence before UI). */
   markDispatched(taskId: string): void {
     const task = this.repo.getTaskById(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
@@ -173,17 +180,133 @@ export class TaskService {
     log({ event: "TASK_DISPATCHED", component: "browser-worker", taskId });
   }
 
-  markDispatchFailed(taskId: string, error: string): void {
+  markDispatchStarted(
+    taskId: string,
+    workerId: string,
+    leaseToken: string,
+    instanceToken: string,
+    leaseMs: number,
+    workerStaleMs: number
+  ): boolean {
+    const ok = this.repo.markDispatchStarted(
+      taskId,
+      workerId,
+      leaseToken,
+      instanceToken,
+      leaseMs,
+      workerStaleMs
+    );
+    if (ok) {
+      logTransition("browser-worker", taskId, "DISPATCHING", "DISPATCHED");
+      log({ event: "TASK_DISPATCHED", component: "browser-worker", taskId });
+    }
+    return ok;
+  }
+
+  markNudgeStarted(
+    taskId: string,
+    workerId: string,
+    leaseToken: string,
+    instanceToken: string,
+    leaseMs: number,
+    workerStaleMs: number
+  ): boolean {
+    return this.repo.markNudgeStarted(
+      taskId,
+      workerId,
+      leaseToken,
+      instanceToken,
+      leaseMs,
+      workerStaleMs
+    );
+  }
+
+  renewLease(
+    taskId: string,
+    workerId: string,
+    leaseToken: string,
+    instanceToken: string,
+    leaseMs: number,
+    workerStaleMs: number
+  ): boolean {
+    return this.repo.renewLease(
+      taskId,
+      workerId,
+      leaseToken,
+      instanceToken,
+      leaseMs,
+      workerStaleMs
+    );
+  }
+
+  expireLeases(nowIso?: string): {
+    requeued: number;
+    timedOut: number;
+    failed: number;
+  } {
+    return this.repo.expireLeases(nowIso);
+  }
+
+  markDispatchFailed(
+    taskId: string,
+    error: string,
+    opts?: {
+      workerId: string;
+      leaseToken: string;
+      instanceToken: string;
+    }
+  ): void {
+    if (opts) {
+      const outcome = this.repo.releasePreDispatchClaim(
+        taskId,
+        opts.workerId,
+        opts.leaseToken,
+        opts.instanceToken,
+        error
+      );
+      if (outcome === "requeued") {
+        logTransition("browser-worker", taskId, "DISPATCHING", "QUEUED");
+        return;
+      }
+      if (outcome === "failed") {
+        log({
+          event: "TASK_FAILED",
+          component: "browser-worker",
+          taskId,
+          message: error,
+        });
+        return;
+      }
+    }
+
     const task = this.repo.getTaskById(taskId);
     if (!task) return;
+    if (task.dispatchStartedAt) {
+      // Post-fence failures must fail closed, not requeue.
+      this.markSubmitTimedOut(taskId, error);
+      return;
+    }
 
     const retryCount = task.retryCount + 1;
-    if (retryCount < MAX_DISPATCH_RETRIES) {
-      this.repo.updateTaskStatus(taskId, "QUEUED", { retryCount, error });
+    if (retryCount < 3) {
+      this.repo.updateTaskStatus(taskId, "QUEUED", {
+        retryCount,
+        error,
+        clearLease: true,
+      });
       logTransition("browser-worker", taskId, task.status, "QUEUED");
     } else {
-      this.repo.updateTaskStatus(taskId, "FAILED", { retryCount, error });
-      log({ event: "TASK_FAILED", component: "browser-worker", taskId, message: error });
+      this.repo.updateTaskStatus(taskId, "FAILED", {
+        retryCount,
+        error,
+        clearLease: true,
+      });
+      log({
+        event: "TASK_FAILED",
+        component: "browser-worker",
+        taskId,
+        message: error,
+      });
     }
   }
 
@@ -197,7 +320,6 @@ export class TaskService {
     });
   }
 
-  /** Submit window expired — terminal so Cursor stop hook and queue can move on. */
   markSubmitTimedOut(taskId: string, reason?: string): void {
     const task = this.repo.getTaskById(taskId);
     if (!task) return;
@@ -216,7 +338,11 @@ export class TaskService {
         "Approve MCP write in the worker ChatGPT tab or retry the handoff.";
 
     assertTransition(task.status, "TIMED_OUT");
-    this.repo.updateTaskStatus(taskId, "TIMED_OUT", { error });
+    this.repo.updateTaskStatus(taskId, "TIMED_OUT", {
+      error,
+      clearLease: true,
+      completedAt: new Date().toISOString(),
+    });
     logTransition("browser-worker", taskId, task.status, "TIMED_OUT");
     log({
       event: "TASK_TIMED_OUT",
@@ -247,7 +373,17 @@ export class TaskService {
     return this.repo.findCompletedByConversation(conversationId);
   }
 
-  claimNextQueued(): HandoffTask | null {
-    return this.repo.claimOldestQueued();
+  claimNextQueued(
+    workerId: string,
+    instanceToken: string,
+    leaseMs: number,
+    workerStaleMs: number
+  ): ClaimResult | null {
+    return this.repo.claimNextQueued(
+      workerId,
+      instanceToken,
+      leaseMs,
+      workerStaleMs
+    );
   }
 }

@@ -1,0 +1,12 @@
+[
+  {
+    "id": "w1",
+    "workerUrl": "https://chatgpt.com/c/REPLACE_WORKER_1",
+    "cdpEndpoint": "http://127.0.0.1:9222"
+  },
+  {
+    "id": "w2",
+    "workerUrl": "https://chatgpt.com/c/REPLACE_WORKER_2",
+    "cdpEndpoint": "http://127.0.0.1:9223"
+  }
+]

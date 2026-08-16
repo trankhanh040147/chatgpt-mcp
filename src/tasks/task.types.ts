@@ -55,7 +55,41 @@ export interface HandoffTask {
   processingAt?: string;
   completedAt?: string;
   error?: string;
+  leaseOwner?: string;
+  leaseToken?: string;
+  leaseExpiresAt?: string;
+  dispatchStartedAt?: string;
+  dispatchAttempt: number;
+  nudgeStartedAt?: string;
+  nudgeAttempt: number;
 }
+
+export interface ClaimResult {
+  task: HandoffTask;
+  leaseToken: string;
+}
+
+export interface WorkerStateRow {
+  id: string;
+  status: WorkerStatus;
+  lastSeenAt?: string;
+  currentTaskId?: string;
+  error?: string;
+  instanceToken?: string;
+  workerUrl?: string;
+  cdpEndpoint?: string;
+  httpPort?: number;
+  startedAt?: string;
+  pid?: number;
+}
+
+/** Statuses that hold a lease_owner (partial unique index). */
+export const LEASE_ACTIVE_STATUSES: HandoffTaskStatus[] = [
+  "DISPATCHING",
+  "DISPATCHED",
+  "PROCESSING",
+  "WAITING_APPROVAL",
+];
 
 export interface CreateTaskInput {
   type: HandoffTaskType;

@@ -1,7 +1,6 @@
 import { config as loadEnv } from "dotenv";
 import { mkdirSync, appendFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { configureLogger } from "./logging/logger.js";
 import { startMcpServer } from "./mcp/server.js";
@@ -9,70 +8,16 @@ import { startRemoteMcpServer } from "./mcp/remote-server.js";
 import { startHttpApi } from "./http/api.js";
 import { startBrowserWorker, type BrowserWorker } from "./browser/worker.js";
 import { log } from "./logging/logger.js";
+import {
+  loadWorkersTopology,
+  validateWorkersTopology,
+} from "./config/workers-topology.js";
+import { loadConfig, type AppConfig } from "./config/load-config.js";
+
+export { loadConfig, resolveUserPath, chatgptMcpHome } from "./config/load-config.js";
+export type { AppConfig } from "./config/load-config.js";
 
 loadEnv();
-
-export interface AppConfig {
-  dbPath: string;
-  httpPort: number;
-  cdpEndpoint: string;
-  workerUrl: string;
-  chatGptUrl: string;
-  pollIntervalMs: number;
-  approvalTimeoutMs: number;
-  rateLimitBackoffMs: number[];
-  logDir: string;
-  remoteMcpPort: number;
-  remoteMcpToken: string | undefined;
-  remoteMcpDisableAuth: boolean;
-}
-
-/** Resolve env paths. Node's path.resolve does not expand `~`. */
-export function resolveUserPath(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed === "~") return homedir();
-  if (trimmed.startsWith("~/")) {
-    return resolve(join(homedir(), trimmed.slice(2)));
-  }
-  return resolve(trimmed);
-}
-
-/** Per-user data root. Override with CHATGPT_MCP_HOME (absolute or ~/…). */
-export function chatgptMcpHome(): string {
-  return resolveUserPath(
-    process.env.CHATGPT_MCP_HOME?.trim() || join(homedir(), ".chatgpt-mcp")
-  );
-}
-
-export function loadConfig(): AppConfig {
-  const rateLimitRaw =
-    process.env.RATE_LIMIT_BACKOFF_MS ?? "300000,900000,1800000";
-  const workerUrl = process.env.CHATGPT_WORKER_URL?.trim() ?? "";
-  const home = chatgptMcpHome();
-
-  return {
-    dbPath: resolveUserPath(
-      process.env.HANDOFF_DB_PATH?.trim() ||
-        join(home, "data", "handoff.sqlite")
-    ),
-    httpPort: Number(process.env.HANDOFF_HTTP_PORT ?? 8787),
-    cdpEndpoint:
-      process.env.CHATGPT_CDP_ENDPOINT?.trim() || "http://127.0.0.1:9222",
-    workerUrl,
-    chatGptUrl: process.env.CHATGPT_URL ?? "https://chatgpt.com",
-    pollIntervalMs: Number(process.env.DISPATCH_POLL_INTERVAL_MS ?? 2000),
-    approvalTimeoutMs: Number(
-      process.env.DISPATCH_APPROVAL_TIMEOUT_MS ?? 120000
-    ),
-    rateLimitBackoffMs: rateLimitRaw.split(",").map((v) => Number(v.trim())),
-    logDir: resolveUserPath(
-      process.env.LOG_DIR?.trim() || join(home, "logs")
-    ),
-    remoteMcpPort: Number(process.env.HANDOFF_REMOTE_MCP_PORT ?? 8790),
-    remoteMcpToken: process.env.HANDOFF_REMOTE_MCP_TOKEN,
-    remoteMcpDisableAuth: process.env.HANDOFF_REMOTE_MCP_DISABLE_AUTH === "1",
-  };
-}
 
 function requireWorkerUrl(config: AppConfig): void {
   if (!config.workerUrl || !/^https?:\/\//i.test(config.workerUrl)) {
@@ -81,6 +26,27 @@ function requireWorkerUrl(config: AppConfig): void {
         "(e.g. https://chatgpt.com/c/xxxxxxxx) in .env."
     );
   }
+}
+
+function validateTopologyOrThrow(
+  config: AppConfig,
+  opts?: { includeHttpPort?: boolean }
+): void {
+  const topology = loadWorkersTopology({
+    workersFile: config.workersFile,
+    workerId: config.workerId,
+    workerUrl: config.workerUrl,
+    cdpEndpoint: config.cdpEndpoint,
+    // status-api owns HANDOFF_HTTP_PORT; do not stamp it onto every browser-worker
+    // or dual topology falsely reports duplicate httpPort.
+    httpPort: opts?.includeHttpPort ? config.httpPort : undefined,
+  });
+  validateWorkersTopology(topology);
+  log({
+    event: "INFO",
+    component: "config",
+    message: `topology source=${topology.source} workers=${topology.workers.length} ids=[${topology.workers.map((w) => w.id).join(",")}]`,
+  });
 }
 
 function registerShutdown(worker: BrowserWorker): void {
@@ -102,6 +68,7 @@ function registerShutdown(worker: BrowserWorker): void {
 
 function startWorkerFromConfig(config: AppConfig): Promise<BrowserWorker> {
   requireWorkerUrl(config);
+  validateTopologyOrThrow(config, { includeHttpPort: false });
   return startBrowserWorker({
     dbPath: config.dbPath,
     cdpEndpoint: config.cdpEndpoint,
@@ -110,6 +77,10 @@ function startWorkerFromConfig(config: AppConfig): Promise<BrowserWorker> {
     pollIntervalMs: config.pollIntervalMs,
     approvalTimeoutMs: config.approvalTimeoutMs,
     rateLimitBackoffMs: config.rateLimitBackoffMs,
+    workerId: config.workerId,
+    leaseMs: config.leaseMs,
+    workerStaleMs: config.workerStaleMs,
+    browserOnly: true,
   });
 }
 
@@ -125,15 +96,40 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (mode === "worker") {
-    await startHttpApi({ port: config.httpPort, dbPath: config.dbPath });
-    const worker = await startWorkerFromConfig(config);
-    registerShutdown(worker);
+  if (mode === "status-api" || mode === "http") {
+    await startHttpApi({
+      port: config.httpPort,
+      dbPath: config.dbPath,
+      runLeaseReaper: true,
+      reaperIntervalMs: config.reaperIntervalMs,
+      workerId: config.workerId,
+    });
     return;
   }
 
-  if (mode === "http") {
-    await startHttpApi({ port: config.httpPort, dbPath: config.dbPath });
+  if (mode === "browser-worker") {
+    const worker = await startWorkerFromConfig(config);
+    registerShutdown(worker);
+    // Keep event loop alive even if the worker loop is between reconnects.
+    await new Promise<void>(() => {
+      /* run until SIGINT/SIGTERM */
+    });
+    return;
+  }
+
+  if (mode === "worker" || mode === "all") {
+    await startHttpApi({
+      port: config.httpPort,
+      dbPath: config.dbPath,
+      runLeaseReaper: true,
+      reaperIntervalMs: config.reaperIntervalMs,
+      workerId: config.workerId,
+    });
+    const worker = await startWorkerFromConfig(config);
+    registerShutdown(worker);
+    await new Promise<void>(() => {
+      /* run until SIGINT/SIGTERM */
+    });
     return;
   }
 
@@ -171,17 +167,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (mode === "all") {
-    // Run HTTP status API + browser worker together.
-    // MCP stdio server must run as a separate process (Cursor spawns it).
-    await startHttpApi({ port: config.httpPort, dbPath: config.dbPath });
-    const worker = await startWorkerFromConfig(config);
-    registerShutdown(worker);
-    return;
-  }
-
   console.error(
-    `Unknown mode: ${mode}. Use: mcp | worker | http | remote-mcp | all`
+    `Unknown mode: ${mode}. Use: mcp | status-api | http | worker | browser-worker | remote-mcp | all`
   );
   process.exit(1);
 }

@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-mcp",
-  "version": "0.2.0-preview.0",
+  "version": "0.2.0",
   "description": "Cursor ↔ ChatGPT MCP handoff (portable taskId; Cursor E2E, other hosts experimental)",
   "license": "MIT",
   "repository": {
@@ -24,10 +24,15 @@
     "typecheck": "tsc --noEmit",
     "e2e:reliability": "tsx scripts/e2e-reliability.ts",
     "e2e:reliability:20": "tsx scripts/e2e-reliability.ts --runs=20",
+    "e2e:dual": "tsx scripts/e2e-dual-worker.ts",
     "setup": "tsx scripts/setup.ts",
     "check": "tsx scripts/check.ts",
     "recover": "tsx scripts/recover.ts",
     "clear-tasks": "tsx scripts/recover.ts --purge",
+    "doctor": "tsx scripts/doctor.ts",
+    "test:leases": "tsx scripts/test-leases.ts",
+    "status-api": "node dist/index.js status-api",
+    "browser-worker": "node dist/index.js browser-worker",
     "chrome-cdp": "node scripts/start-chrome-cdp.mjs"
   },
   "engines": {

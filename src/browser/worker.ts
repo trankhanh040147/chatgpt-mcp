@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { initDatabase, getDatabase } from "../db/sqlite.js";
 import { TaskRepository } from "../tasks/task.repository.js";
 import { TaskService } from "../tasks/task.service.js";
@@ -5,6 +6,7 @@ import { WorkerStateManager } from "./worker-state.js";
 import { ChatGptBrowser } from "./chatgpt.js";
 import { log } from "../logging/logger.js";
 import type { WorkerStatus } from "../tasks/task.types.js";
+import { DEFAULT_WORKER_ID } from "../tasks/task.types.js";
 
 export interface BrowserWorkerOptions {
   dbPath: string;
@@ -14,29 +16,65 @@ export interface BrowserWorkerOptions {
   pollIntervalMs: number;
   approvalTimeoutMs: number;
   rateLimitBackoffMs: number[];
+  workerId?: string;
+  leaseMs?: number;
+  workerStaleMs?: number;
+  /** When true, this process does not own HTTP (status-api is separate). */
+  browserOnly?: boolean;
 }
 
 const BLOCKING_STATUSES: WorkerStatus[] = ["SESSION_LOST", "ERROR"];
 
-/** Nudge ChatGPT if submit has not landed by these elapsed ms since dispatch. */
-const NUDGE_AT_MS = [30_000, 90_000] as const;
+/** Single nudge window (0.2.0: at most one fenced nudge). */
+const NUDGE_AT_MS = 30_000;
 
 export class BrowserWorker {
   private running = false;
   private rateLimitRetryIndex = 0;
   private browser: ChatGptBrowser | null = null;
-  /** In-flight task polled across ticks — worker stays READY for HTTP but won't claim another. */
+  private workerState: WorkerStateManager | null = null;
+  private repo: TaskRepository | null = null;
   private activeTaskId: string | null = null;
+  private activeLeaseToken: string | null = null;
   private activeTaskStartedAt = 0;
-  private nudgeStage = 0;
+  private nudgeSent = false;
+  private readonly workerId: string;
+  private readonly instanceToken: string;
+  private readonly leaseMs: number;
+  private readonly workerStaleMs: number;
 
-  constructor(private readonly options: BrowserWorkerOptions) {}
+  constructor(private readonly options: BrowserWorkerOptions) {
+    this.workerId = options.workerId?.trim() || DEFAULT_WORKER_ID;
+    this.instanceToken = `inst_${randomBytes(16).toString("hex")}`;
+    this.leaseMs =
+      options.leaseMs ??
+      Math.max(120_000, options.pollIntervalMs * 10, options.approvalTimeoutMs);
+    this.workerStaleMs =
+      options.workerStaleMs ?? Math.max(this.leaseMs * 2, 60_000);
+  }
 
   async start(): Promise<void> {
     initDatabase(this.options.dbPath);
     const repo = new TaskRepository(getDatabase());
+    this.repo = repo;
     const taskService = new TaskService(repo);
-    const workerState = new WorkerStateManager(repo);
+
+    repo.registerWorkerInstance({
+      workerId: this.workerId,
+      instanceToken: this.instanceToken,
+      workerUrl: this.options.workerUrl,
+      cdpEndpoint: this.options.cdpEndpoint,
+      httpPort: null,
+      staleMs: this.workerStaleMs,
+      pid: process.pid,
+    });
+
+    const workerState = new WorkerStateManager(
+      repo,
+      this.workerId,
+      this.instanceToken
+    );
+    this.workerState = workerState;
 
     const browser = new ChatGptBrowser({
       cdpEndpoint: this.options.cdpEndpoint,
@@ -48,47 +86,98 @@ export class BrowserWorker {
     this.running = true;
     workerState.setStatus("STARTING");
 
-    try {
-      await browser.connect();
-
-      const sessionReady = await browser.ensureSessionReady();
-      if (!sessionReady) {
-        workerState.setStatus("SESSION_LOST", {
-          error: "SESSION_NOT_READY: log into ChatGPT in the attached Chrome",
-        });
-        while (this.running) {
-          await sleep(10_000);
-          const ok = await browser.ensureSessionReady();
-          if (ok) break;
+    // Lease + worker heartbeat independent of tick/Playwright (event-loop only).
+    // Interval ≈ leaseMs/6 so several renewals fit before expiry (P0 continuous renew).
+    const renewEveryMs = Math.min(
+      30_000,
+      Math.max(5_000, Math.floor(this.leaseMs / 6))
+    );
+    let renewing = false;
+    const heartbeat = setInterval(() => {
+      if (!this.running || renewing) return;
+      renewing = true;
+      try {
+        if (this.activeTaskId && this.activeLeaseToken) {
+          const ok = taskService.renewLease(
+            this.activeTaskId,
+            this.workerId,
+            this.activeLeaseToken,
+            this.instanceToken,
+            this.leaseMs,
+            this.workerStaleMs
+          );
+          if (!ok) {
+            log({
+              event: "WARN",
+              component: "browser-worker",
+              taskId: this.activeTaskId,
+              message: "Lease heartbeat lost ownership — clearing active task",
+            });
+            this.clearActiveTask(workerState);
+          }
+        } else {
+          workerState.touchHeartbeat();
         }
-        if (!this.running) return;
+      } catch {
+        // best-effort — do not clear on transient throw
+      } finally {
+        renewing = false;
       }
+    }, renewEveryMs);
+    heartbeat.unref?.();
 
-      await browser.openWorkerConversation();
-      this.recoverOnStart(taskService, workerState);
-      workerState.setStatus("READY", { currentTaskId: null, error: null });
+    while (this.running) {
+      try {
+        await browser.connect();
 
-      log({
-        event: "INFO",
-        component: "browser-worker",
-        message: "Browser worker ready (CDP attach)",
-      });
+        const sessionReady = await browser.ensureSessionReady();
+        if (!sessionReady) {
+          workerState.setStatus("SESSION_LOST", {
+            error: "SESSION_NOT_READY: log into ChatGPT in the attached Chrome",
+          });
+          while (this.running) {
+            await sleep(10_000);
+            const ok = await browser.ensureSessionReady();
+            if (ok) break;
+          }
+          if (!this.running) break;
+        }
 
-      while (this.running) {
-        await this.tick(taskService, workerState, browser);
-        await sleep(this.options.pollIntervalMs);
+        await browser.openWorkerConversation();
+        this.recoverOnStart(taskService, workerState);
+        workerState.setStatus("READY", { currentTaskId: null, error: null });
+
+        log({
+          event: "INFO",
+          component: "browser-worker",
+          message: `Browser worker ready id=${this.workerId} (CDP attach)`,
+        });
+
+        while (this.running) {
+          await this.tick(taskService, workerState, browser);
+          await sleep(this.options.pollIntervalMs);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        workerState.setStatus("ERROR", { error: message });
+        await browser.screenshotOnFailure("worker-crash").catch(() => undefined);
+        log({
+          event: "ERROR",
+          component: "browser-worker",
+          message: `Worker loop error (will reconnect): ${message}`,
+        });
+        this.activeTaskId = null;
+        this.activeLeaseToken = null;
+        await sleep(5_000);
+        try {
+          await browser.close();
+        } catch {
+          // ignore
+        }
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      workerState.setStatus("ERROR", { error: message });
-      await browser.screenshotOnFailure("worker-crash");
-      log({
-        event: "ERROR",
-        component: "browser-worker",
-        message,
-      });
-      throw err;
     }
+
+    clearInterval(heartbeat);
   }
 
   stop(): void {
@@ -97,6 +186,11 @@ export class BrowserWorker {
 
   async close(): Promise<void> {
     this.running = false;
+    try {
+      this.repo?.releaseWorkerInstance(this.workerId, this.instanceToken);
+    } catch {
+      // best-effort
+    }
     await this.browser?.close();
   }
 
@@ -105,7 +199,7 @@ export class BrowserWorker {
     workerState: WorkerStateManager,
     browser: ChatGptBrowser
   ): Promise<void> {
-    if (this.activeTaskId) {
+    if (this.activeTaskId && this.activeLeaseToken) {
       await this.pollActiveTask(taskService, workerState, browser);
       return;
     }
@@ -126,25 +220,52 @@ export class BrowserWorker {
     }
 
     if (BLOCKING_STATUSES.includes(status)) {
+      workerState.touchHeartbeat();
       return;
     }
 
     if (status !== "READY") {
+      workerState.touchHeartbeat();
       return;
     }
 
-    const task = taskService.claimNextQueued();
-    if (!task) {
-      await this.checkStaleOpenTasks(taskService);
+    const claimed = taskService.claimNextQueued(
+      this.workerId,
+      this.instanceToken,
+      this.leaseMs,
+      this.workerStaleMs
+    );
+    if (!claimed) {
+      workerState.touchHeartbeat();
       return;
     }
 
+    const { task, leaseToken } = claimed;
+    // Arm lease heartbeat immediately — covers prep + fence + type, not only post-send.
+    this.activeTaskId = task.id;
+    this.activeLeaseToken = leaseToken;
+    this.activeTaskStartedAt = Date.now();
+    this.nudgeSent = false;
     workerState.setStatus("BUSY", { currentTaskId: task.id });
+    taskService.renewLease(
+      task.id,
+      this.workerId,
+      leaseToken,
+      this.instanceToken,
+      this.leaseMs,
+      this.workerStaleMs
+    );
 
     try {
       const rateLimited = await browser.detectRateLimit();
       if (rateLimited) {
-        taskService.markDispatchFailed(task.id, "Rate limited");
+        taskService.markDispatchFailed(task.id, "Rate limited", {
+          workerId: this.workerId,
+          leaseToken,
+          instanceToken: this.instanceToken,
+        });
+        this.activeTaskId = null;
+        this.activeLeaseToken = null;
         workerState.setStatus("RATE_LIMITED");
         log({
           event: "RATE_LIMITED",
@@ -154,25 +275,93 @@ export class BrowserWorker {
         return;
       }
 
+      // Reversible prep only — open conversation / locate composer.
       await browser.openWorkerConversation();
-      await browser.submitTaskId(task.id);
-      taskService.markDispatched(task.id);
+      if (
+        !taskService.renewLease(
+          task.id,
+          this.workerId,
+          leaseToken,
+          this.instanceToken,
+          this.leaseMs,
+          this.workerStaleMs
+        )
+      ) {
+        log({
+          event: "WARN",
+          component: "browser-worker",
+          taskId: task.id,
+          message: "Lost lease during prep — aborting without chat write",
+        });
+        this.clearActiveTask(workerState);
+        return;
+      }
 
-      this.activeTaskId = task.id;
-      this.activeTaskStartedAt = Date.now();
-      this.nudgeStage = 0;
+      const fenced = taskService.markDispatchStarted(
+        task.id,
+        this.workerId,
+        leaseToken,
+        this.instanceToken,
+        this.leaseMs,
+        this.workerStaleMs
+      );
+      if (!fenced) {
+        log({
+          event: "WARN",
+          component: "browser-worker",
+          taskId: task.id,
+          message: "Dispatch fence CAS failed — not touching chat",
+        });
+        this.clearActiveTask(workerState);
+        return;
+      }
+
+      if (
+        this.activeTaskId !== task.id ||
+        !taskService.renewLease(
+          task.id,
+          this.workerId,
+          leaseToken,
+          this.instanceToken,
+          this.leaseMs,
+          this.workerStaleMs
+        )
+      ) {
+        log({
+          event: "WARN",
+          component: "browser-worker",
+          taskId: task.id,
+          message: "Lost lease after fence — skip TASK_ID type (fail-closed)",
+        });
+        this.clearActiveTask(workerState);
+        return;
+      }
+
+      await browser.submitTaskId(task.id);
+      taskService.renewLease(
+        task.id,
+        this.workerId,
+        leaseToken,
+        this.instanceToken,
+        this.leaseMs,
+        this.workerStaleMs
+      );
       workerState.setStatus("BUSY", { currentTaskId: task.id });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await browser.screenshotOnFailure(task.id);
-      taskService.markDispatchFailed(task.id, message);
+      taskService.markDispatchFailed(task.id, message, {
+        workerId: this.workerId,
+        leaseToken,
+        instanceToken: this.instanceToken,
+      });
       log({
         event: "WARN",
         component: "browser-worker",
         taskId: task.id,
         message: `Dispatch failed (will retry if remaining): ${message}`,
       });
-      workerState.setStatus("READY", { currentTaskId: null, error: null });
+      this.clearActiveTask(workerState);
     }
   }
 
@@ -182,15 +371,16 @@ export class BrowserWorker {
     browser: ChatGptBrowser
   ): Promise<void> {
     const taskId = this.activeTaskId!;
+    const leaseToken = this.activeLeaseToken!;
     const elapsed = Date.now() - this.activeTaskStartedAt;
-    const { status } = taskService.getTaskStatus(taskId);
 
+    // Check terminal status BEFORE renew — COMPLETED is not a lease loss.
+    const { status } = taskService.getTaskStatus(taskId);
     if (status === "COMPLETED") {
       this.clearActiveTask(workerState);
       this.rateLimitRetryIndex = 0;
       return;
     }
-
     if (
       status === "FAILED" ||
       status === "TIMED_OUT" ||
@@ -200,17 +390,65 @@ export class BrowserWorker {
       return;
     }
 
+    const renewed = taskService.renewLease(
+      taskId,
+      this.workerId,
+      leaseToken,
+      this.instanceToken,
+      this.leaseMs,
+      this.workerStaleMs
+    );
+    if (!renewed) {
+      log({
+        event: "WARN",
+        component: "browser-worker",
+        taskId,
+        message: "Lost lease/incarnation — dropping active task without chat write",
+      });
+      this.clearActiveTask(workerState);
+      return;
+    }
+
     workerState.setStatus("BUSY", { currentTaskId: taskId });
 
-    if (this.nudgeStage < NUDGE_AT_MS.length) {
-      const nextAt = NUDGE_AT_MS[this.nudgeStage]!;
-      if (elapsed >= nextAt) {
+    if (!this.nudgeSent && elapsed >= NUDGE_AT_MS) {
+      const fenced = taskService.markNudgeStarted(
+        taskId,
+        this.workerId,
+        leaseToken,
+        this.instanceToken,
+        this.leaseMs,
+        this.workerStaleMs
+      );
+      this.nudgeSent = true;
+      if (fenced) {
+        taskService.renewLease(
+          taskId,
+          this.workerId,
+          leaseToken,
+          this.instanceToken,
+          this.leaseMs,
+          this.workerStaleMs
+        );
         try {
           await browser.sendSubmitNudge(taskId);
+          log({
+            event: "INFO",
+            component: "browser-worker",
+            taskId,
+            message: `Sent submit nudge (TASK_ID=${taskId})`,
+          });
         } catch {
-          // Nudge is best-effort; timeout path still fails the task.
+          // Fail-closed: do not retry nudge after marker.
         }
-        this.nudgeStage += 1;
+        taskService.renewLease(
+          taskId,
+          this.workerId,
+          leaseToken,
+          this.instanceToken,
+          this.leaseMs,
+          this.workerStaleMs
+        );
       }
     }
 
@@ -229,8 +467,9 @@ export class BrowserWorker {
 
   private clearActiveTask(workerState: WorkerStateManager): void {
     this.activeTaskId = null;
+    this.activeLeaseToken = null;
     this.activeTaskStartedAt = 0;
-    this.nudgeStage = 0;
+    this.nudgeSent = false;
     workerState.setStatus("READY", { currentTaskId: null, error: null });
   }
 
@@ -238,33 +477,7 @@ export class BrowserWorker {
     taskService: TaskService,
     workerState: WorkerStateManager
   ): void {
-    const repo = new TaskRepository(getDatabase());
-    const nowIso = new Date(Date.now() + 1000).toISOString();
-    const staleIso = new Date(
-      Date.now() - this.options.approvalTimeoutMs
-    ).toISOString();
-
-    for (const task of repo.findStuckDispatching(nowIso)) {
-      taskService.markDispatchFailed(
-        task.id,
-        "Recovered stuck DISPATCHING on worker start"
-      );
-    }
-
-    for (const task of repo.findStaleOpenTasks(staleIso)) {
-      taskService.markSubmitTimedOut(
-        task.id,
-        "Recovered stale in-flight task on worker start"
-      );
-    }
-
-    for (const task of repo.findLegacyWaitingApproval()) {
-      taskService.markSubmitTimedOut(
-        task.id,
-        "Recovered legacy WAITING_APPROVAL on worker start"
-      );
-    }
-
+    // Lease expiry is owned by status-api; worker only clears local in-memory state.
     const prev = workerState.getStatus();
     if (prev !== "READY") {
       log({
@@ -274,27 +487,6 @@ export class BrowserWorker {
       });
     }
     this.clearActiveTask(workerState);
-  }
-
-  private async checkStaleOpenTasks(taskService: TaskService): Promise<void> {
-    const repo = new TaskRepository(getDatabase());
-    const threshold = new Date(
-      Date.now() - this.options.approvalTimeoutMs
-    ).toISOString();
-
-    for (const task of repo.findStaleOpenTasks(threshold)) {
-      taskService.markSubmitTimedOut(
-        task.id,
-        "Stale in-flight task timed out while worker idle"
-      );
-    }
-
-    for (const task of repo.findLegacyWaitingApproval()) {
-      taskService.markSubmitTimedOut(
-        task.id,
-        "Legacy WAITING_APPROVAL cleared while worker idle"
-      );
-    }
   }
 }
 
@@ -306,12 +498,13 @@ export async function startBrowserWorker(
   options: BrowserWorkerOptions
 ): Promise<BrowserWorker> {
   const worker = new BrowserWorker(options);
+  // Await the loop so browser-worker process stays alive; reconnect is internal.
   void worker.start().catch((err) => {
     const message = err instanceof Error ? err.message : String(err);
     log({
       event: "ERROR",
       component: "browser-worker",
-      message: `Worker start failed (process stays up for /health): ${message}`,
+      message: `Worker start failed fatally: ${message}`,
     });
   });
   return worker;

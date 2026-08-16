@@ -6,7 +6,9 @@ export type LogComponent =
   | "task-service"
   | "browser-worker"
   | "http-api"
-  | "cursor-hook";
+  | "cursor-hook"
+  | "lease-reaper"
+  | "config";
 
 export type LogEvent =
   | "TASK_CREATED"

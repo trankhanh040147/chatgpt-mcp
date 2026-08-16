@@ -87,9 +87,13 @@ Cursor handoff_get_result → continue work
 
 ### Task status (simplified)
 
+Worker claims with a **lease** (`lease_owner` + `lease_token` + TTL). Before typing `TASK_ID`, the worker commits a **dispatch fence** (`dispatch_started_at`, status → `DISPATCHED`). Pre-fence lease expiry **requeues**; post-fence expiry → **TIMED_OUT** (never re-dispatch the same id).
+
+**0.2.0 multi-worker:** N `browser-worker` processes (one Chrome profile/CDP/chat each) + one `status-api` on `:8787` (HTTP wait/status + lease reaper). Single-worker default still runs `worker`/`all` = status-api + one browser in-process. **Cost:** N CDP Chromes burn RAM and desktop space — accepted for 0.2.0; **0.3.0** targets CDP optimize + assisted create-worker.
+
 ```text
-QUEUED → DISPATCHING → DISPATCHED → PROCESSING → COMPLETED
-                         ↘ FAILED / WAITING_APPROVAL / …
+QUEUED → DISPATCHING → [fence] DISPATCHED → PROCESSING → COMPLETED
+              ↘ requeue (pre-fence)     ↘ TIMED_OUT / FAILED
 ```
 
 Worker only claims work when its own state is **READY**. If stuck at `QUEUED`, the HTTP API may still be up while the dispatcher is not READY (e.g. `STARTING`).
@@ -115,7 +119,9 @@ CDP Chrome (debug dir)     ← worker attaches here — login Pro again once
 | Tool definitions | `src/mcp/tools/index.ts` |
 | Worker loop | `src/browser/worker.ts` |
 | CDP attach | `src/browser/chatgpt.ts` |
-| Config / modes | `src/index.ts` (`mcp` \| `worker` \| `remote-mcp`) |
+| Config / modes | `src/index.ts` (`mcp` \| `status-api` \| `worker` \| `browser-worker` \| `remote-mcp`) |
+| Leases / fencing | `src/tasks/task.repository.ts` |
+| Topology validation | `src/config/workers-topology.ts` |
 | Env inventory | Obsidian `vault-mac-1/configs/chatgpt-mcp-env.md` |
 | Full product spec | `docs/spec.md` |
 

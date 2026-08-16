@@ -3,10 +3,16 @@ import { initDatabase, getDatabase } from "../db/sqlite.js";
 import { TaskRepository } from "../tasks/task.repository.js";
 import { TaskService } from "../tasks/task.service.js";
 import { log } from "../logging/logger.js";
+import { DEFAULT_WORKER_ID } from "../tasks/task.types.js";
 
 export interface HttpApiOptions {
   port: number;
   dbPath: string;
+  /** When true, run expireLeases on an interval (status-api ownership). */
+  runLeaseReaper?: boolean;
+  reaperIntervalMs?: number;
+  /** Optional default worker id for GET /worker single-view (compat). */
+  workerId?: string;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -37,22 +43,104 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
   initDatabase(options.dbPath);
   const repo = new TaskRepository(getDatabase());
   const taskService = new TaskService(repo);
+  const viewWorkerId = options.workerId?.trim() || DEFAULT_WORKER_ID;
+
+  let lastReapAt: string | null = null;
+  let lastReapStats: {
+    requeued: number;
+    timedOut: number;
+    failed: number;
+  } | null = null;
+
+  if (options.runLeaseReaper) {
+    const interval = options.reaperIntervalMs ?? 2000;
+    const tick = () => {
+      try {
+        const stats = taskService.expireLeases();
+        lastReapAt = new Date().toISOString();
+        lastReapStats = stats;
+        if (stats.requeued || stats.timedOut || stats.failed) {
+          log({
+            event: "INFO",
+            component: "lease-reaper",
+            message: `expireLeases requeued=${stats.requeued} timedOut=${stats.timedOut} failed=${stats.failed}`,
+          });
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log({
+          event: "ERROR",
+          component: "lease-reaper",
+          message,
+        });
+      }
+    };
+    tick();
+    setInterval(tick, interval).unref?.();
+  }
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://localhost:${options.port}`);
 
     try {
       if (req.method === "GET" && url.pathname === "/health") {
-        sendJson(res, 200, { ok: true });
+        sendJson(res, 200, {
+          ok: true,
+          lastReapAt,
+          reaper: Boolean(options.runLeaseReaper),
+        });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/workers") {
+        const now = Date.now();
+        const staleMs = Number(process.env.HANDOFF_WORKER_STALE_MS ?? 120_000);
+        const workers = repo.listWorkers().map((w) => {
+          const lastSeenMs = w.lastSeenAt
+            ? Date.parse(w.lastSeenAt)
+            : Number.NaN;
+          const heartbeatStale =
+            !Number.isFinite(lastSeenMs) || now - lastSeenMs > staleMs;
+          let pidAlive = false;
+          if (w.pid && w.pid > 0) {
+            try {
+              process.kill(w.pid, 0);
+              pidAlive = true;
+            } catch {
+              pidAlive = false;
+            }
+          }
+          const healthy = pidAlive && !heartbeatStale;
+          return {
+            id: w.id,
+            status: w.status,
+            healthy,
+            pidAlive,
+            heartbeatStale,
+            activeTask: Boolean(w.currentTaskId),
+            currentTaskId: w.currentTaskId ?? null,
+            lastSeenAt: w.lastSeenAt ?? null,
+            startedAt: w.startedAt ?? null,
+            httpPort: w.httpPort ?? null,
+            errorCode: w.error
+              ? w.error.split(":")[0]?.slice(0, 64) ?? "ERROR"
+              : null,
+          };
+        });
+        sendJson(res, 200, {
+          workers,
+          lastReapAt,
+          lastReapStats,
+        });
         return;
       }
 
       if (req.method === "GET" && url.pathname === "/worker") {
-        const state = repo.getWorkerState();
-        // Minimal schema for harness/diagnostics — no raw paths or full error blobs.
+        const state = repo.getWorkerState(viewWorkerId);
         sendJson(res, 200, {
           status: state.status,
           activeTask: Boolean(state.currentTaskId),
+          workerId: state.id,
           errorCode: state.error
             ? state.error.split(":")[0]?.slice(0, 64) ?? "ERROR"
             : null,
@@ -60,8 +148,6 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         return;
       }
 
-      // Long-poll: GET /tasks/:id/wait?timeoutSeconds=480
-      // Must be matched before the plain /tasks/:id status route.
       const waitMatch = url.pathname.match(/^\/tasks\/([^/]+)\/wait$/);
       if (req.method === "GET" && waitMatch) {
         const taskId = decodeURIComponent(waitMatch[1] ?? "");
@@ -170,7 +256,6 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
     }
   });
 
-  // Stop hook may long-poll up to ~500s; disable default request timeouts.
   server.requestTimeout = 0;
   server.headersTimeout = 0;
   server.timeout = 0;
@@ -180,9 +265,9 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
       if (err.code === "EADDRINUSE") {
         reject(
           new Error(
-            `Port ${options.port} already in use — a worker is already running. ` +
+            `Port ${options.port} already in use — status-api (or another process) is already bound. ` +
               `Check: curl -s http://127.0.0.1:${options.port}/health  ` +
-              `Do not start a second \`npm run worker\`.`
+              `For multi-worker, run one status-api on :${options.port} and separate browser-worker processes.`
           )
         );
         return;
@@ -193,7 +278,8 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
       log({
         event: "INFO",
         component: "http-api",
-        message: `Status API listening on http://127.0.0.1:${options.port}`,
+        message: `Status API listening on http://127.0.0.1:${options.port}` +
+          (options.runLeaseReaper ? " (lease reaper on)" : ""),
       });
       resolve();
     });

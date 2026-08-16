@@ -24,7 +24,7 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | Claude Code / other MCP hosts | Experimental | Manual poll by `taskId` |
 | Ubuntu desktop | Experimental | Not Snap/WSL/headless |
 | Windows / WSL / headless | Not supported | — |
-| Multi-worker | Not started | Target **0.2.0** |
+| Multi-worker | **0.2.0** | Leases + fencing + status-api; dual CDP E2E |
 
 ## Sequencing principles
 
@@ -40,13 +40,13 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | Version | Outcome | P0 scope | Exit criteria | Explicitly deferred |
 |---------|---------|----------|---------------|---------------------|
 | **0.1.0** | Reproducible Cursor/macOS preview | setup/start/check, scrubbed public source, transport canary, honest limitations | Tagged preview; stranger ≤15 min path documented; no secret paths in repo | Multi-host API, concurrency, agent auto-policy |
-| **0.2.0** | Static multi-worker + operability | Two+ configured workers; leases, heartbeats, fencing; stable worker IDs; observability | ≥2 workers, concurrency 1 each; crash recovery; usable ops signals (`make status` / health) | Dynamic pool; auto-create chats |
-| **0.3.0** | Assisted worker provisioning | Guided wizard + handshake; READY only after E2E smoke | User still does ChatGPT login + MCP write approvals; no cookie / auto-approve automation | Unattended CDP chat creation |
+| **0.2.0** | Static multi-worker + operability | Two+ configured workers; leases, heartbeats, fencing; stable worker IDs; observability | ≥2 workers, concurrency 1 each; crash recovery; usable ops signals (`make status` / health) | Dynamic pool; auto-create chats; single-CDP multi-tab |
+| **0.3.0** | CDP optimize + assisted create-worker | Fewer Chrome processes / on-demand CDP where safe; guided create/register worker chat; READY after canary | Operator can add a worker without hand-editing only; RAM/workspace cost down vs naïve N Chromes; login + MCP approve still manual | Unattended cookie/login; elastic cloud pool |
 | **0.4.0** | Agent UX: auto-trigger MCP + thinking effort | Cursor skill/rule decision policy; Light/Standard/Deep; frozen trigger scenarios | Scenario set passes; ≤1 handoff/decision; reason recorded; trivial tasks skip | Host-generic product “chooser”; fake effort knobs |
 | **0.5.0** | Portable core | Optional `clientSessionId`; `taskId` authoritative; core ≠ host adapters | Create with/without session; Cursor UX preserved; docs/skills updated | Supported Claude polish |
 | **0.6.0** | Claude host | Claude skill/hook equivalent; E2E by `taskId` | Documented Claude path + clean evidence run | Marketplace / Windows |
 
-### 0.2.0 — Static multi-worker (next)
+### 0.2.0 — Static multi-worker (**shipped**)
 
 Ship as its own feature release. Prefer **explicit worker configs** (env / file), not a dynamic cloud pool.
 
@@ -63,16 +63,31 @@ Ship as its own feature release. Prefer **explicit worker configs** (env / file)
 - Auto-creating ChatGPT conversations
 - Auto-login or auto-approving MCP writes
 - Elastic / dynamic worker pool
+- Collapsing N workers onto **one** Chrome/CDP (accepted cost for 0.2.0; moved to **0.3.0**)
 
-### 0.3.0 — Assisted provisioning (“auto-create workers”)
+### 0.3.0 — CDP optimize + assisted create-worker (**next**)
 
-**Consent model (A):** wizard guides the human; system does **not** silently create sessions.
+Combines two operator pain points left after 0.2.0:
 
-- Steps: create/open worker chat → paste URL → connect remote MCP / tunnel → approve write tools → run canary → mark READY
-- Optional CDP assist that opens ChatGPT UI, but **login and write approval remain manual**
-- READY only after a successful E2E canary (create → dispatch → submit → get result)
+1. **CDP fan-out cost** — N Chrome windows burn RAM and desktop space.
+2. **Create / register worker** — today is manual URL + profile setup.
 
-Never as default: cookie export, password automation, auto-click MCP approve.
+**Consent model (A)** for provisioning: wizard guides the human; system does **not** silently create sessions or approve writes.
+
+#### P0
+
+- **CDP optimize (pick + ship at least one proven path):**
+  - multi-tab / single-browser dispatcher with composer isolation, and/or
+  - on-demand CDP (start profile when claiming, stop when idle), and/or
+  - minimized/background Chrome where ChatGPT session stays valid
+- **Assisted create-worker:** create/open chat → capture URL → wire topology (`workers.json` / env) → optional tunnel check → approve write tools (manual) → canary → READY
+- Keep fence-before-type, leases, and no cross-talk on composers
+
+#### Non-goals for 0.3.0
+
+- Cookie export / password automation / auto-click MCP approve
+- Elastic cloud worker pool
+- Changing the pull-queue model (create still enqueues; idle workers claim) — admission control (“no idle worker → reject”) is optional stretch, not required to tag 0.3.0
 
 ### 0.4.0 — Agent UX (deferred)
 
@@ -84,34 +99,42 @@ Task classes Light / Standard / Deep map local effort; handoff only when it adds
 
 ## Current milestone
 
-- **Product next:** **0.2.0** static multi-worker (leases, heartbeats, fencing, ops).
-- **Then:** **0.3.0** assisted worker provisioning (wizard + manual consent).
+- **Shipped:** **0.1.0** (macOS/Cursor developer preview) and **0.2.0** (static multi-worker: leases, fencing, dual CDP E2E).
+- **Product next:** **0.3.0** — CDP fan-out optimization + assisted create-worker (see below).
 - **Deferred after that:** **0.4.0** agent UX → **0.5.0** portable core → **0.6.0** Claude host.
-- **Package note:** local `package.json` may still say `0.2.0-preview.0` until multi-worker work lands; rename/tag when 0.2.0 exit criteria are met.
-- **0.1.0 evidence gaps:** A/B bench scores pending ([benchmark/results.md](benchmark/results.md)); stranger onboarding ([onboarding-timing.md](onboarding-timing.md)).
+- **0.1.0 evidence gaps (non-blocking):** A/B bench scores ([benchmark/results.md](benchmark/results.md)); stranger onboarding ([onboarding-timing.md](onboarding-timing.md)).
 
 ## Near-term queue
 
-1. Spec + implement **0.2.0** multi-worker (lease model, dual-worker E2E).
-2. Spec + implement **0.3.0** assisted provisioning wizard (consent model A).
-3. Close remaining **0.1.0** evidence (bench + timing) without blocking 0.2.0.
-4. Then **0.4.0** agent UX → **0.5.0** portable core → **0.6.0** Claude.
+1. Spec + implement **0.3.0** (CDP optimize + create-worker wizard).
+2. Close remaining **0.1.0** evidence (bench + timing) without blocking 0.3.0.
+3. Then **0.4.0** agent UX → **0.5.0** portable core → **0.6.0** Claude.
 
 ## Deferred / non-goals
 
 | Item | Reconsider at |
 |------|----------------|
-| Dynamic worker pool | After **0.2.0** leases/fencing are proven |
+| Dynamic worker pool | After **0.3.0** create-worker path is proven |
 | Auto-login / cookie export / auto-approve writes | Never as default; only with explicit consent UX in **0.3.0+** |
 | Unattended ChatGPT chat creation via CDP | Prefer assisted wizard (**0.3.0**); revisit only with strong fail-closed UX |
 | “Works with all coding agents” claim | After each host has evidence (**0.6.0+**) |
 | Marketplace / Windows | After macOS+Cursor multi-worker bar is solid |
 
+### CDP fan-out (moved into **0.3.0**)
+
+**Problem (2026-08-15):** Static multi-worker requires **one Chrome CDP profile + port + worker chat per browser-worker**. Correct for isolating composer/UI, but scales poorly: RAM, window clutter, and operator workspace.
+
+**0.2.0 stance (shipped):** Keep separate CDPs. Do not share one Chrome across two `browser-worker` processes.
+
+**0.3.0 work:** Ship a safer CDP footprint (multi-tab dispatcher and/or on-demand CDP) **together with** assisted create-worker. Keep fence-before-type, no cross-talk on composers, fail-closed consent.
+
 ## Decision log
 
 | Date | Decision | Reason | Supersedes |
 |------|----------|--------|------------|
+| 2026-08-16 | **0.2.0 shipped**; **0.3.0** = CDP optimize + assisted create-worker | Dual E2E + lease PASS; operator asked to pull CDP fan-out into next milestone with provisioning | 2026-08-15 “fewer CDPs deferred unscheduled”; 0.3.0 provisioning-only |
 | 2026-08-15 | Ladder: 0.1.0 → **0.2.0 multi-worker** → **0.3.0 assisted provision** → 0.4.0 agent UX → 0.5.0 portable → 0.6.0 Claude | Operator priority: scale workers before vibe-coding policy | 2026-08-13 ladder (agent UX ASAP as 0.2.0; multi-worker as 0.5.0) |
+| 2026-08-15 | 0.2.0 keeps **1 CDP Chrome per worker**; “fewer CDPs / less RAM” deferred post-0.2.0 | Dual E2E needs isolated composers; N Chrome is costly — redesign later (multi-tab dispatcher / on-demand CDP) | — |
 | 2026-08-15 | 0.3.0 = wizard + manual login/MCP approve (model A) | Fail-closed consent; avoid brittle unattended CDP create | Unattended auto-create as default |
 | 2026-08-13 | `docs/roadmap.md` is sole version SSOT | Avoid dual authority with `.planning` notes | `.planning/2026-08-13-future-versions.md` |
 | 2026-08-13 | Auto-trigger + effort = skill/rule first | Product server cannot infer host task difficulty | Building chooser into core queue |
