@@ -1,9 +1,19 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { initDatabase, getDatabase } from "../db/sqlite.js";
 import { TaskRepository } from "../tasks/task.repository.js";
 import { TaskService } from "../tasks/task.service.js";
 import { log } from "../logging/logger.js";
-import { DEFAULT_WORKER_ID } from "../tasks/task.types.js";
+import { DEFAULT_WORKER_ID, type HandoffTask } from "../tasks/task.types.js";
+import {
+  dashboardContentMode,
+  deriveWorkerIndicators,
+  redactPreview,
+  sanitizeChatUrl,
+  taskTiming,
+} from "../dashboard/observability.js";
 
 export interface HttpApiOptions {
   port: number;
@@ -15,9 +25,87 @@ export interface HttpApiOptions {
   workerId?: string;
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  extraHeaders?: Record<string, string>
+): void {
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    ...extraHeaders,
+  });
   res.end(JSON.stringify(body));
+}
+
+function scrubTaskListItem(t: HandoffTask, nowIso: string) {
+  const timing = taskTiming(t, nowIso);
+  return {
+    id: t.id,
+    status: t.status,
+    type: t.type,
+    leaseOwner: t.leaseOwner ?? null,
+    createdAt: t.createdAt,
+    completedAt: t.completedAt ?? null,
+    dispatchStartedAt: timing.dispatchStartedAt,
+    dispatchedAt: timing.dispatchedAt,
+    processingAt: timing.processingAt,
+    terminalAt: timing.terminalAt,
+    queueMs: timing.queueMs,
+    processingMs: timing.processingMs,
+    totalMs: timing.totalMs,
+    processingAgeMs: timing.processingAgeMs,
+    errorCode: t.error
+      ? t.error.split(":")[0]?.slice(0, 64) ?? "ERROR"
+      : null,
+    hasPrompt: Boolean(t.prompt),
+    hasResult: Boolean(t.result),
+  };
+}
+
+function dashboardPublicDir(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, "../dashboard/public"),
+    join(process.cwd(), "src/dashboard/public"),
+    join(process.cwd(), "dist/dashboard/public"),
+  ];
+  return (
+    candidates.find((p) => existsSync(join(p, "index.html"))) ?? candidates[0]!
+  );
+}
+
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+};
+
+function serveDashboardAsset(
+  res: ServerResponse,
+  pathname: string
+): boolean {
+  const root = dashboardPublicDir();
+  let rel = pathname.replace(/^\/dashboard\/?/, "");
+  if (!rel || rel === "") rel = "index.html";
+  if (rel.includes("..") || rel.startsWith("/")) {
+    sendJson(res, 400, { error: "bad path" });
+    return true;
+  }
+  const filePath = join(root, rel);
+  if (!existsSync(filePath)) {
+    return false;
+  }
+  const body = readFileSync(filePath);
+  res.writeHead(200, {
+    "Content-Type": MIME[extname(filePath)] ?? "application/octet-stream",
+    "Cache-Control": "no-store",
+  });
+  res.end(body);
+  return true;
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -31,7 +119,6 @@ async function readBody(req: IncomingMessage): Promise<string> {
 const TERMINAL_WAIT_STATUSES = new Set([
   "COMPLETED",
   "FAILED",
-  "TIMED_OUT",
   "CANCELLED",
 ]);
 
@@ -83,6 +170,22 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
     const url = new URL(req.url ?? "/", `http://localhost:${options.port}`);
 
     try {
+      if (
+        req.method === "GET" &&
+        (url.pathname === "/dashboard" || url.pathname === "/dashboard/")
+      ) {
+        res.writeHead(302, { Location: "/dashboard/index.html" });
+        res.end();
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname.startsWith("/dashboard/")) {
+        if (!serveDashboardAsset(res, url.pathname)) {
+          sendJson(res, 404, { error: "Dashboard asset not found" });
+        }
+        return;
+      }
+
       if (req.method === "GET" && url.pathname === "/health") {
         sendJson(res, 200, {
           ok: true,
@@ -94,11 +197,17 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
 
       if (req.method === "GET" && url.pathname === "/workers") {
         const now = Date.now();
+        const nowIso = new Date(now).toISOString();
         const staleMs = Number(process.env.HANDOFF_WORKER_STALE_MS ?? 120_000);
+        const since24h = new Date(now - 24 * 3600_000).toISOString();
+        const counts = repo.countTerminalByLeaseOwner(since24h);
         const workers = repo.listWorkers().map((w) => {
           const lastSeenMs = w.lastSeenAt
             ? Date.parse(w.lastSeenAt)
             : Number.NaN;
+          const heartbeatAgeMs = Number.isFinite(lastSeenMs)
+            ? now - lastSeenMs
+            : null;
           const heartbeatStale =
             !Number.isFinite(lastSeenMs) || now - lastSeenMs > staleMs;
           let pidAlive = false;
@@ -111,17 +220,47 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
             }
           }
           const healthy = pidAlive && !heartbeatStale;
+          const agg = counts.get(w.id) ?? {
+            completed: 0,
+            failed: 0,
+            timedOut: 0,
+          };
+          let currentTaskAgeMs: number | null = null;
+          if (w.currentTaskId) {
+            const cur = repo.getTaskById(w.currentTaskId);
+            if (cur) {
+              currentTaskAgeMs = taskTiming(cur, nowIso).processingAgeMs;
+            }
+          }
+          const chatUrl = sanitizeChatUrl(w.workerUrl);
           return {
             id: w.id,
             status: w.status,
             healthy,
+            pid: w.pid ?? null,
             pidAlive,
             heartbeatStale,
+            heartbeatAgeMs,
             activeTask: Boolean(w.currentTaskId),
             currentTaskId: w.currentTaskId ?? null,
             lastSeenAt: w.lastSeenAt ?? null,
             startedAt: w.startedAt ?? null,
             httpPort: w.httpPort ?? null,
+            chatUrl,
+            chatAvailable: Boolean(chatUrl),
+            completedLast24h: agg.completed,
+            failedLast24h: agg.failed,
+            timedOutLast24h: agg.timedOut,
+            indicators: deriveWorkerIndicators({
+              status: w.status,
+              healthy,
+              pidAlive,
+              heartbeatStale,
+              heartbeatAgeMs,
+              currentTaskAgeMs,
+              recentFailed: agg.failed,
+              recentTimedOut: agg.timedOut,
+            }),
             errorCode: w.error
               ? w.error.split(":")[0]?.slice(0, 64) ?? "ERROR"
               : null,
@@ -131,6 +270,7 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           workers,
           lastReapAt,
           lastReapStats,
+          serverTime: nowIso,
         });
         return;
       }
@@ -148,11 +288,21 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         return;
       }
 
+      if (req.method === "GET" && url.pathname === "/tasks") {
+        const limit = Number(url.searchParams.get("limit") ?? 40);
+        const nowIso = new Date().toISOString();
+        const tasks = repo
+          .listRecentTasks(limit)
+          .map((t) => scrubTaskListItem(t, nowIso));
+        sendJson(res, 200, { tasks, serverTime: nowIso });
+        return;
+      }
+
       const waitMatch = url.pathname.match(/^\/tasks\/([^/]+)\/wait$/);
       if (req.method === "GET" && waitMatch) {
         const taskId = decodeURIComponent(waitMatch[1] ?? "");
         const timeoutSeconds = Math.min(
-          600,
+          1800,
           Math.max(1, Number(url.searchParams.get("timeoutSeconds") ?? 480))
         );
         const tickMs = Math.min(
@@ -199,13 +349,74 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
       }
 
       if (req.method === "GET" && url.pathname.startsWith("/tasks/")) {
-        const taskId = url.pathname.slice("/tasks/".length);
-        if (!taskId || taskId.includes("/")) {
+        const rest = url.pathname.slice("/tasks/".length);
+        const parts = rest.split("/").filter(Boolean);
+        const taskId = parts[0] ? decodeURIComponent(parts[0]) : "";
+        const sub = parts[1];
+
+        if (!taskId || taskId.includes("..")) {
           sendJson(res, 404, { error: "Not found" });
           return;
         }
-        const status = taskService.getTaskStatus(taskId);
-        sendJson(res, 200, status);
+
+        if (sub === "detail") {
+          const task = repo.getTaskById(taskId);
+          if (!task) {
+            sendJson(res, 404, { error: `Task not found: ${taskId}` });
+            return;
+          }
+          const nowIso = new Date().toISOString();
+          sendJson(res, 200, {
+            ...scrubTaskListItem(task, nowIso),
+            contentMode: dashboardContentMode(),
+            serverTime: nowIso,
+          });
+          return;
+        }
+
+        if (sub === "content") {
+          const mode = dashboardContentMode();
+          if (mode !== "redacted") {
+            sendJson(res, 403, {
+              error: "Task content disabled",
+              hint: "Set HANDOFF_DASHBOARD_TASK_CONTENT=redacted to enable redacted previews",
+              mode: "off",
+            });
+            return;
+          }
+          const task = repo.getTaskById(taskId);
+          if (!task) {
+            sendJson(res, 404, { error: `Task not found: ${taskId}` });
+            return;
+          }
+          sendJson(res, 200, {
+            taskId: task.id,
+            mode: "redacted",
+            prompt: redactPreview(task.prompt),
+            result: redactPreview(task.result),
+            warning:
+              "Best-effort server redaction — not a guarantee. Localhost only.",
+          });
+          return;
+        }
+
+        if (sub) {
+          sendJson(res, 404, { error: "Not found" });
+          return;
+        }
+
+        // Compat: status-only (hooks / waiters)
+        try {
+          const status = taskService.getTaskStatus(taskId);
+          sendJson(res, 200, status);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (message.includes("Task not found")) {
+            sendJson(res, 404, { error: message });
+            return;
+          }
+          throw err;
+        }
         return;
       }
 
@@ -278,8 +489,10 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
       log({
         event: "INFO",
         component: "http-api",
-        message: `Status API listening on http://127.0.0.1:${options.port}` +
-          (options.runLeaseReaper ? " (lease reaper on)" : ""),
+        message:
+          `Status API listening on http://127.0.0.1:${options.port}` +
+          (options.runLeaseReaper ? " (lease reaper on)" : "") +
+          ` · dashboard http://127.0.0.1:${options.port}/dashboard/`,
       });
       resolve();
     });

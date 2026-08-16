@@ -99,6 +99,12 @@ function rowToWorker(row: WorkerRow): WorkerStateRow {
   };
 }
 
+/** Drop lease auth fields but keep lease_owner for ops attribution on terminal rows. */
+function clearLeaseAuthSets(): string {
+  return `lease_token = NULL, lease_expires_at = NULL`;
+}
+
+/** Full lease release (required when returning to QUEUED / free claim). */
 function clearLeaseSets(): string {
   return `lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL`;
 }
@@ -146,6 +152,59 @@ export class TaskRepository {
     return row ? rowToTask(row) : null;
   }
 
+  /** Newest-first task rows for ops dashboard (full rows; callers must scrub). */
+  listRecentTasks(limit = 40): HandoffTask[] {
+    const n = Math.min(200, Math.max(1, Math.floor(limit)));
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM handoff_tasks
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .all(n) as unknown as TaskRow[];
+    return rows.map(rowToTask);
+  }
+
+  /**
+   * Terminal-task counts by lease_owner since `sinceIso` (inclusive).
+   * Honest aggregate for dashboard — not a max/capacity budget.
+   */
+  countTerminalByLeaseOwner(sinceIso: string): Map<
+    string,
+    { completed: number; failed: number; timedOut: number }
+  > {
+    const rows = this.db
+      .prepare(
+        `SELECT lease_owner AS owner, status, COUNT(*) AS n
+         FROM handoff_tasks
+         WHERE lease_owner IS NOT NULL
+           AND status IN ('COMPLETED', 'FAILED', 'TIMED_OUT')
+           AND COALESCE(completed_at, created_at) >= ?
+         GROUP BY lease_owner, status`
+      )
+      .all(sinceIso) as unknown as Array<{
+      owner: string;
+      status: string;
+      n: number;
+    }>;
+    const map = new Map<
+      string,
+      { completed: number; failed: number; timedOut: number }
+    >();
+    for (const row of rows) {
+      const cur = map.get(row.owner) ?? {
+        completed: 0,
+        failed: 0,
+        timedOut: 0,
+      };
+      if (row.status === "COMPLETED") cur.completed += Number(row.n);
+      else if (row.status === "FAILED") cur.failed += Number(row.n);
+      else if (row.status === "TIMED_OUT") cur.timedOut += Number(row.n);
+      map.set(row.owner, cur);
+    }
+    return map;
+  }
+
   updateTaskStatus(
     id: string,
     status: HandoffTaskStatus,
@@ -182,7 +241,8 @@ export class TaskRepository {
       values.push(extra.retryCount);
     }
     if (extra.clearLease) {
-      sets.push(clearLeaseSets());
+      // Keep lease_owner for terminal attribution; token/expiry must drop.
+      sets.push(clearLeaseAuthSets());
     }
 
     values.push(id);
@@ -192,8 +252,28 @@ export class TaskRepository {
   }
 
   /**
+   * Worker/reaper timeout. Refuses to clobber COMPLETED (late-submit race).
+   * Keeps lease_owner for dashboard attribution.
+   */
+  markTimedOutIfOpen(id: string, error: string): number {
+    const info = this.db
+      .prepare(
+        `UPDATE handoff_tasks
+         SET status = 'TIMED_OUT',
+             error = ?,
+             completed_at = ?,
+             ${clearLeaseAuthSets()}
+         WHERE id = ?
+           AND status IN ('DISPATCHING', 'DISPATCHED', 'PROCESSING', 'WAITING_APPROVAL')
+           AND result IS NULL`
+      )
+      .run(error, new Date().toISOString(), id);
+    return Number(info.changes ?? 0);
+  }
+
+  /**
    * First completion only. Requires durable dispatch marker.
-   * Clears lease_owner in the same update (partial unique index).
+   * Clears lease auth but keeps lease_owner for ops counts.
    */
   saveResultIfOpen(
     id: string,
@@ -204,9 +284,9 @@ export class TaskRepository {
       .prepare(
         `UPDATE handoff_tasks
          SET status = ?, result = ?, result_metadata_json = ?, completed_at = ?,
-             ${clearLeaseSets()}
+             ${clearLeaseAuthSets()}
          WHERE id = ?
-           AND status IN ('DISPATCHED', 'PROCESSING', 'WAITING_APPROVAL')
+           AND status IN ('DISPATCHED', 'PROCESSING', 'WAITING_APPROVAL', 'TIMED_OUT')
            AND dispatch_started_at IS NOT NULL
            AND result IS NULL`
       )
@@ -234,7 +314,7 @@ export class TaskRepository {
       .prepare(
         `SELECT * FROM handoff_tasks
          WHERE cursor_conversation_id = ?
-           AND status IN ('QUEUED', 'DISPATCHING', 'DISPATCHED', 'PROCESSING', 'RATE_LIMITED')
+           AND status IN ('QUEUED', 'DISPATCHING', 'DISPATCHED', 'PROCESSING', 'WAITING_APPROVAL', 'RATE_LIMITED')
          ORDER BY created_at ASC
          LIMIT 1`
       )
@@ -661,10 +741,11 @@ export class TaskRepository {
                SET status = 'FAILED',
                    retry_count = ?,
                    error = 'Lease expired before dispatch fence (max retries)',
-                   ${clearLeaseSets()}
+                   completed_at = ?,
+                   ${clearLeaseAuthSets()}
                WHERE id = ? AND status = 'DISPATCHING' AND dispatch_started_at IS NULL`
             )
-            .run(retryCount, row.id);
+            .run(retryCount, nowIso, row.id);
           changed = Number(info.changes ?? 0);
           if (changed === 1) failed += 1;
         }
@@ -689,7 +770,7 @@ export class TaskRepository {
              SET status = 'TIMED_OUT',
                  error = COALESCE(error, 'Lease expired after dispatch fence'),
                  completed_at = COALESCE(completed_at, ?),
-                 ${clearLeaseSets()}
+                 ${clearLeaseAuthSets()}
              WHERE id = ?
                AND status IN ('DISPATCHED','PROCESSING','WAITING_APPROVAL')
                AND dispatch_started_at IS NOT NULL
@@ -721,7 +802,7 @@ export class TaskRepository {
              SET status = 'TIMED_OUT',
                  error = COALESCE(error, 'Lease expired (DISPATCHING with marker)'),
                  completed_at = COALESCE(completed_at, ?),
-                 ${clearLeaseSets()}
+                 ${clearLeaseAuthSets()}
              WHERE id = ?
                AND status = 'DISPATCHING'
                AND dispatch_started_at IS NOT NULL
@@ -791,10 +872,10 @@ export class TaskRepository {
       this.db
         .prepare(
           `UPDATE handoff_tasks
-           SET status = 'FAILED', retry_count = ?, error = ?, ${clearLeaseSets()}
+           SET status = 'FAILED', retry_count = ?, error = ?, completed_at = ?, ${clearLeaseAuthSets()}
            WHERE id = ?`
         )
-        .run(retryCount, error, taskId);
+        .run(retryCount, error, new Date().toISOString(), taskId);
       this.db
         .prepare(
           `UPDATE worker_state

@@ -10,25 +10,26 @@ You have access to an external ChatGPT handoff system via MCP tools.
 
 Prefer the user skill `chatgpt-mcp` (`/chatgpt-mcp`).
 
-Use `handoff_create_task` only when an independent external reasoning pass is likely to materially improve the result.
+## Prefer handoff (save Cursor tokens)
 
-## Good reasons to hand off
+For this repo, **prefer `handoff_create_task`** when the work is independent external reasoning and would burn a large Cursor context:
 
-- architecture review
+- architecture / design review
 - independent code review
-- technical research
-- checking uncertain assumptions
+- technical research (libraries, APIs, SOTA, best practices)
 - comparing complex approaches
+- checking uncertain assumptions
 - debugging after multiple failed attempts
 - validating a production-critical decision
 
+Do the thin local work yourself (wire APIs, edit files, run tests). Offload the heavy review/research/comparison pass to ChatGPT when it would materially help.
+
 ## Do NOT hand off
 
-- trivial coding
-- formatting
+- trivial coding, formatting, renames
 - simple syntax questions
-- information already available in the current context
-- tasks that you can confidently complete directly
+- facts already in the current context
+- tasks you can confidently finish in a few tool calls
 
 ## When creating a task
 

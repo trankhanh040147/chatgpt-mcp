@@ -87,7 +87,9 @@ Cursor handoff_get_result → continue work
 
 ### Task status (simplified)
 
-Worker claims with a **lease** (`lease_owner` + `lease_token` + TTL). Before typing `TASK_ID`, the worker commits a **dispatch fence** (`dispatch_started_at`, status → `DISPATCHED`). Pre-fence lease expiry **requeues**; post-fence expiry → **TIMED_OUT** (never re-dispatch the same id).
+Worker claims with a **lease** (`lease_owner` + `lease_token` + TTL). Before typing `TASK_ID`, the worker commits a **dispatch fence** (`dispatch_started_at`, status → `DISPATCHED`). Pre-fence lease expiry **requeues**; post-fence expiry → **TIMED_OUT** (never re-dispatch the same id). A later `handoff_submit_result` on that id is still accepted (`TIMED_OUT` → `COMPLETED`) if no result exists.
+
+The worker defers `TIMED_OUT` while ChatGPT is still generating (stop button visible), up to `DISPATCH_HARD_TIMEOUT_MS` (default 15m). Cursor’s wait hook does **not** treat `TIMED_OUT` as immediately terminal, so a late submit can still resume the agent.
 
 **0.2.0 multi-worker:** N `browser-worker` processes (one Chrome profile/CDP/chat each) + one `status-api` on `:8787` (HTTP wait/status + lease reaper). Single-worker default still runs `worker`/`all` = status-api + one browser in-process. **Cost:** N CDP Chromes burn RAM and desktop space — accepted for 0.2.0; **0.3.0** targets CDP optimize + assisted create-worker.
 

@@ -59,7 +59,7 @@ def find_pending_task(conversation_id: str) -> dict | None:
             WHERE cursor_conversation_id = ?
               AND status IN (
                 'QUEUED', 'DISPATCHING', 'DISPATCHED',
-                'PROCESSING', 'RATE_LIMITED'
+                'PROCESSING', 'WAITING_APPROVAL', 'RATE_LIMITED'
               )
             ORDER BY created_at ASC
             LIMIT 1
@@ -176,7 +176,7 @@ def poll_locally(task_id: str, timeout: int, poll_interval: float) -> str | None
     deadline = time.time() + timeout
     while time.time() < deadline:
         status = get_task_status(task_id)
-        if status in ("COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"):
+        if status in ("COMPLETED", "FAILED", "CANCELLED"):
             return status
         time.sleep(poll_interval)
     return get_task_status(task_id)
@@ -196,7 +196,7 @@ def main() -> None:
         return
 
     task_id = pending["id"]
-    timeout = env_int("HANDOFF_WAIT_TIMEOUT", 180)
+    timeout = env_int("HANDOFF_WAIT_TIMEOUT", 960)
     poll_interval = float(os.environ.get("HANDOFF_POLL_INTERVAL", "0.5"))
 
     status = wait_task_status(task_id, timeout)
@@ -207,7 +207,7 @@ def main() -> None:
         print(completed_followup(task_id))
         return
 
-    if status in ("FAILED", "TIMED_OUT", "CANCELLED"):
+    if status in ("FAILED", "CANCELLED"):
         print(failed_followup(task_id, status))
         return
 
@@ -217,7 +217,7 @@ def main() -> None:
         mark_ready_but_cursor_idle(task_id)
         print(completed_followup(task_id))
         return
-    if later_status in ("FAILED", "TIMED_OUT", "CANCELLED", "WAITING_APPROVAL"):
+    if later_status in ("FAILED", "TIMED_OUT", "CANCELLED"):
         print(failed_followup(task_id, later_status))
         return
 

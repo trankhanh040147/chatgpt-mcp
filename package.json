@@ -14,7 +14,7 @@
     "handoff": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc && mkdir -p dist/db && cp src/db/schema.sql dist/db/schema.sql",
+    "build": "tsc && mkdir -p dist/db dist/dashboard && cp src/db/schema.sql dist/db/schema.sql && cp -R src/dashboard/public dist/dashboard/public",
     "start": "tsx scripts/start.ts",
     "dev": "tsx src/index.ts",
     "mcp": "node dist/index.js mcp",
@@ -33,6 +33,8 @@
     "test:leases": "tsx scripts/test-leases.ts",
     "spike:a1s": "tsx scripts/spike-a1s.ts",
     "spike:a1s:live": "tsx scripts/spike-a1s.ts --live",
+    "create-worker": "tsx scripts/create-worker.ts",
+    "test:create-worker": "tsx scripts/test-create-worker-registry.ts",
     "status-api": "node dist/index.js status-api",
     "browser-worker": "node dist/index.js browser-worker",
     "browser-broker": "node dist/index.js browser-broker",

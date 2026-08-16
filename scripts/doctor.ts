@@ -10,6 +10,7 @@ import {
   loadWorkersTopology,
   validateWorkersTopology,
 } from "../src/config/workers-topology.js";
+import { topologyAllowsSharedCdp } from "../src/config/write-workers-topology.js";
 import { initDatabase, getDatabase, SCHEMA_USER_VERSION } from "../src/db/sqlite.js";
 import { TaskRepository } from "../src/tasks/task.repository.js";
 
@@ -38,9 +39,10 @@ async function main(): Promise<void> {
       // Do not stamp status-api port onto browser topology entries.
       httpPort: undefined,
     });
-    validateWorkersTopology(topology);
+    const allowSharedCdp = topologyAllowsSharedCdp(topology);
+    validateWorkersTopology(topology, { allowSharedCdp });
     console.log(
-      `  topology: source=${topology.source} workers=${topology.workers.length}`
+      `  topology: source=${topology.source} workers=${topology.workers.length} sharedCdp=${allowSharedCdp}`
     );
     for (const w of topology.workers) {
       console.log(

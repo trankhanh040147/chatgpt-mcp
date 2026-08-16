@@ -10,6 +10,7 @@ export interface AppConfig {
   chatGptUrl: string;
   pollIntervalMs: number;
   approvalTimeoutMs: number;
+  hardTimeoutMs: number;
   rateLimitBackoffMs: number[];
   logDir: string;
   remoteMcpPort: number;
@@ -64,6 +65,15 @@ export function loadConfig(): AppConfig {
   if (!Number.isFinite(approvalTimeoutMs) || approvalTimeoutMs < 10_000) {
     throw new Error(`DISPATCH_APPROVAL_TIMEOUT_MS invalid: ${approvalTimeoutMs}`);
   }
+  const hardTimeoutMs = Number(
+    process.env.DISPATCH_HARD_TIMEOUT_MS ??
+      Math.max(approvalTimeoutMs * 3, 900_000)
+  );
+  if (!Number.isFinite(hardTimeoutMs) || hardTimeoutMs < approvalTimeoutMs) {
+    throw new Error(
+      `DISPATCH_HARD_TIMEOUT_MS must be ≥ DISPATCH_APPROVAL_TIMEOUT_MS (got ${hardTimeoutMs}, approval ${approvalTimeoutMs})`
+    );
+  }
   if (!Number.isFinite(leaseMs) || leaseMs < 90_000 || leaseMs > 3_600_000) {
     throw new Error(
       `HANDOFF_LEASE_MS must be 90000–3600000 (got ${leaseMs}). ` +
@@ -101,6 +111,7 @@ export function loadConfig(): AppConfig {
     chatGptUrl: process.env.CHATGPT_URL ?? "https://chatgpt.com",
     pollIntervalMs,
     approvalTimeoutMs,
+    hardTimeoutMs,
     rateLimitBackoffMs: rateLimitRaw.split(",").map((v) => Number(v.trim())),
     logDir: resolveUserPath(
       process.env.LOG_DIR?.trim() || join(home, "logs")

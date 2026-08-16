@@ -6,6 +6,7 @@ export type LogComponent =
   | "task-service"
   | "browser-worker"
   | "browser-broker"
+  | "create-worker"
   | "http-api"
   | "cursor-hook"
   | "lease-reaper"

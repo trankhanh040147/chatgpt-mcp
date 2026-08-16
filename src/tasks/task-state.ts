@@ -18,7 +18,9 @@ export const VALID_TRANSITIONS: Record<
   RATE_LIMITED: ["QUEUED", "FAILED", "TIMED_OUT"],
   COMPLETED: ["READY_BUT_CURSOR_IDLE"],
   FAILED: [],
-  TIMED_OUT: [],
+  // Late submit: ChatGPT often finishes (Figma browse, long review) after the
+  // worker freed the lease. Same id is never re-dispatched; result is kept.
+  TIMED_OUT: ["COMPLETED"],
   READY_BUT_CURSOR_IDLE: [],
   CANCELLED: [],
 };

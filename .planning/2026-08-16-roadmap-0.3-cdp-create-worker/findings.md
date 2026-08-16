@@ -46,4 +46,9 @@ Headless-per-worker assessment is fair: protocol-possible, product-fragile; keep
 
 ## Next
 
-Implement A1-S spike harness; keep N-headed as fallback topology.
+Track B — assisted create-worker CLI (in progress): `npm run create-worker` / `make create-worker`.
+- CDP New chat → capture `/c/…` → atomic `workers.json` upsert
+- Manual MCP approve pause; optional one-shot canary
+- Doctor accepts A1-S shared CDP
+- Still open: live end-to-end create+canary+broker rebind evidence; onboarding docs polish
+

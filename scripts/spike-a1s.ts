@@ -95,22 +95,28 @@ async function testMutexDoesNotHoldAcrossWait(): Promise<void> {
 
 function testChatUrlHelpers(): void {
   assert(
-    chatIdFromUrl("https://chatgpt.com/c/AbC-123?foo=1") === "abc-123",
+    chatIdFromUrl(
+      "https://chatgpt.com/c/6a7edb35-57cc-83ec-a55d-1ad45277e1f3?foo=1"
+    ) === "6a7edb35-57cc-83ec-a55d-1ad45277e1f3",
     "chatIdFromUrl normalizes id"
   );
   assert(
     sameWorkerChat(
-      "https://chatgpt.com/c/abc-123",
-      "https://chatgpt.com/c/ABC-123?x=1"
+      "https://chatgpt.com/c/6a7edb35-57cc-83ec-a55d-1ad45277e1f3",
+      "https://chatgpt.com/c/6A7EDB35-57CC-83EC-A55D-1AD45277E1F3?x=1"
     ),
     "sameWorkerChat ignores case/query"
   );
   assert(
     !sameWorkerChat(
-      "https://chatgpt.com/c/aaa",
-      "https://chatgpt.com/c/bbb"
+      "https://chatgpt.com/c/6a7edb35-57cc-83ec-a55d-1ad45277e1f3",
+      "https://chatgpt.com/c/6a808a7d-87b8-83ec-854c-b6d589ebe8ed"
     ),
     "sameWorkerChat rejects different chats"
+  );
+  assert(
+    chatIdFromUrl("https://chatgpt.com/c/web") === undefined,
+    "chatIdFromUrl rejects transient /c/web"
   );
 }
 
@@ -121,12 +127,12 @@ function testTopologySharedCdp(): void {
     workers: [
       {
         id: "w1",
-        workerUrl: "https://chatgpt.com/c/one",
+        workerUrl: "https://chatgpt.com/c/6a7edb35-57cc-83ec-a55d-111111111111",
         cdpEndpoint: "http://127.0.0.1:9222",
       },
       {
         id: "w2",
-        workerUrl: "https://chatgpt.com/c/two",
+        workerUrl: "https://chatgpt.com/c/6a808a7d-87b8-83ec-854c-222222222222",
         cdpEndpoint: "http://127.0.0.1:9222",
       },
     ],

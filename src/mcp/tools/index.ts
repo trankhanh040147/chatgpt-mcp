@@ -133,7 +133,10 @@ export function registerHandoffTools(
         prompt: task.prompt,
         context: task.context ?? {},
         status: task.status,
-        submitPolicy: SUBMIT_POLICY,
+        submitPolicy: {
+          ...SUBMIT_POLICY,
+          lateSubmitAccepted: task.status === "TIMED_OUT" && !task.result,
+        },
       });
     }
   );

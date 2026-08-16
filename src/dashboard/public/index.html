@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>chatgpt-mcp · Ops</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/dashboard/styles.css" />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+
+    <div class="shell">
+      <header class="top">
+        <div class="brand">
+          <p class="eyebrow">chatgpt-mcp · dashboard 0.2</p>
+          <h1>Ops</h1>
+        </div>
+        <div class="top-meta">
+          <span id="health-pill" class="pill warn">checking…</span>
+          <span id="updated" class="mono muted">Updated —</span>
+          <span id="clock" class="mono muted"></span>
+        </div>
+      </header>
+
+      <div id="live">
+        <section class="panel plane" aria-label="Control plane">
+          <h2>Control plane</h2>
+          <dl class="plane-kv" id="plane-kv"></dl>
+        </section>
+
+        <section class="panel" aria-label="Workers">
+          <div class="panel-head">
+            <h2>Workers</h2>
+            <span class="mono muted" id="worker-count"></span>
+          </div>
+          <div class="cards" id="workers"></div>
+        </section>
+
+        <div class="lower">
+          <section class="panel" aria-label="Recent tasks">
+            <div class="panel-head">
+              <h2>Recent tasks</h2>
+              <span class="mono muted" id="task-count">Last 10</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Task ID</th>
+                    <th>Status</th>
+                    <th>Owner</th>
+                    <th>Type</th>
+                    <th>Age</th>
+                    <th>Finished</th>
+                    <th>Duration</th>
+                    <th>Error</th>
+                  </tr>
+                </thead>
+                <tbody id="tasks"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel troubleshoot" aria-label="Troubleshoot">
+            <h2>Troubleshoot</h2>
+            <ul class="hints" id="hints"></ul>
+            <div class="cmds" id="cmds"></div>
+          </section>
+        </div>
+      </div>
+
+      <div id="unreachable" class="unreachable hidden" hidden>
+        <section class="panel unreachable-card">
+          <h2>Status API is unreachable</h2>
+          <p class="muted">
+            Cannot load control-plane, worker, or task data from
+            <span class="mono">127.0.0.1:8787</span>.
+          </p>
+          <p class="mono muted" id="last-seen"></p>
+          <div class="cmds" id="cmds-down"></div>
+        </section>
+      </div>
+
+      <footer class="foot mono muted">
+        Polling every 2s · 127.0.0.1 only · read-only 0.2
+      </footer>
+    </div>
+
+    <aside id="drawer" class="drawer hidden" hidden aria-label="Task detail">
+      <div class="drawer-head">
+        <h2>Task</h2>
+        <button type="button" id="drawer-close" class="ghost">Close</button>
+      </div>
+      <div id="drawer-body" class="drawer-body mono"></div>
+      <div class="drawer-actions">
+        <button type="button" id="load-content" class="primary">
+          Load redacted content
+        </button>
+      </div>
+      <pre id="drawer-content" class="drawer-content hidden" hidden></pre>
+    </aside>
+    <div id="drawer-backdrop" class="drawer-backdrop hidden" hidden></div>
+
+    <script src="/dashboard/app.js" type="module"></script>
+  </body>
+</html>

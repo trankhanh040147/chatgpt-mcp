@@ -34,7 +34,8 @@ HANDOFF_PATHS := \
 
 .PHONY: help install build setup chrome up up-bg down restart status wait-ready \
 	check doctor recover recover-clean recover-all clear-tasks clear-task \
-	logs worker-bg remote-bg status-api-bg test-leases e2e-1 e2e-20 e2e-dual handoff-zip
+	logs worker-bg remote-bg status-api-bg test-leases e2e-1 e2e-20 e2e-dual \
+	create-worker dashboard handoff-zip
 
 help: ## Show targets
 	@echo "chatgpt-mcp — quick ops"
@@ -50,6 +51,7 @@ help: ## Show targets
 	@echo "Background:"
 	@echo "  make up-bg && make wait-ready && make check"
 	@echo "  make clear-tasks            # wipe SQLite queue (ID=ho_… for one)"
+	@echo "  make create-worker          # assisted New chat → workers.json (A1-S)"
 
 install: ## npm install
 	npm install
@@ -115,11 +117,17 @@ status: ## Health + /workers + listening ports
 doctor: build ## Topology + schema + status-api health
 	npm run doctor
 
+dashboard: ## Print ops dashboard URL (needs status-api)
+	@echo "Open http://127.0.0.1:$(HTTP_PORT)/dashboard/"
+
 test-leases: ## Lease/fencing unit tests (no browser)
 	npm run test:leases
 
 e2e-dual: ## Live dual-worker canary (needs 2 CDP + start-dual-stack.sh)
 	HANDOFF_WORKERS_FILE=$${HANDOFF_WORKERS_FILE:-$(CURDIR)/data/workers.json} npm run e2e:dual
+
+create-worker: ## Assisted New chat → write workers file → optional canary
+	npm run create-worker
 
 wait-ready: ## Wait until GET /worker reports READY (120s default)
 	@chmod +x scripts/wait-ready.sh

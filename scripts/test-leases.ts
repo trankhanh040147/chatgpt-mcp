@@ -224,6 +224,19 @@ async function main(): Promise<void> {
     const stats = service.expireLeases();
     assert(stats.timedOut === 1, "post-dispatch expiry times out");
     assert(repo.getTaskById(taskId)?.status === "TIMED_OUT", "status TIMED_OUT");
+    const late = service.submitResult({
+      taskId,
+      result: "finished-after-timeout",
+    });
+    assert(
+      late.success && late.status === "COMPLETED" && late.lateSubmit === true,
+      "late submit after TIMED_OUT completes"
+    );
+    const againLate = service.submitResult({
+      taskId,
+      result: "finished-after-timeout",
+    });
+    assert(againLate.idempotent === true, "late submit replay is idempotent");
     closeDatabase();
     rmSync(path, { recursive: true, force: true });
   }
@@ -266,6 +279,10 @@ async function main(): Promise<void> {
     assert(
       repo.getTaskById(taskId)?.status === "WAITING_APPROVAL",
       "nudge promotes to WAITING_APPROVAL"
+    );
+    assert(
+      service.findPendingForConversation("c1")?.id === taskId,
+      "WAITING_APPROVAL still pending for Cursor wait hook"
     );
     closeDatabase();
     rmSync(path, { recursive: true, force: true });

@@ -200,7 +200,21 @@ export class ChatGptBrowser {
     }
   }
 
-  async submitTaskId(taskId: string): Promise<void> {
+  async isGenerating(): Promise<boolean> {
+    const page = this.getPage();
+    const stop = page.locator(selectors.stopButton).first();
+    return stop.isVisible({ timeout: 400 }).catch(() => false);
+  }
+
+  /** Public idle wait — must run outside the UI-write mutex. */
+  async waitUntilComposerIdle(): Promise<void> {
+    await this.waitForComposerIdle(this.getPage());
+  }
+
+  async submitTaskId(
+    taskId: string,
+    opts?: { skipIdleWait?: boolean }
+  ): Promise<void> {
     const page = this.getPage();
     const message = DISPATCH_MESSAGE(taskId);
     const marker = `TASK_ID=${taskId}`;
@@ -223,7 +237,9 @@ export class ChatGptBrowser {
 
     const composer = page.locator(selectors.composer).first();
     await composer.waitFor({ state: "visible", timeout: 30000 });
-    await this.waitForComposerIdle(page);
+    if (!opts?.skipIdleWait) {
+      await this.waitForComposerIdle(page);
+    }
     await this.fillComposer(page, composer, message);
 
     const typed = ((await composer.innerText().catch(() => "")) ?? "").replace(
@@ -264,14 +280,19 @@ export class ChatGptBrowser {
   }
 
   /** Short reminder to call handoff_submit_result (best-effort, idempotent per nudge stage). */
-  async sendSubmitNudge(taskId: string): Promise<void> {
+  async sendSubmitNudge(
+    taskId: string,
+    opts?: { skipIdleWait?: boolean }
+  ): Promise<void> {
     const page = this.getPage();
     const message = SUBMIT_NUDGE_MESSAGE(taskId);
     const marker = `TASK_ID=${taskId}`;
 
     const composer = page.locator(selectors.composer).first();
     await composer.waitFor({ state: "visible", timeout: 15000 });
-    await this.waitForComposerIdle(page);
+    if (!opts?.skipIdleWait) {
+      await this.waitForComposerIdle(page);
+    }
     await this.fillComposer(page, composer, message);
 
     const sendButton = page.locator(selectors.sendButton).first();

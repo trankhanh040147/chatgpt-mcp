@@ -65,6 +65,7 @@ export class TaskService {
     success: boolean;
     status: "COMPLETED";
     idempotent?: boolean;
+    lateSubmit?: boolean;
   } {
     const task = this.repo.getTaskById(input.taskId);
     if (!task) {
@@ -89,7 +90,8 @@ export class TaskService {
     if (
       task.status !== "PROCESSING" &&
       task.status !== "DISPATCHED" &&
-      task.status !== "WAITING_APPROVAL"
+      task.status !== "WAITING_APPROVAL" &&
+      task.status !== "TIMED_OUT"
     ) {
       throw new Error(
         `Cannot submit result for task in status ${task.status}`
@@ -102,6 +104,7 @@ export class TaskService {
       );
     }
 
+    const fromTimedOut = task.status === "TIMED_OUT";
     const changed = this.repo.saveResultIfOpen(
       input.taskId,
       sanitizedResult,
@@ -113,8 +116,15 @@ export class TaskService {
         event: "RESULT_RECEIVED",
         component: "task-service",
         taskId: input.taskId,
+        message: fromTimedOut
+          ? "Late submit after TIMED_OUT — result kept"
+          : undefined,
       });
-      return { success: true, status: "COMPLETED" };
+      return {
+        success: true,
+        status: "COMPLETED",
+        lateSubmit: fromTimedOut || undefined,
+      };
     }
 
     const again = this.repo.getTaskById(input.taskId);
@@ -335,14 +345,14 @@ export class TaskService {
     const error =
       reason ??
       "ChatGPT did not call handoff_submit_result within the approval window. " +
-        "Approve MCP write in the worker ChatGPT tab or retry the handoff.";
+        "If the worker tab is still generating, wait — late submit is accepted. " +
+        "If a MCP write confirmation card is visible, approve it. Otherwise retry.";
 
     assertTransition(task.status, "TIMED_OUT");
-    this.repo.updateTaskStatus(taskId, "TIMED_OUT", {
-      error,
-      clearLease: true,
-      completedAt: new Date().toISOString(),
-    });
+    const changed = this.repo.markTimedOutIfOpen(taskId, error);
+    if (changed !== 1) {
+      return;
+    }
     logTransition("browser-worker", taskId, task.status, "TIMED_OUT");
     log({
       event: "TASK_TIMED_OUT",

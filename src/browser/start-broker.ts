@@ -9,6 +9,7 @@ export interface StartBrowserBrokerOptions {
   workers: Array<{ id: string; workerUrl: string }>;
   pollIntervalMs: number;
   approvalTimeoutMs: number;
+  hardTimeoutMs?: number;
   rateLimitBackoffMs: number[];
   leaseMs?: number;
   workerStaleMs?: number;
@@ -46,6 +47,7 @@ export async function startBrowserBroker(
       chatGptUrl: options.chatGptUrl,
       pollIntervalMs: options.pollIntervalMs,
       approvalTimeoutMs: options.approvalTimeoutMs,
+      hardTimeoutMs: options.hardTimeoutMs,
       rateLimitBackoffMs: options.rateLimitBackoffMs,
       workerId: w.id,
       leaseMs: options.leaseMs,

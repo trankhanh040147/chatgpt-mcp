@@ -10,7 +10,7 @@
     "stop": [
       {
         "command": "python3 cursor/wait-handoff.py",
-        "timeout": 200,
+        "timeout": 1000,
         "loop_limit": 1
       }
     ]

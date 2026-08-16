@@ -16,6 +16,8 @@ export interface BrowserWorkerOptions {
   chatGptUrl: string;
   pollIntervalMs: number;
   approvalTimeoutMs: number;
+  /** Wall-clock cap even while ChatGPT is still generating. Default 3× approval or 15m. */
+  hardTimeoutMs?: number;
   rateLimitBackoffMs: number[];
   workerId?: string;
   leaseMs?: number;
@@ -53,10 +55,14 @@ export class BrowserWorker {
   private activeLeaseToken: string | null = null;
   private activeTaskStartedAt = 0;
   private nudgeSent = false;
+  private deferredTimeoutLogged = false;
+  private holdAfterTimeoutLogged = false;
+  private timedOutIdleSince = 0;
   private readonly workerId: string;
   private readonly instanceToken: string;
   private readonly leaseMs: number;
   private readonly workerStaleMs: number;
+  private readonly hardTimeoutMs: number;
 
   constructor(private readonly options: BrowserWorkerOptions) {
     this.workerId = options.workerId?.trim() || DEFAULT_WORKER_ID;
@@ -66,6 +72,10 @@ export class BrowserWorker {
       Math.max(120_000, options.pollIntervalMs * 10, options.approvalTimeoutMs);
     this.workerStaleMs =
       options.workerStaleMs ?? Math.max(this.leaseMs * 2, 60_000);
+    this.hardTimeoutMs = Math.max(
+      options.hardTimeoutMs ?? Math.max(options.approvalTimeoutMs * 3, 900_000),
+      options.approvalTimeoutMs
+    );
   }
 
   async start(): Promise<void> {
@@ -299,6 +309,9 @@ export class BrowserWorker {
     this.activeLeaseToken = leaseToken;
     this.activeTaskStartedAt = Date.now();
     this.nudgeSent = false;
+    this.deferredTimeoutLogged = false;
+    this.holdAfterTimeoutLogged = false;
+    this.timedOutIdleSince = 0;
     workerState.setStatus("BUSY", { currentTaskId: task.id });
     taskService.renewLease(
       task.id,
@@ -391,10 +404,11 @@ export class BrowserWorker {
         return;
       }
 
-      // A1-S UI mutex: assert binding + type/send only.
+      // Wait for composer idle OUTSIDE the mutex — holding it blocks other actors.
+      await browser.waitUntilComposerIdle();
       await this.withUiWrite(async () => {
         this.options.assertBindingFresh?.();
-        await browser.submitTaskId(task.id);
+        await browser.submitTaskId(task.id, { skipIdleWait: true });
       });
 
       taskService.renewLease(
@@ -440,11 +454,36 @@ export class BrowserWorker {
       this.rateLimitRetryIndex = 0;
       return;
     }
-    if (
-      status === "FAILED" ||
-      status === "TIMED_OUT" ||
-      status === "CANCELLED"
-    ) {
+    if (status === "FAILED" || status === "CANCELLED") {
+      this.clearActiveTask(workerState);
+      return;
+    }
+
+    const generating = await browser.isGenerating().catch(() => false);
+
+    if (status === "TIMED_OUT") {
+      // Don't inject a new TASK_ID into a chat that is still finishing.
+      if (generating) {
+        this.timedOutIdleSince = 0;
+        if (!this.holdAfterTimeoutLogged) {
+          this.holdAfterTimeoutLogged = true;
+          log({
+            event: "INFO",
+            component: "browser-worker",
+            taskId,
+            message:
+              "TIMED_OUT but ChatGPT is still generating — holding worker for late submit",
+          });
+        }
+        return;
+      }
+      if (this.timedOutIdleSince === 0) {
+        this.timedOutIdleSince = Date.now();
+      }
+      // MCP submit can land after the stop button disappears.
+      if (Date.now() - this.timedOutIdleSince < 20_000) {
+        return;
+      }
       this.clearActiveTask(workerState);
       return;
     }
@@ -471,19 +510,10 @@ export class BrowserWorker {
     workerState.setStatus("BUSY", { currentTaskId: taskId });
 
     if (!this.nudgeSent && elapsed >= NUDGE_AT_MS) {
-      // Nudge CAS outside UI mutex; only type/send under the lock.
-      const fenced = taskService.markNudgeStarted(
-        taskId,
-        this.workerId,
-        leaseToken,
-        this.instanceToken,
-        this.leaseMs,
-        this.workerStaleMs
-      );
-      if (!fenced) {
-        this.nudgeSent = true;
+      if (generating) {
+        // Don't fence a nudge we cannot type yet.
       } else {
-        taskService.renewLease(
+        const fenced = taskService.markNudgeStarted(
           taskId,
           this.workerId,
           leaseToken,
@@ -491,41 +521,102 @@ export class BrowserWorker {
           this.leaseMs,
           this.workerStaleMs
         );
-        try {
-          await this.withUiWrite(async () => {
-            this.options.assertBindingFresh?.();
-            await browser.sendSubmitNudge(taskId);
-            log({
-              event: "INFO",
-              component: "browser-worker",
-              taskId,
-              message: `Sent submit nudge (TASK_ID=${taskId})`,
+        if (!fenced) {
+          this.nudgeSent = true;
+        } else {
+          taskService.renewLease(
+            taskId,
+            this.workerId,
+            leaseToken,
+            this.instanceToken,
+            this.leaseMs,
+            this.workerStaleMs
+          );
+          try {
+            await browser.waitUntilComposerIdle();
+            await this.withUiWrite(async () => {
+              this.options.assertBindingFresh?.();
+              await browser.sendSubmitNudge(taskId, { skipIdleWait: true });
+              log({
+                event: "INFO",
+                component: "browser-worker",
+                taskId,
+                message: `Sent submit nudge (TASK_ID=${taskId})`,
+              });
             });
-          });
-        } catch {
-          // Fail-closed: marker already set — do not retry.
+          } catch {
+            // Fail-closed: marker already set — do not retry.
+          }
+          this.nudgeSent = true;
+          taskService.renewLease(
+            taskId,
+            this.workerId,
+            leaseToken,
+            this.instanceToken,
+            this.leaseMs,
+            this.workerStaleMs
+          );
         }
-        this.nudgeSent = true;
-        taskService.renewLease(
-          taskId,
-          this.workerId,
-          leaseToken,
-          this.instanceToken,
-          this.leaseMs,
-          this.workerStaleMs
-        );
       }
     }
 
-    if (elapsed >= this.options.approvalTimeoutMs) {
-      taskService.markSubmitTimedOut(taskId);
+    if (elapsed >= this.hardTimeoutMs) {
+      taskService.markSubmitTimedOut(
+        taskId,
+        `ChatGPT did not call handoff_submit_result within the hard timeout (${this.hardTimeoutMs}ms)` +
+          (generating ? " while still generating" : "") +
+          ". Late submit is still accepted if no result exists."
+      );
+      if (generating) {
+        if (!this.holdAfterTimeoutLogged) {
+          this.holdAfterTimeoutLogged = true;
+          log({
+            event: "INFO",
+            component: "browser-worker",
+            taskId,
+            message:
+              "Hard timeout reached while generating — holding worker for late submit",
+          });
+        }
+        return;
+      }
       this.clearActiveTask(workerState);
       log({
         event: "TASK_TIMED_OUT",
         component: "browser-worker",
         taskId,
         message:
-          "Submit approval window expired — task TIMED_OUT; worker free for next QUEUED task",
+          "Hard timeout expired — task TIMED_OUT; worker free for next QUEUED task",
+      });
+      return;
+    }
+
+    if (elapsed >= this.options.approvalTimeoutMs) {
+      if (generating) {
+        if (!this.deferredTimeoutLogged) {
+          this.deferredTimeoutLogged = true;
+          log({
+            event: "INFO",
+            component: "browser-worker",
+            taskId,
+            message:
+              `Approval window (${this.options.approvalTimeoutMs}ms) elapsed but ChatGPT is still generating — deferring TIMED_OUT until idle or hard timeout ${this.hardTimeoutMs}ms`,
+          });
+        }
+        return;
+      }
+      taskService.markSubmitTimedOut(
+        taskId,
+        "ChatGPT went idle without calling handoff_submit_result within the approval window. " +
+          "If a MCP write confirmation card is visible, approve it. Late submit is still accepted."
+      );
+      this.clearActiveTask(workerState);
+      log({
+        event: "TASK_TIMED_OUT",
+        component: "browser-worker",
+        taskId,
+        message:
+          "Submit window expired while idle — task TIMED_OUT; worker free for next QUEUED task",
       });
     }
   }
@@ -535,6 +626,9 @@ export class BrowserWorker {
     this.activeLeaseToken = null;
     this.activeTaskStartedAt = 0;
     this.nudgeSent = false;
+    this.deferredTimeoutLogged = false;
+    this.holdAfterTimeoutLogged = false;
+    this.timedOutIdleSince = 0;
     workerState.setStatus("READY", { currentTaskId: null, error: null });
   }
 

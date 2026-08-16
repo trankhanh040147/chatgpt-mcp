@@ -8,6 +8,7 @@ Durable product truth for **chatgpt-mcp**. Session execution memory lives in [`.
 | [architecture.md](architecture.md) | How the system works today |
 | [spec.md](spec.md) | Behavioral contracts / tools |
 | [connect-chatgpt.md](connect-chatgpt.md) | Tunnel, Developer Mode, write approval |
+| [timeouts.md](timeouts.md) | `TIMED_OUT` vs MCP approve, late submit, wait clocks |
 | [onboarding-timing.md](onboarding-timing.md) | Stranger ≤15 min protocol |
 | [benchmark/](benchmark/README.md) | A/B suite (frozen) |
 | [assets/](assets/README.md) | Demo capture checklist |

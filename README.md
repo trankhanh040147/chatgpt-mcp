@@ -144,7 +144,8 @@ See [.env.example](.env.example). Critical variables:
 | `CHATGPT_WORKER_URL` | Required — worker chat URL |
 | `HANDOFF_HTTP_PORT` | `8787` — status API (loopback) |
 | `HANDOFF_REMOTE_MCP_PORT` | `8790` — ChatGPT MCP |
-| `HANDOFF_WAIT_TIMEOUT` | `480` — stop hook seconds (long-poll) |
+| `HANDOFF_WAIT_TIMEOUT` | `960` — stop hook seconds (keep ≥ hard timeout) |
+| `DISPATCH_HARD_TIMEOUT_MS` | `900000` — max wait while ChatGPT is still generating |
 | `HANDOFF_WAIT_TICK_MS` | `250` — server wait tick |
 
 ## Troubleshooting
@@ -156,6 +157,7 @@ See [.env.example](.env.example). Critical variables:
 | Worker not `READY` / task stuck `QUEUED` | One `npm run worker`; same absolute `HANDOFF_DB_PATH` for MCP + worker |
 | ChatGPT cannot call tools | Secure Tunnel / connector setup; approve write tools — [docs/connect-chatgpt.md](docs/connect-chatgpt.md) |
 | Write / approval blocked | Enable Developer Mode + MCP write for your plan/workspace |
+| Task `TIMED_OUT` / “Approve MCP write” in logs | Often ChatGPT still generating or late submit — [docs/timeouts.md](docs/timeouts.md), not always a missing Allow click |
 
 Diagnostic: `npm run check`
 
@@ -170,6 +172,7 @@ A/B quality suite is **frozen** at [docs/benchmark/](docs/benchmark/README.md) (
 - [Docs index](docs/README.md)
 - [Roadmap](docs/roadmap.md) — versions & exit criteria (SSOT)
 - [Connect ChatGPT](docs/connect-chatgpt.md) — Secure Tunnel, Developer Mode
+- [Timeouts and late submit](docs/timeouts.md) — `TIMED_OUT` vs MCP approve
 - [Architecture](docs/architecture.md)
 - [Specification](docs/spec.md)
 - [Benchmark suite](docs/benchmark/README.md)

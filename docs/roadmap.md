@@ -14,7 +14,7 @@ Do **not** use `0.N.x` as a feature bucket. Big capabilities each get their own 
 
 ## Product direction
 
-Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, research, and second opinions without scraping the ChatGPT DOM. Priorities: correctness, consent, reproducible evidence — then **more workers** and assisted provisioning, then more hosts and agent UX policy.
+Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, research, and second opinions without scraping the ChatGPT DOM. Priorities: correctness, consent, reproducible evidence — then **more workers**, assisted provisioning, **ops visibility**, then agent UX policy and more hosts.
 
 ## Support snapshot
 
@@ -25,7 +25,8 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | Ubuntu desktop | Experimental | Not Snap/WSL/headless |
 | Windows / WSL / headless | Not supported | — |
 | Multi-worker | **0.2.0** | Leases + fencing + status-api; dual CDP E2E |
-| Single-CDP multi-tab (A1-S) | **0.3.0** (CDP track) | `browser-broker` + UI-write mutex; dual canary on one CDP |
+| Single-CDP multi-tab (A1-S) + create-worker CLI | **0.3.0** | Broker + UI mutex; dual/burst canary; `npm run create-worker` |
+| Ops dashboard | **0.4.0** (in progress) | Dashboard **0.1** at `/dashboard/` on status-api |
 
 ## Sequencing principles
 
@@ -42,132 +43,124 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 |---------|---------|----------|---------------|---------------------|
 | **0.1.0** | Reproducible Cursor/macOS preview | setup/start/check, scrubbed public source, transport canary, honest limitations | Tagged preview; stranger ≤15 min path documented; no secret paths in repo | Multi-host API, concurrency, agent auto-policy |
 | **0.2.0** | Static multi-worker + operability | Two+ configured workers; leases, heartbeats, fencing; stable worker IDs; observability | ≥2 workers, concurrency 1 each; crash recovery; usable ops signals (`make status` / health) | Dynamic pool; auto-create chats; single-CDP multi-tab |
-| **0.3.0** | CDP optimize + assisted create-worker | **A1-S shipped:** exclusive `browser-broker`, N tabs, mutex only around assert+type/send; dual canary on one CDP. **Still open:** assisted create-worker wizard | RAM/workspace down vs naïve N Chromes (proven); operator can add a worker without hand-editing only (pending wizard) | Unattended cookie/login; elastic cloud pool |
-| **0.4.0** | Agent UX + worker chat rotation | Skill/rule handoff policy (Light/Standard/Deep); **self-regulate context** — count messages / context length, auto-create replacement worker chat, rotate when over threshold | Scenario set passes; ≤1 handoff/decision; rotation keeps workers usable without manual new-chat; consent model still fail-closed where required | Host-generic product “chooser”; fake effort knobs; unattended login |
-| **0.5.0** | Portable core | Optional `clientSessionId`; `taskId` authoritative; core ≠ host adapters | Create with/without session; Cursor UX preserved; docs/skills updated | Supported Claude polish |
-| **0.6.0** | Claude host | Claude skill/hook equivalent; E2E by `taskId` | Documented Claude path + clean evidence run | Marketplace / Windows |
+| **0.3.0** | CDP optimize + assisted create-worker | A1-S `browser-broker`; create-worker CLI (New chat → registry → MCP pause → canary); doctor shared-CDP | Tagged; dual/burst E2E on one CDP; operator can add worker without hand-editing only | Unattended cookie/login; elastic cloud pool; auto-scale workers on queue depth |
+| **0.4.0** | Ops dashboard | Local dashboard **0.1** (health, workers, tasks, troubleshoot); status-api serve + `GET /tasks` | Dashboard 0.1 usable on localhost; diagnose stuck/idle/SESSION_LOST without log diving; tag when hardened | Cloud hosting; auth SSO; create-worker GUI; metrics history DB |
+| **0.5.0** | Agent UX + worker chat rotation | Skill/rule handoff policy (Light/Standard/Deep); **self-regulate context** — rotate worker chat over threshold | Scenario set passes; ≤1 handoff/decision; rotation fail-closed | Host-generic “chooser”; unattended login |
+| **0.6.0** | Portable core | Optional `clientSessionId`; `taskId` authoritative; core ≠ host adapters | Create with/without session; Cursor UX preserved | Supported Claude polish |
+| **0.7.0** | Claude host | Claude skill/hook equivalent; E2E by `taskId` | Documented Claude path + clean evidence run | Marketplace / Windows |
 
-### 0.2.0 — Static multi-worker (**shipped**)
+### 0.3.0 — CDP optimize + assisted create-worker (**shipped**)
 
-Ship as its own feature release. Prefer **explicit worker configs** (env / file), not a dynamic cloud pool.
+1. **CDP fan-out** — A1-S: one headed Chrome + exclusive `browser-broker` + N page actors; UI-write mutex only around assert+type/send.
+2. **Assisted create-worker** — `npm run create-worker` / `make create-worker`: CDP New chat → capture `/c/…` → atomic workers file → manual MCP approve → optional canary.
 
-#### P0
+**Evidence:** `spike:a1s`, `test:leases`, `test:create-worker`, live `e2e:dual`, live burst `--n=4` on three workers, live create → `w3` READY.
 
-- Register ≥2 workers (separate CDP endpoints and/or worker chat URLs)
-- Claim with **leases** + heartbeat; fencing so a dead worker cannot double-dispatch
-- Concurrency **1 task per worker**
-- Ops: list workers, status, recover stuck leases (`make` / HTTP)
-- Crash recovery: `DISPATCHING` / lease expiry → requeue or fail-closed
-
-#### Non-goals for 0.2.0
-
-- Auto-creating ChatGPT conversations
-- Auto-login or auto-approving MCP writes
-- Elastic / dynamic worker pool
-- Collapsing N workers onto **one** Chrome/CDP (accepted cost for 0.2.0; moved to **0.3.0**)
-
-### 0.3.0 — CDP optimize + assisted create-worker (**partial — CDP A1-S tagged**)
-
-Combines two operator pain points left after 0.2.0:
-
-1. **CDP fan-out cost** — N Chrome windows burn RAM and desktop space. → **Shipped as A1-S** (`browser-broker` mode).
-2. **Create / register worker** — today is manual URL + profile setup. → **Still open** for full 0.3.0 exit.
-
-**Consent model (A)** for provisioning: wizard guides the human; system does **not** silently create sessions or approve writes.
-
-#### P0
-
-- **CDP optimize — A1-S (shipped in 0.3.0 tag):**
-  - One headed Chrome + one Node `browser-broker` + N page-bound actors
-  - Global UI-write mutex only around assert + type/send (not claim/wait/MCP)
-  - Connection generation + reconnect/rebind; atomic chat-id bind uniqueness
-  - Topology `allowSharedCdp` for broker mode; fallback remains N headed `browser-worker`s
-  - Evidence: `spike:a1s`, `test:leases`, live `e2e:dual` on one CDP
-- **Assisted create-worker (remaining):** create/open chat → capture URL → wire topology (`workers.json` / env) → optional tunnel check → approve write tools (manual) → canary → READY
-- Keep fence-before-type, leases, and no cross-talk on composers
+**Consent model (A):** wizard/CLI guides the human; no auto-login / auto-approve MCP writes.
 
 #### Non-goals for 0.3.0
 
 - Cookie export / password automation / auto-click MCP approve
-- Elastic cloud worker pool
-- Changing the pull-queue model (create still enqueues; idle workers claim) — admission control (“no idle worker → reject”) is optional stretch, not required to tag 0.3.0
-- **Self-regulate context / auto-rotate worker chat** (message count or context length → create replacement worker) — deferred to **0.4.0**
-- N Node processes all `connectOverCDP` to the same endpoint (rejected; exclusive broker only)
+- Elastic cloud worker pool / auto-create `wN` when queue depth exceeds workers
+- Self-regulate context / auto-rotate worker chat → **0.5.0**
 
-### 0.4.0 — Agent UX + worker chat rotation
+### 0.4.0 — Ops dashboard (**in progress**)
 
-Formerly the ASAP “0.2.0” slot for agent policy; now also owns **chat context hygiene**.
+Operator pain after multi-worker + broker: diagnosing health, leases, and stuck tasks still means `curl` + logs.
 
-#### P0 — Agent handoff policy
+#### Dashboard product line (inside 0.4.0)
 
-Prefer **skill/rule policy**, not core queue logic.
+| Dash ver | Scope | Status |
+|----------|--------|--------|
+| **0.1** | Read-only localhost UI: control plane, worker cards, recent tasks, troubleshoot + copyable cmds; poll `/health` `/workers` `/tasks` | **Done** (`/dashboard/`) |
+| **0.2** | Read-only drill-down: task timing, on-demand redacted content, chat links, 24h counts, indicators | **Done** |
+| **0.3+** | Guarded mutations (recover/clear); history/charts/log tail; create-worker surface | Later |
 
-Trigger handoff when independent review / live research / repeated debug failure / architecture ambiguity / user asks. Skip trivial work. At most one handoff per decision; end turn after create when stop hook present.
+#### P0 — dashboard 0.1 (**done**)
 
-Task classes Light / Standard / Deep map local effort; handoff only when it adds value. Host effort APIs belong in adapters later.
+- Status-api serves static UI at `/dashboard/`
+- Control-plane strip: health, lease reaper, last tick, requeued / timed out / failed
+- Worker cards: id, status, healthy, pid, heartbeat, current task, error
+- Recent tasks list (`GET /tasks?limit=`): id, status, owner, type, age, error
+- Troubleshoot hints (stale heartbeat, dead pid, SESSION_LOST / RATE_LIMITED) + copyable `curl` / `make doctor` / `recover` / broker stack
+- Empty + API-unreachable states; local bind `127.0.0.1` only
+- Design SSOT: Healthy frame (Figma/Stitch); other states derived in code
 
-#### P0 — Self-regulate context (worker chat rotation)
+#### Dashboard 0.2 — operator drill-down (**done**)
 
-Long-lived ChatGPT worker chats accumulate messages and degrade (context bloat, slower UI, worse tool behavior). **0.4.0** must implement:
+Read-only observability (audit `ho_01M04PJWX91DS0C3R07W3WBEPF`):
 
-1. **Measure** — count messages and/or estimate context length on the worker conversation (DOM and/or local counters tied to dispatched tasks).
-2. **Threshold** — configurable limit (env / topology); when exceeded, mark the logical worker as needing rotation.
-3. **Replace** — create a **new** worker chat (builds on **0.3.0** assisted create-worker / broker page bind), wire topology to the new `/c/…` URL, run canary, mark READY.
-4. **Rotate** — drain or fence the old chat (no new claims); optionally archive/close the old tab; keep lease/fencing invariants (no double-dispatch during cutover).
+| Item | Notes |
+|------|--------|
+| Task lifecycle timestamps / durations | List + detail: queue/processing/total ms, finished |
+| On-demand redacted task inspector | `GET /tasks/:id/detail` + `/content`; list never has bodies; enable with `HANDOFF_DASHBOARD_TASK_CONTENT=redacted` |
+| Worker ChatGPT chat link | Allowlisted `https://chatgpt.com/…` from worker_url |
+| Per-worker 24h outcome counts | Honest counts; **no** max progress bar (0.5 owns budget) |
+| Derived indicators | stale HB, long task, recent fail/timeout, session lost — not invented statuses |
+| Drill-down UI | Click row → drawer; Load redacted content |
 
-**Depends on:** 0.3.0 create-worker path (and preferably A1 broker page rebind).  
-**Consent:** prefer reusing 0.3.0 model A where MCP write approve is still manual on the *new* chat unless a safer proven path exists; do not invent cookie/login automation here.
+Terminal tasks now **keep `lease_owner`** (clear token/expiry only) so counts work; QUEUED requeue still clears owner.
+
+**Out of 0.2:** recover/clear → **0.3+**; capacity bar → package **0.5**.
+
+#### Remaining to claim package **0.4.0** shipped
+
+- Live smoke evidence + short docs (`make dashboard` / connect path)
+- Hardening (status-api restart durability with broker stack)
+- Tag `v0.4.0` when exit criteria signed off (may ship with dash 0.1 only, or after 0.2 — product choice)
 
 #### Non-goals for 0.4.0
 
-- Elastic cloud pool
-- Auto-login / cookie export as default
-- Host-generic “chooser” product UI
+- Hosted SaaS dashboard / multi-user auth
+- Replacing MCP or CDP automation with the UI
+- Auto-scaling workers
+
+### 0.5.0 — Agent UX + worker chat rotation
+
+Formerly 0.4.0. Skill/rule handoff policy + self-regulate context (measure → threshold → create-worker → rotate). Depends on 0.3 create-worker.
+
+### 0.6.0 — Portable core
+
+Formerly 0.5.0.
+
+### 0.7.0 — Claude host
+
+Formerly 0.6.0.
 
 ## Current milestone
 
-- **Shipped:** **0.1.0** (macOS/Cursor developer preview) and **0.2.0** (static multi-worker: leases, fencing, dual CDP E2E).
-- **Product next:** **0.3.0** — CDP fan-out optimization + assisted create-worker (see below).
-- **Deferred after that:** **0.4.0** agent UX + **worker chat rotation (self-regulate context)** → **0.5.0** portable core → **0.6.0** Claude host.
-- **0.1.0 evidence gaps (non-blocking):** A/B bench scores ([benchmark/results.md](benchmark/results.md)); stranger onboarding ([onboarding-timing.md](onboarding-timing.md)).
+- **Shipped:** **0.1.0**, **0.2.0**, **0.3.0** (A1-S + create-worker CLI).
+- **In progress:** **0.4.0** — ops dashboard (**0.1 landed**; harden + evidence → tag).
+- **Then:** **0.5.0** agent UX + rotation → **0.6.0** portable → **0.7.0** Claude.
 
 ## Near-term queue
 
-1. Spec + implement **0.3.0** (CDP optimize + create-worker wizard).
-2. Close remaining **0.1.0** evidence (bench + timing) without blocking 0.3.0.
-3. Then **0.4.0** (agent UX + self-regulate context / rotate worker chat) → **0.5.0** → **0.6.0**.
+1. Package **0.4.0** gate: smoke evidence, docs, durable status-api → tag (dash 0.1+0.2 landed).
+2. Dashboard **0.3** (recover/clear) only if needed.
+3. Then **0.5.0** (agent UX + self-regulate / max-per-chat).
 
 ## Deferred / non-goals
 
 | Item | Reconsider at |
 |------|----------------|
-| Dynamic worker pool | After **0.3.0** create-worker path is proven |
-| Auto-login / cookie export / auto-approve writes | Never as default; only with explicit consent UX in **0.3.0+** |
-| Unattended ChatGPT chat creation via CDP | Prefer assisted wizard (**0.3.0**); full auto-rotate is **0.4.0** with fail-closed consent |
-| Self-regulate context (message/context threshold → new worker chat) | **0.4.0** (needs 0.3 create-worker) |
-| “Works with all coding agents” claim | After each host has evidence (**0.6.0+**) |
+| Dynamic worker pool / auto-create on queue depth | After **0.3.0** proven + explicit product consent |
+| Auto-login / cookie export / auto-approve writes | Never as default |
+| Self-regulate context (message/context threshold → new worker chat) | **0.5.0** |
+| “Works with all coding agents” claim | After each host has evidence (**0.7.0+**) |
 | Marketplace / Windows | After macOS+Cursor multi-worker bar is solid |
-
-### CDP fan-out (moved into **0.3.0**)
-
-**Problem (2026-08-15):** Static multi-worker requires **one Chrome CDP profile + port + worker chat per browser-worker**. Correct for isolating composer/UI, but scales poorly: RAM, window clutter, and operator workspace.
-
-**0.2.0 stance (shipped):** Keep separate CDPs. Do not share one Chrome across two `browser-worker` processes.
-
-**0.3.0 work:** **A1-S shipped** (exclusive `browser-broker` + N tabs + narrow UI mutex). Assisted create-worker remains for full exit. Keep fence-before-type, no cross-talk on composers, fail-closed consent.
 
 ## Decision log
 
 | Date | Decision | Reason | Supersedes |
 |------|----------|--------|------------|
-| 2026-08-16 | Tag **v0.3.0** for A1-S CDP broker; assisted create-worker still open for full exit | Live dual E2E on one CDP PASS; operator release request | “0.3.0 next” as wholly unstarted |
-| 2026-08-16 | **0.4.0** includes **self-regulate context**: count messages/context length → auto-create replacement worker → rotate chat over threshold | Operator request; depends on 0.3 create-worker; keeps 0.3 focused on CDP + assisted create | Agent-UX-only 0.4.0 |
-| 2026-08-16 | **0.3.0 CDP P0 = A1-S** (broker + N tabs + mutex only around fence/type/send); headless-per-worker not P0 | Second opinion `ho_01M042QR…`; TASK_ID-only makes full concurrent UI writes low-value | Prior “fully concurrent A1(i)” as default |
-| 2026-08-16 | **0.3.0 CDP P0 = A1(i) exclusive browser-broker** (CONDITIONAL on spike); reject N-process shared CDP | ChatGPT review `ho_01M042EE…` + Cursor eval; multi-process attach unsafe | Unspecified “A1 multi-tab” |
-| 2026-08-16 | **0.2.0 shipped**; **0.3.0** = CDP optimize + assisted create-worker | Dual E2E + lease PASS; operator asked to pull CDP fan-out into next milestone with provisioning | 2026-08-15 “fewer CDPs deferred unscheduled”; 0.3.0 provisioning-only |
-| 2026-08-15 | Ladder: 0.1.0 → **0.2.0 multi-worker** → **0.3.0 assisted provision** → 0.4.0 agent UX → 0.5.0 portable → 0.6.0 Claude | Operator priority: scale workers before vibe-coding policy | 2026-08-13 ladder (agent UX ASAP as 0.2.0; multi-worker as 0.5.0) |
-| 2026-08-15 | 0.2.0 keeps **1 CDP Chrome per worker**; “fewer CDPs / less RAM” deferred post-0.2.0 | Dual E2E needs isolated composers; N Chrome is costly — redesign later (multi-tab dispatcher / on-demand CDP) | — |
-| 2026-08-15 | 0.3.0 = wizard + manual login/MCP approve (model A) | Fail-closed consent; avoid brittle unattended CDP create | Unattended auto-create as default |
-| 2026-08-13 | `docs/roadmap.md` is sole version SSOT | Avoid dual authority with `.planning` notes | `.planning/2026-08-13-future-versions.md` |
-| 2026-08-13 | Auto-trigger + effort = skill/rule first | Product server cannot infer host task difficulty | Building chooser into core queue |
-| 2026-08-13 | Feature milestones are **`0.N.0` only**; minors = bugfix | Large features must not hide under `0.N.x` | Prior `0.1.x` / `0.2.x` feature buckets |
+| 2026-08-16 | Dash **0.2** = read-only drill-down (timing, redacted inspector, chat links, honest counts, indicators); mutations → 0.3+; capacity bar → 0.5 | ChatGPT review `ho_01M04PJWX91DS0C3R07W3WBEPF` | “0.2 = recover/clear actions” |
+| 2026-08-16 | Dashboard **0.1 landed** inside **0.4.0**; milestone stays open until harden/tag | Healthy-SSOT UI + `/tasks` + live `/dashboard/` | “0.4.0 = implement dashboard 0.1 next” |
+| 2026-08-16 | Mark **0.3.0 done**; **0.4.0 = ops dashboard**; shift agent UX→0.5, portable→0.6, Claude→0.7 | Operator request after burst/create-worker evidence | Agent UX as immediate 0.4.0 |
+| 2026-08-16 | Tag **v0.3.0** for A1-S; create-worker completed in-tree after tag | Live dual/burst + create-worker CLI | “create-worker still open” |
+| 2026-08-16 | **0.5.0** (was 0.4) includes **self-regulate context** | Depends on 0.3 create-worker | Agent-UX-only prior 0.4 |
+| 2026-08-16 | **0.3.0 CDP P0 = A1-S** | Second opinion `ho_01M042QR…` | Fully concurrent A1(i) default |
+| 2026-08-16 | **0.2.0 shipped**; **0.3.0** = CDP + create-worker | Dual E2E + lease PASS | CDP deferred unscheduled |
+| 2026-08-15 | Ladder: 0.1 → 0.2 multi-worker → 0.3 provision → … | Scale workers before vibe-coding policy | 2026-08-13 ladder |
+| 2026-08-15 | 0.3.0 = wizard + manual login/MCP approve (model A) | Fail-closed consent | Unattended auto-create default |
+| 2026-08-13 | `docs/roadmap.md` is sole version SSOT | Avoid dual authority with `.planning` | `.planning/2026-08-13-future-versions.md` |
+| 2026-08-13 | Feature milestones are **`0.N.0` only**; minors = bugfix | Large features must not hide under `0.N.x` | Prior `0.N.x` feature buckets |
