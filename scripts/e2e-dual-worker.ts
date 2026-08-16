@@ -68,7 +68,9 @@ async function main(): Promise<void> {
     workerUrl: "",
     cdpEndpoint: "",
   });
-  validateWorkersTopology(topology);
+  validateWorkersTopology(topology, {
+    allowSharedCdp: process.env.HANDOFF_A1S === "1",
+  });
   if (topology.workers.length < 2) {
     throw new Error(
       `Need ≥2 workers in ${workersFile} (got ${topology.workers.length})`

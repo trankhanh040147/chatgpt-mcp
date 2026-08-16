@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Cursor ↔ ChatGPT MCP handoff (portable taskId; Cursor E2E, other hosts experimental)",
   "license": "MIT",
   "repository": {
@@ -31,8 +31,11 @@
     "clear-tasks": "tsx scripts/recover.ts --purge",
     "doctor": "tsx scripts/doctor.ts",
     "test:leases": "tsx scripts/test-leases.ts",
+    "spike:a1s": "tsx scripts/spike-a1s.ts",
+    "spike:a1s:live": "tsx scripts/spike-a1s.ts --live",
     "status-api": "node dist/index.js status-api",
     "browser-worker": "node dist/index.js browser-worker",
+    "browser-broker": "node dist/index.js browser-broker",
     "chrome-cdp": "node scripts/start-chrome-cdp.mjs"
   },
   "engines": {

@@ -5,6 +5,7 @@ export type LogComponent =
   | "mcp-server"
   | "task-service"
   | "browser-worker"
+  | "browser-broker"
   | "http-api"
   | "cursor-hook"
   | "lease-reaper"

@@ -7,6 +7,10 @@ import { startMcpServer } from "./mcp/server.js";
 import { startRemoteMcpServer } from "./mcp/remote-server.js";
 import { startHttpApi } from "./http/api.js";
 import { startBrowserWorker, type BrowserWorker } from "./browser/worker.js";
+import {
+  startBrowserBroker,
+  type BrowserBrokerHandle,
+} from "./browser/start-broker.js";
 import { log } from "./logging/logger.js";
 import {
   loadWorkersTopology,
@@ -30,8 +34,8 @@ function requireWorkerUrl(config: AppConfig): void {
 
 function validateTopologyOrThrow(
   config: AppConfig,
-  opts?: { includeHttpPort?: boolean }
-): void {
+  opts?: { includeHttpPort?: boolean; allowSharedCdp?: boolean }
+): ReturnType<typeof loadWorkersTopology> {
   const topology = loadWorkersTopology({
     workersFile: config.workersFile,
     workerId: config.workerId,
@@ -41,12 +45,15 @@ function validateTopologyOrThrow(
     // or dual topology falsely reports duplicate httpPort.
     httpPort: opts?.includeHttpPort ? config.httpPort : undefined,
   });
-  validateWorkersTopology(topology);
+  validateWorkersTopology(topology, {
+    allowSharedCdp: opts?.allowSharedCdp === true,
+  });
   log({
     event: "INFO",
     component: "config",
-    message: `topology source=${topology.source} workers=${topology.workers.length} ids=[${topology.workers.map((w) => w.id).join(",")}]`,
+    message: `topology source=${topology.source} workers=${topology.workers.length} ids=[${topology.workers.map((w) => w.id).join(",")}] sharedCdp=${opts?.allowSharedCdp === true}`,
   });
+  return topology;
 }
 
 function registerShutdown(worker: BrowserWorker): void {
@@ -60,6 +67,23 @@ function registerShutdown(worker: BrowserWorker): void {
       message: `Received ${signal}, disconnecting CDP (Chrome stays open)...`,
     });
     await worker.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+}
+
+function registerBrokerShutdown(handle: BrowserBrokerHandle): void {
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log({
+      event: "INFO",
+      component: "browser-broker",
+      message: `Received ${signal}, stopping actors + disconnecting CDP...`,
+    });
+    await handle.close();
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));
@@ -81,6 +105,35 @@ function startWorkerFromConfig(config: AppConfig): Promise<BrowserWorker> {
     leaseMs: config.leaseMs,
     workerStaleMs: config.workerStaleMs,
     browserOnly: true,
+  });
+}
+
+async function startBrokerFromConfig(
+  config: AppConfig
+): Promise<BrowserBrokerHandle> {
+  const topology = validateTopologyOrThrow(config, {
+    includeHttpPort: false,
+    allowSharedCdp: true,
+  });
+  if (topology.workers.length < 1) {
+    throw new Error(
+      "browser-broker requires HANDOFF_WORKERS_FILE with ≥1 worker sharing one cdpEndpoint"
+    );
+  }
+  const cdpEndpoint = topology.workers[0]!.cdpEndpoint;
+  return startBrowserBroker({
+    dbPath: config.dbPath,
+    cdpEndpoint,
+    chatGptUrl: config.chatGptUrl,
+    workers: topology.workers.map((w) => ({
+      id: w.id,
+      workerUrl: w.workerUrl,
+    })),
+    pollIntervalMs: config.pollIntervalMs,
+    approvalTimeoutMs: config.approvalTimeoutMs,
+    rateLimitBackoffMs: config.rateLimitBackoffMs,
+    leaseMs: config.leaseMs,
+    workerStaleMs: config.workerStaleMs,
   });
 }
 
@@ -110,7 +163,15 @@ async function main(): Promise<void> {
   if (mode === "browser-worker") {
     const worker = await startWorkerFromConfig(config);
     registerShutdown(worker);
-    // Keep event loop alive even if the worker loop is between reconnects.
+    await new Promise<void>(() => {
+      /* run until SIGINT/SIGTERM */
+    });
+    return;
+  }
+
+  if (mode === "browser-broker") {
+    const handle = await startBrokerFromConfig(config);
+    registerBrokerShutdown(handle);
     await new Promise<void>(() => {
       /* run until SIGINT/SIGTERM */
     });
@@ -168,7 +229,7 @@ async function main(): Promise<void> {
   }
 
   console.error(
-    `Unknown mode: ${mode}. Use: mcp | status-api | http | worker | browser-worker | remote-mcp | all`
+    `Unknown mode: ${mode}. Use: mcp | status-api | http | worker | browser-worker | browser-broker | remote-mcp | all`
   );
   process.exit(1);
 }

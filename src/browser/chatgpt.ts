@@ -2,11 +2,20 @@ import type { Browser, BrowserContext, Page } from "playwright";
 import { selectors, DISPATCH_MESSAGE } from "./selectors.js";
 import { SUBMIT_NUDGE_MESSAGE } from "../mcp/worker-policy.js";
 import { log } from "../logging/logger.js";
+import { sameWorkerChat } from "./chat-url.js";
 
 export interface ChatGptBrowserOptions {
   /** CDP HTTP endpoint of an already-running Chrome, e.g. http://127.0.0.1:9222 */
   cdpEndpoint: string;
   /** Direct URL of the dedicated worker conversation (https://chatgpt.com/c/...). */
+  workerUrl: string;
+  chatGptUrl: string;
+}
+
+export interface SharedPageAttachOptions {
+  browser: Browser;
+  context: BrowserContext;
+  page: Page;
   workerUrl: string;
   chatGptUrl: string;
 }
@@ -19,10 +28,29 @@ export class ChatGptBrowser {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  /** When false (broker-bound page), close() must not disconnect CDP. */
+  private ownsConnection = true;
 
   constructor(private readonly options: ChatGptBrowserOptions) {}
 
+  /** Bind an existing Playwright page owned by BrowserBroker (A1-S). */
+  static attachShared(opts: SharedPageAttachOptions): ChatGptBrowser {
+    const instance = new ChatGptBrowser({
+      cdpEndpoint: "shared",
+      workerUrl: opts.workerUrl,
+      chatGptUrl: opts.chatGptUrl,
+    });
+    instance.browser = opts.browser;
+    instance.context = opts.context;
+    instance.page = opts.page;
+    instance.ownsConnection = false;
+    return instance;
+  }
+
   async connect(): Promise<void> {
+    if (!this.ownsConnection && this.page) {
+      return;
+    }
     const { chromium } = await import("playwright");
     try {
       // noDefaults: skip Browser.setDownloadBehavior / focus / media overrides.
@@ -321,6 +349,13 @@ export class ChatGptBrowser {
 
   /** Disconnect Playwright from Chrome without quitting the user's browser. */
   async close(): Promise<void> {
+    if (!this.ownsConnection) {
+      // Broker owns the CDP socket — drop local refs only.
+      this.browser = null;
+      this.context = null;
+      this.page = null;
+      return;
+    }
     try {
       await this.browser?.close();
     } catch {
@@ -330,12 +365,4 @@ export class ChatGptBrowser {
     this.context = null;
     this.page = null;
   }
-}
-
-function sameWorkerChat(currentUrl: string, workerUrl: string): boolean {
-  const idOf = (url: string): string | undefined =>
-    url.match(/\/c\/([a-z0-9-]+)/i)?.[1]?.toLowerCase();
-  const current = idOf(currentUrl);
-  const expected = idOf(workerUrl);
-  return Boolean(current && expected && current === expected);
 }

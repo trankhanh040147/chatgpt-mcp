@@ -1,5 +1,5 @@
 #!/bin/bash
-# Dual-worker detached stack: status-api + remote-mcp + browser-workers w1 & w2.
+# A1-S broker stack: status-api + remote-mcp + one browser-broker (N tabs / 1 CDP).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -10,10 +10,17 @@ if [[ ! -f dist/index.js ]]; then
   exit 1
 fi
 
-export HANDOFF_WORKERS_FILE="${HANDOFF_WORKERS_FILE:-$ROOT/data/workers.json}"
+export HANDOFF_WORKERS_FILE="${HANDOFF_WORKERS_FILE:-$ROOT/data/workers.a1s.json}"
+
+if [[ ! -f "$HANDOFF_WORKERS_FILE" ]]; then
+  echo "Missing $HANDOFF_WORKERS_FILE" >&2
+  echo "Copy docs/workers.example.a1s.json → data/workers.a1s.json and set two /c/… URLs on the SAME cdpEndpoint." >&2
+  exit 1
+fi
 
 pkill -f 'supervise-browser-worker' 2>/dev/null || true
 pkill -f 'node dist/index.js browser-worker' 2>/dev/null || true
+pkill -f 'node dist/index.js browser-broker' 2>/dev/null || true
 pkill -f 'node dist/index.js status-api' 2>/dev/null || true
 pkill -f 'node dist/index.js remote-mcp' 2>/dev/null || true
 sleep 1
@@ -60,22 +67,10 @@ PY
 
 start_named remote-mcp remote-mcp
 start_named status-api status-api
-
-node -e '
-const fs=require("fs");
-const w=JSON.parse(fs.readFileSync(process.env.HANDOFF_WORKERS_FILE,"utf8"));
-for (const x of w) {
-  console.log([x.id, x.workerUrl, x.cdpEndpoint].join("\t"));
-}
-' | while IFS="$(printf '\t')" read -r id url cdp; do
-  start_named browser-worker "browser-worker-${id}" \
-    HANDOFF_WORKER_ID="$id" \
-    CHATGPT_WORKER_URL="$url" \
-    CHATGPT_CDP_ENDPOINT="$cdp" \
-    HANDOFF_WORKERS_FILE="$HANDOFF_WORKERS_FILE"
-done
+start_named browser-broker browser-broker \
+  HANDOFF_WORKERS_FILE="$HANDOFF_WORKERS_FILE"
 
 sleep 4
 curl -sf "http://127.0.0.1:8787/health" && echo || echo "status-api not healthy yet"
 curl -sf "http://127.0.0.1:8787/workers" && echo || echo "workers not ready yet"
-echo "Done. HANDOFF_WORKERS_FILE=$HANDOFF_WORKERS_FILE"
+echo "Done. HANDOFF_WORKERS_FILE=$HANDOFF_WORKERS_FILE (A1-S broker)"

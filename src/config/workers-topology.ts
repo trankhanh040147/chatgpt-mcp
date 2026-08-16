@@ -113,7 +113,10 @@ export function loadWorkersTopology(opts: {
   };
 }
 
-export function validateWorkersTopology(topology: ResolvedTopology): void {
+export function validateWorkersTopology(
+  topology: ResolvedTopology,
+  opts?: { allowSharedCdp?: boolean }
+): void {
   const { workers } = topology;
   if (workers.length === 0) return;
 
@@ -139,11 +142,6 @@ export function validateWorkersTopology(topology: ResolvedTopology): void {
     if (!isHttpUrl(w.cdpEndpoint)) {
       throw new Error(`Invalid cdpEndpoint for ${w.id}`);
     }
-    if (cdps.has(w.cdpEndpoint)) {
-      throw new Error(
-        `Duplicate cdpEndpoint in topology (0.2.0 requires separate Chrome profiles): ${w.cdpEndpoint}`
-      );
-    }
     cdps.add(w.cdpEndpoint);
 
     if (w.httpPort !== undefined && w.httpPort !== null) {
@@ -152,5 +150,18 @@ export function validateWorkersTopology(topology: ResolvedTopology): void {
       }
       ports.add(w.httpPort);
     }
+  }
+
+  if (opts?.allowSharedCdp) {
+    // A1-S broker: all logical workers must share exactly one CDP endpoint.
+    if (cdps.size !== 1) {
+      throw new Error(
+        `broker mode requires a single shared cdpEndpoint (got ${cdps.size}: ${[...cdps].join(", ")})`
+      );
+    }
+  } else if (cdps.size !== workers.length) {
+    throw new Error(
+      `Duplicate cdpEndpoint in topology (0.2.0 requires separate Chrome profiles; use browser-broker / allowSharedCdp for A1-S)`
+    );
   }
 }

@@ -6,12 +6,10 @@
 
 ### A — CDP optimize
 1. Measure baseline: RSS / window count for 1 vs 2 CDP Chromes
-2. Prototype candidates (pick one primary):
-   - **A1** Single Chrome, multi-tab dispatcher (shared CDP, isolated pages)
-   - **A2** On-demand CDP (spawn on claim, tear down when idle)
-   - **A3** Minimized / app-hidden Chrome (still headed; less clutter)
-3. Keep invariants: fence-before-type, no composer cross-talk, lease CAS
-4. Dual-logical-worker E2E under the chosen footprint
+2. **Locked direction:** **A1-S** — exclusive browser-broker + N tabs + **narrow global mutex only for fence+type/send** (not full concurrent A1(i); not A1(ii))
+3. Run A1-S spike in findings.md; pass kill criteria or fall back to N headed
+4. Dual-logical-worker E2E under broker footprint (PROCESSING may overlap; UI writes serialize)
+5. Headless-per-worker / A2 / fully concurrent writes = later/experimental only
 
 ### B — Assisted create-worker
 1. CLI/wizard: new chat via CDP assist → capture `/c/…` URL

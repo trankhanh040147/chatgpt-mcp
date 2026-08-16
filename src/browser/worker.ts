@@ -4,6 +4,7 @@ import { TaskRepository } from "../tasks/task.repository.js";
 import { TaskService } from "../tasks/task.service.js";
 import { WorkerStateManager } from "./worker-state.js";
 import { ChatGptBrowser } from "./chatgpt.js";
+import type { UiWriteMutex } from "./ui-write-mutex.js";
 import { log } from "../logging/logger.js";
 import type { WorkerStatus } from "../tasks/task.types.js";
 import { DEFAULT_WORKER_ID } from "../tasks/task.types.js";
@@ -21,6 +22,20 @@ export interface BrowserWorkerOptions {
   workerStaleMs?: number;
   /** When true, this process does not own HTTP (status-api is separate). */
   browserOnly?: boolean;
+  /**
+   * Broker-injected page adapter (A1-S). When set, this actor does not open
+   * or close the CDP connection.
+   */
+  sharedBrowser?: ChatGptBrowser;
+  /**
+   * Broker: resolve the current page adapter (may change after CDP reconnect).
+   * Takes precedence over sharedBrowser when present.
+   */
+  resolveSharedBrowser?: () => ChatGptBrowser;
+  /** Global UI-write mutex — assert + type/send only (not claim/renew/CAS). */
+  uiWriteMutex?: UiWriteMutex;
+  /** Fail-closed chat/page check immediately before irreversible write. */
+  assertBindingFresh?: () => void;
 }
 
 const BLOCKING_STATUSES: WorkerStatus[] = ["SESSION_LOST", "ERROR"];
@@ -76,11 +91,14 @@ export class BrowserWorker {
     );
     this.workerState = workerState;
 
-    const browser = new ChatGptBrowser({
-      cdpEndpoint: this.options.cdpEndpoint,
-      workerUrl: this.options.workerUrl,
-      chatGptUrl: this.options.chatGptUrl,
-    });
+    const ownsCdp = !this.isSharedCdp();
+    const browser = ownsCdp
+      ? new ChatGptBrowser({
+          cdpEndpoint: this.options.cdpEndpoint,
+          workerUrl: this.options.workerUrl,
+          chatGptUrl: this.options.chatGptUrl,
+        })
+      : this.resolveBrowser();
     this.browser = browser;
 
     this.running = true;
@@ -128,6 +146,8 @@ export class BrowserWorker {
 
     while (this.running) {
       try {
+        const browser = this.resolveBrowser();
+        this.browser = browser;
         await browser.connect();
 
         const sessionReady = await browser.ensureSessionReady();
@@ -137,7 +157,7 @@ export class BrowserWorker {
           });
           while (this.running) {
             await sleep(10_000);
-            const ok = await browser.ensureSessionReady();
+            const ok = await this.resolveBrowser().ensureSessionReady();
             if (ok) break;
           }
           if (!this.running) break;
@@ -154,13 +174,17 @@ export class BrowserWorker {
         });
 
         while (this.running) {
-          await this.tick(taskService, workerState, browser);
+          const live = this.resolveBrowser();
+          this.browser = live;
+          await this.tick(taskService, workerState, live);
           await sleep(this.options.pollIntervalMs);
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         workerState.setStatus("ERROR", { error: message });
-        await browser.screenshotOnFailure("worker-crash").catch(() => undefined);
+        await this.browser
+          ?.screenshotOnFailure("worker-crash")
+          .catch(() => undefined);
         log({
           event: "ERROR",
           component: "browser-worker",
@@ -169,10 +193,12 @@ export class BrowserWorker {
         this.activeTaskId = null;
         this.activeLeaseToken = null;
         await sleep(5_000);
-        try {
-          await browser.close();
-        } catch {
-          // ignore
+        if (ownsCdp) {
+          try {
+            await this.browser?.close();
+          } catch {
+            // ignore
+          }
         }
       }
     }
@@ -191,7 +217,34 @@ export class BrowserWorker {
     } catch {
       // best-effort
     }
-    await this.browser?.close();
+    if (!this.isSharedCdp()) {
+      await this.browser?.close();
+    }
+  }
+
+  private isSharedCdp(): boolean {
+    return Boolean(
+      this.options.resolveSharedBrowser || this.options.sharedBrowser
+    );
+  }
+
+  private resolveBrowser(): ChatGptBrowser {
+    if (this.options.resolveSharedBrowser) {
+      return this.options.resolveSharedBrowser();
+    }
+    if (this.options.sharedBrowser) {
+      return this.options.sharedBrowser;
+    }
+    if (this.browser) {
+      return this.browser;
+    }
+    throw new Error("Browser not ready");
+  }
+
+  private async withUiWrite<T>(fn: () => Promise<T>): Promise<T> {
+    const mutex = this.options.uiWriteMutex;
+    if (!mutex) return fn();
+    return mutex.run(fn);
   }
 
   private async tick(
@@ -275,7 +328,7 @@ export class BrowserWorker {
         return;
       }
 
-      // Reversible prep only — open conversation / locate composer.
+      // Reversible prep only — open conversation / locate composer (outside mutex).
       await browser.openWorkerConversation();
       if (
         !taskService.renewLease(
@@ -297,6 +350,7 @@ export class BrowserWorker {
         return;
       }
 
+      // Lease CAS outside UI mutex (must not stall other actors on DB/MCP).
       const fenced = taskService.markDispatchStarted(
         task.id,
         this.workerId,
@@ -337,7 +391,12 @@ export class BrowserWorker {
         return;
       }
 
-      await browser.submitTaskId(task.id);
+      // A1-S UI mutex: assert binding + type/send only.
+      await this.withUiWrite(async () => {
+        this.options.assertBindingFresh?.();
+        await browser.submitTaskId(task.id);
+      });
+
       taskService.renewLease(
         task.id,
         this.workerId,
@@ -412,6 +471,7 @@ export class BrowserWorker {
     workerState.setStatus("BUSY", { currentTaskId: taskId });
 
     if (!this.nudgeSent && elapsed >= NUDGE_AT_MS) {
+      // Nudge CAS outside UI mutex; only type/send under the lock.
       const fenced = taskService.markNudgeStarted(
         taskId,
         this.workerId,
@@ -420,8 +480,9 @@ export class BrowserWorker {
         this.leaseMs,
         this.workerStaleMs
       );
-      this.nudgeSent = true;
-      if (fenced) {
+      if (!fenced) {
+        this.nudgeSent = true;
+      } else {
         taskService.renewLease(
           taskId,
           this.workerId,
@@ -431,16 +492,20 @@ export class BrowserWorker {
           this.workerStaleMs
         );
         try {
-          await browser.sendSubmitNudge(taskId);
-          log({
-            event: "INFO",
-            component: "browser-worker",
-            taskId,
-            message: `Sent submit nudge (TASK_ID=${taskId})`,
+          await this.withUiWrite(async () => {
+            this.options.assertBindingFresh?.();
+            await browser.sendSubmitNudge(taskId);
+            log({
+              event: "INFO",
+              component: "browser-worker",
+              taskId,
+              message: `Sent submit nudge (TASK_ID=${taskId})`,
+            });
           });
         } catch {
-          // Fail-closed: do not retry nudge after marker.
+          // Fail-closed: marker already set — do not retry.
         }
+        this.nudgeSent = true;
         taskService.renewLease(
           taskId,
           this.workerId,
