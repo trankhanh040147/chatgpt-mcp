@@ -13,6 +13,7 @@ fi
 export HANDOFF_WORKERS_FILE="${HANDOFF_WORKERS_FILE:-$ROOT/data/workers.json}"
 
 pkill -f 'supervise-browser-worker' 2>/dev/null || true
+pkill -f 'supervise-status-api' 2>/dev/null || true
 pkill -f 'node dist/index.js browser-worker' 2>/dev/null || true
 pkill -f 'node dist/index.js status-api' 2>/dev/null || true
 pkill -f 'node dist/index.js remote-mcp' 2>/dev/null || true
@@ -59,7 +60,26 @@ PY
 }
 
 start_named remote-mcp remote-mcp
-start_named status-api status-api
+
+chmod +x "$ROOT/scripts/supervise-status-api.sh"
+status_sup_pid="$(
+  python3 - <<'PY'
+import os, subprocess
+log = open("logs/status-api-supervise.out", "ab", buffering=0)
+p = subprocess.Popen(
+    ["bash", "scripts/supervise-status-api.sh"],
+    stdin=subprocess.DEVNULL,
+    stdout=log,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+    env=os.environ.copy(),
+    cwd=os.getcwd(),
+)
+print(p.pid)
+PY
+)"
+echo "$status_sup_pid" > logs/status-api-supervise.pid
+echo "status-api supervise → pid $status_sup_pid"
 
 node -e '
 const fs=require("fs");

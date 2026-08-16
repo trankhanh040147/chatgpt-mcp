@@ -139,6 +139,40 @@ async function startBrokerFromConfig(
   });
 }
 
+function registerHttpKeepalive(): Promise<void> {
+  const shutdown = (signal: string) => {
+    log({
+      event: "INFO",
+      component: "http-api",
+      message: `Received ${signal}, shutting down status-api`,
+    });
+    process.exit(0);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("uncaughtException", (err) => {
+    log({
+      event: "ERROR",
+      component: "http-api",
+      message: `uncaughtException: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
+    });
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    const message =
+      reason instanceof Error ? reason.stack ?? reason.message : String(reason);
+    log({
+      event: "ERROR",
+      component: "http-api",
+      message: `unhandledRejection: ${message}`,
+    });
+    process.exit(1);
+  });
+  return new Promise(() => {
+    /* run until SIGINT/SIGTERM — same contract as browser-worker / broker */
+  });
+}
+
 async function main(): Promise<void> {
   const mode = process.argv[2] ?? "all";
   const config = loadConfig();
@@ -159,6 +193,7 @@ async function main(): Promise<void> {
       reaperIntervalMs: config.reaperIntervalMs,
       workerId: config.workerId,
     });
+    await registerHttpKeepalive();
     return;
   }
 

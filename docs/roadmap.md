@@ -74,7 +74,8 @@ Operator pain after multi-worker + broker: diagnosing health, leases, and stuck 
 |----------|--------|--------|
 | **0.1** | Read-only localhost UI: control plane, worker cards, recent tasks, troubleshoot + copyable cmds; poll `/health` `/workers` `/tasks` | **Done** (`/dashboard/`) |
 | **0.2** | Read-only drill-down: task timing, on-demand redacted content, chat links, 24h counts, indicators | **Done** |
-| **0.3+** | Guarded mutations (recover/clear); history/charts/log tail; create-worker surface | Later |
+| **0.3** | Guarded mutations: recover / fail-task (typed confirm); topology read-only | **Done** |
+| **0.3+** | Usage estimates (tokens + optional reference $); metric chips UI; history/charts; create-worker UI | **Usage + UI polish done**; charts later |
 
 #### P0 — dashboard 0.1 (**done**)
 
@@ -101,19 +102,49 @@ Read-only observability (audit `ho_01M04PJWX91DS0C3R07W3WBEPF`):
 
 Terminal tasks now **keep `lease_owner`** (clear token/expiry only) so counts work; QUEUED requeue still clears owner.
 
-**Out of 0.2:** recover/clear → **0.3+**; capacity bar → package **0.5**.
+**Out of 0.2:** recover/clear → **0.3**; capacity bar → package **0.5**.
+
+#### Dashboard 0.3 — guarded mutations (**done**, hardened)
+
+| Item | Notes |
+|------|--------|
+| Shared recover module | `planRecover` / `executeRecover` / `failTaskById`; CLI uses same path |
+| Selective worker reset | Default: stale HB / dead pid / orphan task only; CLI `--reset-all-workers` for legacy wipe |
+| Preview → execute | `POST /ops/recover/preview` → one-shot `planToken` + phrase `RECOVER <n>` |
+| CSRF + origin | `GET /ops/session`; mutations require `X-Ops-CSRF`; Origin allowlist |
+| `POST /ops/tasks/fail` | Confirm `FAIL <taskId>`; 404/409 semantics |
+| `GET /ops/topology` | Allowlisted fields; CDP host redacted (no raw endpoint) |
+| UI | Blast-radius modal (not `window.prompt`) |
+| Tests | `npm run test:ops` |
+
+**Out of 0.3:** full DB purge (CLI `--purge`); HTTP `failOpen` (CLI-only); history/charts; create-worker wizard; SaaS auth.
+
+#### Dashboard usage estimates (0.3+ observability MVP)
+
+Per ChatGPT research `ho_01M04T15ETEKJ3KXKN5F47JAGJ` + framing fix `ho_01M04W2BNFGZE25YAQ6T0Z602W`:
+
+| Item | Notes |
+|------|--------|
+| Primary | Estimated **visible-text tokens** (`js-tiktoken` / `o200k_base` on stored prompt+result) |
+| Optional $ | **Reference API cost** vs Cursor/API list rates — **off by default** |
+| Comparison scenario | e.g. `Cursor alternative · Claude Sonnet 5` — **not** ChatGPT runtime model |
+| Config | `HANDOFF_REFERENCE_PRICING=on`, `HANDOFF_REFERENCE_SCENARIO=claude-sonnet-5` |
+| Snapshot | `task_usage` at submit; aggregates per worker + totals (24h / all-time) |
+| UI | Metric chips + drawer “Compared with”; never bare `Model:` for counterfactual |
+| Redacted content | `HANDOFF_DASHBOARD_TASK_CONTENT=redacted` (default off) |
+| Backfill / tests | `npm run usage:backfill`, `npm run test:usage` |
 
 #### Remaining to claim package **0.4.0** shipped
 
 - Live smoke evidence + short docs (`make dashboard` / connect path)
-- Hardening (status-api restart durability with broker stack)
-- Tag `v0.4.0` when exit criteria signed off (may ship with dash 0.1 only, or after 0.2 — product choice)
+- Tag `v0.4.0` when exit criteria signed off
 
 #### Non-goals for 0.4.0
 
 - Hosted SaaS dashboard / multi-user auth
 - Replacing MCP or CDP automation with the UI
 - Auto-scaling workers
+- Claiming ChatGPT per-handoff invoices or cash savings from estimates
 
 ### 0.5.0 — Agent UX + worker chat rotation
 
@@ -130,14 +161,13 @@ Formerly 0.6.0.
 ## Current milestone
 
 - **Shipped:** **0.1.0**, **0.2.0**, **0.3.0** (A1-S + create-worker CLI).
-- **In progress:** **0.4.0** — ops dashboard (**0.1 landed**; harden + evidence → tag).
+- **In progress:** **0.4.0** — ops dashboard (**0.1–0.3 + usage estimates landed**; smoke/docs → tag).
 - **Then:** **0.5.0** agent UX + rotation → **0.6.0** portable → **0.7.0** Claude.
 
 ## Near-term queue
 
-1. Package **0.4.0** gate: smoke evidence, docs, durable status-api → tag (dash 0.1+0.2 landed).
-2. Dashboard **0.3** (recover/clear) only if needed.
-3. Then **0.5.0** (agent UX + self-regulate / max-per-chat).
+1. Package **0.4.0** gate: smoke evidence, docs → tag.
+2. Then **0.5.0** (agent UX + self-regulate / max-per-chat).
 
 ## Deferred / non-goals
 
@@ -148,11 +178,14 @@ Formerly 0.6.0.
 | Self-regulate context (message/context threshold → new worker chat) | **0.5.0** |
 | “Works with all coding agents” claim | After each host has evidence (**0.7.0+**) |
 | Marketplace / Windows | After macOS+Cursor multi-worker bar is solid |
+| Dashboard history/charts / create-worker UI | Dash **0.3+** later |
 
 ## Decision log
 
 | Date | Decision | Reason | Supersedes |
 |------|----------|--------|------------|
+| 2026-08-16 | Usage $ = optional **reference cost** vs Cursor scenario (default Claude Sonnet 5); tokens primary; never label counterfactual as ChatGPT runtime `Model` | Operator confusion + review `ho_01M04W2BNFGZE25YAQ6T0Z602W` | “API-equiv. avoided” as headline / bare `Model: claude-sonnet-5` |
+| 2026-08-16 | Dash **0.3** = guarded recover / fail-task + topology read-only; purge stays CLI | Live smoke `/ops/*` + typed confirm UI | Silent GET mutate / dashboard purge |
 | 2026-08-16 | Dash **0.2** = read-only drill-down (timing, redacted inspector, chat links, honest counts, indicators); mutations → 0.3+; capacity bar → 0.5 | ChatGPT review `ho_01M04PJWX91DS0C3R07W3WBEPF` | “0.2 = recover/clear actions” |
 | 2026-08-16 | Dashboard **0.1 landed** inside **0.4.0**; milestone stays open until harden/tag | Healthy-SSOT UI + `/tasks` + live `/dashboard/` | “0.4.0 = implement dashboard 0.1 next” |
 | 2026-08-16 | Mark **0.3.0 done**; **0.4.0 = ops dashboard**; shift agent UX→0.5, portable→0.6, Claude→0.7 | Operator request after burst/create-worker evidence | Agent UX as immediate 0.4.0 |

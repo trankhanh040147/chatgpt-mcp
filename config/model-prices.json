@@ -1,0 +1,49 @@
+{
+  "version": "vendor-list-2026-08-16",
+  "notes": "Counterfactual Cursor/API list rates for optional REFERENCE cost comparison only — not ChatGPT billing. Verify against https://cursor.com/docs/models-and-pricing.",
+  "models": {
+    "claude-sonnet-5": {
+      "label": "Claude Sonnet 5",
+      "displayName": "Cursor alternative · Claude Sonnet 5",
+      "context": "counterfactual",
+      "inputUsdPerMTok": 2,
+      "outputUsdPerMTok": 10
+    },
+    "claude-opus-5": {
+      "label": "Claude Opus 5",
+      "displayName": "Cursor alternative · Claude Opus 5",
+      "context": "counterfactual",
+      "inputUsdPerMTok": 5,
+      "outputUsdPerMTok": 25
+    },
+    "gpt-5.6-sol": {
+      "label": "GPT-5.6 Sol",
+      "displayName": "Cursor alternative · GPT-5.6 Sol",
+      "context": "counterfactual",
+      "inputUsdPerMTok": 5,
+      "outputUsdPerMTok": 30
+    },
+    "gpt-5.6-terra": {
+      "label": "GPT-5.6 Terra",
+      "displayName": "Cursor alternative · GPT-5.6 Terra",
+      "context": "counterfactual",
+      "inputUsdPerMTok": 2,
+      "outputUsdPerMTok": 12
+    },
+    "gpt-5.6-luna": {
+      "label": "GPT-5.6 Luna",
+      "displayName": "Cursor alternative · GPT-5.6 Luna",
+      "context": "counterfactual",
+      "inputUsdPerMTok": 0.2,
+      "outputUsdPerMTok": 1.2
+    },
+    "composer-2.5": {
+      "label": "Composer 2.5",
+      "displayName": "Cursor alternative · Composer 2.5",
+      "context": "counterfactual",
+      "inputUsdPerMTok": 0.5,
+      "outputUsdPerMTok": 2.5
+    }
+  },
+  "defaultModel": "claude-sonnet-5"
+}

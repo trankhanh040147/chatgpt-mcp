@@ -8,6 +8,7 @@ export type LogComponent =
   | "browser-broker"
   | "create-worker"
   | "http-api"
+  | "ops"
   | "cursor-hook"
   | "lease-reaper"
   | "config";

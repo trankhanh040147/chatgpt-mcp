@@ -100,6 +100,16 @@ QUEUED → DISPATCHING → [fence] DISPATCHED → PROCESSING → COMPLETED
 
 Worker only claims work when its own state is **READY**. If stuck at `QUEUED`, the HTTP API may still be up while the dispatcher is not READY (e.g. `STARTING`).
 
+## Usage estimates (ops dashboard)
+
+On successful `handoff_submit_result`, chatgpt-mcp snapshots **estimated** tokens for the stored prompt + result (`js-tiktoken` / `o200k_base`).
+
+**Primary metric:** estimated visible-text tokens (not ChatGPT billing).
+
+**Optional secondary:** a **reference API cost** comparison against a Cursor/API list-price scenario (`config/model-prices.json`). This is **off by default** (`HANDOFF_REFERENCE_PRICING=off`). When enabled, the UI labels it as a **comparison scenario** (e.g. “Cursor alternative · Claude Sonnet 5”) — **never** as the ChatGPT runtime model. It is not cash saved and not a ChatGPT invoice.
+
+Enable: `HANDOFF_REFERENCE_PRICING=on` and optionally `HANDOFF_REFERENCE_SCENARIO=claude-sonnet-5`. Backfill: `npm run usage:backfill`.
+
 ## Chrome / session model (important)
 
 **Fact:** From Chrome 136, `--remote-debugging-port` is **ignored** on the Default profile directory. Google documents this as a security change.

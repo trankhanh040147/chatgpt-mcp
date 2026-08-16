@@ -9,18 +9,24 @@ SSOT: `docs/roadmap.md` §0.4.0.
 |----------|--------|--------|
 | **0.1** | Read-only poll console | **Done** |
 | **0.2** | Read-only drill-down + truthful observability | **Done** |
-| **0.3+** | Guarded mutations; history/charts | Later |
+| **0.3** | Guarded mutations + topology read-only | **Done** |
+| **0.3+** | Usage estimates + metric chips; charts/create-worker UI later | **Usage done** |
 
-## 0.2 shipped
+## 0.3 shipped
 
-- Task timing on list + detail (`queueMs` / `processingMs` / `totalMs` / finished)
-- `GET /tasks/:id/detail` + `GET /tasks/:id/content` (redacted; `HANDOFF_DASHBOARD_TASK_CONTENT=redacted`)
-- Worker `chatUrl` + Open worker chat
-- Completed/failed/timeout counts last 24h (lease_owner kept on terminal)
-- Derived indicators (no HALLUCINATE / fake OVERLOAD)
-- Task drawer UI
+- `src/ops/recover.ts` plan/execute + selective worker reset
+- Preview + one-shot planToken; CSRF; Origin allowlist; `failOpen` CLI-only
+- Modal blast-radius confirm (`RECOVER <n>` / `FAIL <id>`)
+- Topology allowlist/redact; `npm run test:ops`
+
+## Usage estimates shipped
+
+- `task_usage` snapshots; tokens primary
+- Optional reference cost vs Cursor scenario (Claude Sonnet 5)
+- Metric chips UI; drawer “Compared with” / “Billing not measured”
+- `npm run test:usage`, `npm run usage:backfill`
 
 ## Next
 
 - Package 0.4 smoke/docs/tag
-- Dash 0.3 mutations when needed
+- Dash charts / create-worker UI when needed

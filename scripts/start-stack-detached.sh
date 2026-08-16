@@ -36,7 +36,14 @@ else
 fi
 
 start_one remote-mcp
-start_one status-api
+if [[ -f logs/status-api-supervise.pid ]] && kill -0 "$(cat logs/status-api-supervise.pid)" 2>/dev/null; then
+  echo "status-api supervise already running"
+else
+  chmod +x scripts/supervise-status-api.sh
+  nohup bash scripts/supervise-status-api.sh >/dev/null 2>&1 &
+  echo $! > logs/status-api-supervise.pid
+  echo "status-api supervise → pid $!"
+fi
 sleep 2
 curl -sf "http://127.0.0.1:8787/health" && echo || echo "status-api not healthy yet"
 curl -sf "http://127.0.0.1:8787/worker" && echo || echo "worker state not ready yet"

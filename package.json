@@ -14,7 +14,7 @@
     "handoff": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc && mkdir -p dist/db dist/dashboard && cp src/db/schema.sql dist/db/schema.sql && cp -R src/dashboard/public dist/dashboard/public",
+    "build": "tsc && mkdir -p dist/db dist/dashboard dist/config && cp src/db/schema.sql dist/db/schema.sql && cp config/model-prices.json dist/config/model-prices.json && rm -rf dist/dashboard/public && cp -R src/dashboard/public dist/dashboard/public",
     "start": "tsx scripts/start.ts",
     "dev": "tsx src/index.ts",
     "mcp": "node dist/index.js mcp",
@@ -31,6 +31,9 @@
     "clear-tasks": "tsx scripts/recover.ts --purge",
     "doctor": "tsx scripts/doctor.ts",
     "test:leases": "tsx scripts/test-leases.ts",
+    "test:ops": "tsx scripts/test-ops-recover.ts",
+    "test:usage": "tsx scripts/test-usage.ts",
+    "usage:backfill": "tsx scripts/usage-backfill.ts",
     "spike:a1s": "tsx scripts/spike-a1s.ts",
     "spike:a1s:live": "tsx scripts/spike-a1s.ts --live",
     "create-worker": "tsx scripts/create-worker.ts",
@@ -46,6 +49,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
     "dotenv": "^16.4.7",
+    "js-tiktoken": "^1.0.21",
     "playwright": "^1.62.1",
     "ulid": "^2.3.0",
     "zod": "^3.24.2"

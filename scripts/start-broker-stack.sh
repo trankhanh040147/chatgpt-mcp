@@ -19,6 +19,7 @@ if [[ ! -f "$HANDOFF_WORKERS_FILE" ]]; then
 fi
 
 pkill -f 'supervise-browser-worker' 2>/dev/null || true
+pkill -f 'supervise-status-api' 2>/dev/null || true
 pkill -f 'node dist/index.js browser-worker' 2>/dev/null || true
 pkill -f 'node dist/index.js browser-broker' 2>/dev/null || true
 pkill -f 'node dist/index.js status-api' 2>/dev/null || true
@@ -66,7 +67,29 @@ PY
 }
 
 start_named remote-mcp remote-mcp
-start_named status-api status-api
+
+# status-api is supervised: Cursor/agent shells otherwise SIGTERM the one-shot
+# process after the turn (empty log, dashboard API DOWN).
+chmod +x "$ROOT/scripts/supervise-status-api.sh"
+status_sup_pid="$(
+  python3 - <<'PY'
+import os, subprocess
+log = open("logs/status-api-supervise.out", "ab", buffering=0)
+p = subprocess.Popen(
+    ["bash", "scripts/supervise-status-api.sh"],
+    stdin=subprocess.DEVNULL,
+    stdout=log,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+    env=os.environ.copy(),
+    cwd=os.getcwd(),
+)
+print(p.pid)
+PY
+)"
+echo "$status_sup_pid" > logs/status-api-supervise.pid
+echo "status-api supervise → pid $status_sup_pid"
+
 start_named browser-broker browser-broker \
   HANDOFF_WORKERS_FILE="$HANDOFF_WORKERS_FILE"
 

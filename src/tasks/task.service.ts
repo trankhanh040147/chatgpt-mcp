@@ -10,6 +10,12 @@ import type {
   HandoffResultMetadata,
   SubmitResultInput,
 } from "./task.types.js";
+import { estimateTaskUsage, loadCostConfig } from "../usage/pricing.js";
+import {
+  getTaskUsage,
+  insertTaskUsage,
+} from "../usage/task-usage.repository.js";
+import { getDatabase } from "../db/sqlite.js";
 
 export class TaskService {
   constructor(private readonly repo: TaskRepository) {}
@@ -120,6 +126,7 @@ export class TaskService {
           ? "Late submit after TIMED_OUT — result kept"
           : undefined,
       });
+      this.recordUsageBestEffort(input.taskId, task.prompt, sanitizedResult);
       return {
         success: true,
         status: "COMPLETED",
@@ -134,6 +141,27 @@ export class TaskService {
     return this.reconcileCompletedSubmit(again, sanitizedResult, input.taskId);
   }
 
+  /** Never fail submit if usage estimation blows up. */
+  private recordUsageBestEffort(
+    taskId: string,
+    prompt: string,
+    result: string
+  ): void {
+    try {
+      if (getTaskUsage(getDatabase(), taskId)) return;
+      const snap = estimateTaskUsage(prompt, result, loadCostConfig());
+      insertTaskUsage(getDatabase(), taskId, snap, false);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log({
+        event: "WARN",
+        component: "task-service",
+        taskId,
+        message: `usage estimate skipped: ${message}`,
+      });
+    }
+  }
+
   private reconcileCompletedSubmit(
     task: HandoffTask,
     incomingResult: string,
@@ -146,6 +174,8 @@ export class TaskService {
     }
     const existing = task.result ?? "";
     if (existing === incomingResult) {
+      // Repair missing usage on idempotent replay.
+      this.recordUsageBestEffort(taskId, task.prompt, existing);
       return { success: true, status: "COMPLETED", idempotent: true };
     }
     throw new Error(

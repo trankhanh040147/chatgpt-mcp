@@ -5,11 +5,12 @@ import {
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureTaskUsageTable } from "../usage/task-usage.repository.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-/** Multi-worker leases / fencing schema. Bump when migrations change. */
-export const SCHEMA_USER_VERSION = 3;
+/** Multi-worker leases / fencing + task_usage. Bump when migrations change. */
+export const SCHEMA_USER_VERSION = 4;
 
 let dbInstance: DatabaseSync | null = null;
 
@@ -89,6 +90,7 @@ export function migrateDatabase(db: DatabaseSync): void {
   if (version >= SCHEMA_USER_VERSION) {
     const schema = readFileSync(join(__dirname, "schema.sql"), "utf-8");
     db.exec(schema);
+    ensureTaskUsageTable(db);
     return;
   }
 
@@ -154,6 +156,7 @@ export function migrateDatabase(db: DatabaseSync): void {
     // Note: CREATE TABLE IF NOT EXISTS will not reshape an old table — ALTERs above did.
     const schema = readFileSync(join(__dirname, "schema.sql"), "utf-8");
     db.exec(schema);
+    ensureTaskUsageTable(db);
 
     if (tableExists(db, "handoff_tasks") && version < 2) {
       const now = new Date().toISOString();

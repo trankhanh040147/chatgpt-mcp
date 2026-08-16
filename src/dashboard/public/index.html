@@ -13,12 +13,30 @@
     <link rel="stylesheet" href="/dashboard/styles.css" />
   </head>
   <body>
+    <svg class="icon-sprite" aria-hidden="true" focusable="false">
+      <symbol id="icon-tokens" viewBox="0 0 16 16">
+        <path d="M3.25 4.25 8 1.75l4.75 2.5L8 6.75l-4.75-2.5Z" />
+        <path d="m3.25 7.25 4.75 2.5 4.75-2.5" />
+        <path d="m3.25 10.25 4.75 2.5 4.75-2.5" />
+      </symbol>
+      <symbol id="icon-dollar" viewBox="0 0 16 16">
+        <circle cx="8" cy="8" r="5.75" />
+        <path
+          d="M10.25 5.5H7.1a1.35 1.35 0 0 0 0 2.7h1.8a1.35 1.35 0 0 1 0 2.7H5.75M8 3.75v1.5M8 10.75v1.5"
+        />
+      </symbol>
+      <symbol id="icon-clock" viewBox="0 0 16 16">
+        <circle cx="8" cy="8" r="5.75" />
+        <path d="M8 4.75V8l2.25 1.35" />
+      </symbol>
+    </svg>
+
     <div class="bg-grid" aria-hidden="true"></div>
 
     <div class="shell">
       <header class="top">
         <div class="brand">
-          <p class="eyebrow">chatgpt-mcp · dashboard 0.2</p>
+          <p class="eyebrow">chatgpt-mcp · dashboard 0.3 · usage est.</p>
           <h1>Ops</h1>
         </div>
         <div class="top-meta">
@@ -59,6 +77,7 @@
                     <th>Age</th>
                     <th>Finished</th>
                     <th>Duration</th>
+                    <th>Usage (est.)</th>
                     <th>Error</th>
                   </tr>
                 </thead>
@@ -70,6 +89,31 @@
           <section class="panel troubleshoot" aria-label="Troubleshoot">
             <h2>Troubleshoot</h2>
             <ul class="hints" id="hints"></ul>
+            <div class="ops-actions" aria-label="Guarded ops">
+              <h3>Guarded ops</h3>
+              <p class="muted ops-note">
+                Preview blast radius, then type the confirm phrase. Purge is
+                CLI-only. Healthy workers are not reset by default.
+              </p>
+              <div class="ops-btns">
+                <button type="button" id="btn-recover" class="primary">
+                  Recover…
+                </button>
+                <button type="button" id="btn-recover-queued" class="danger">
+                  Recover + fail queued…
+                </button>
+              </div>
+              <pre id="ops-result" class="ops-result hidden" hidden></pre>
+            </div>
+            <div class="topology" aria-label="Topology">
+              <div class="panel-head">
+                <h3>Topology</h3>
+                <button type="button" id="btn-topology" class="ghost">
+                  Refresh
+                </button>
+              </div>
+              <pre id="topology" class="ops-result">Loading…</pre>
+            </div>
             <div class="cmds" id="cmds"></div>
           </section>
         </div>
@@ -88,7 +132,7 @@
       </div>
 
       <footer class="foot mono muted">
-        Polling every 2s · 127.0.0.1 only · read-only 0.2
+        Polling every 2s · 127.0.0.1 only · dash 0.3 guarded mutations
       </footer>
     </div>
 
@@ -98,14 +142,46 @@
         <button type="button" id="drawer-close" class="ghost">Close</button>
       </div>
       <div id="drawer-body" class="drawer-body mono"></div>
+      <div id="drawer-usage" class="drawer-usage hidden" hidden></div>
       <div class="drawer-actions">
         <button type="button" id="load-content" class="primary">
           Load redacted content
+        </button>
+        <button type="button" id="fail-task" class="danger">
+          Fail task…
         </button>
       </div>
       <pre id="drawer-content" class="drawer-content hidden" hidden></pre>
     </aside>
     <div id="drawer-backdrop" class="drawer-backdrop hidden" hidden></div>
+
+    <dialog id="ops-modal" class="ops-modal">
+      <form method="dialog" id="ops-form">
+        <h2 id="ops-modal-title">Confirm ops</h2>
+        <pre id="ops-modal-preview" class="ops-result"></pre>
+        <label class="ops-confirm-label" for="ops-confirm-input">
+          Type <code id="ops-confirm-phrase">…</code> to confirm
+        </label>
+        <input
+          id="ops-confirm-input"
+          class="ops-confirm-input"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <div class="ops-modal-actions">
+          <button type="submit" value="cancel" class="ghost">Cancel</button>
+          <button
+            type="submit"
+            value="ok"
+            id="ops-confirm-go"
+            class="danger"
+            disabled
+          >
+            Execute
+          </button>
+        </div>
+      </form>
+    </dialog>
 
     <script src="/dashboard/app.js" type="module"></script>
   </body>

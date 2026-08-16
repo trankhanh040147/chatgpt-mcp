@@ -35,7 +35,7 @@ HANDOFF_PATHS := \
 .PHONY: help install build setup chrome up up-bg down restart status wait-ready \
 	check doctor recover recover-clean recover-all clear-tasks clear-task \
 	logs worker-bg remote-bg status-api-bg test-leases e2e-1 e2e-20 e2e-dual \
-	create-worker dashboard handoff-zip
+	create-worker dashboard dashboard-up handoff-zip
 
 help: ## Show targets
 	@echo "chatgpt-mcp — quick ops"
@@ -49,6 +49,7 @@ help: ## Show targets
 	@echo "  make check                  # expect worker READY"
 	@echo ""
 	@echo "Background:"
+	@echo "  make dashboard-up           # A1-S: status-api + remote-mcp + broker + URL"
 	@echo "  make up-bg && make wait-ready && make check"
 	@echo "  make clear-tasks            # wipe SQLite queue (ID=ho_… for one)"
 	@echo "  make create-worker          # assisted New chat → workers.json (A1-S)"
@@ -77,12 +78,15 @@ up-bg: build ## Background: status-api + browser-worker + remote-mcp
 		echo $$! > $(LOG_DIR)/remote-mcp.pid; \
 		echo "remote-mcp → :$(REMOTE_PORT) (pid $$!)"; \
 	fi
-	@if lsof -nP -iTCP:$(HTTP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
+	@if [ -f $(LOG_DIR)/status-api-supervise.pid ] && kill -0 $$(cat $(LOG_DIR)/status-api-supervise.pid) 2>/dev/null; then \
+		echo "status-api supervise already running (pid $$(cat $(LOG_DIR)/status-api-supervise.pid))"; \
+	elif lsof -nP -iTCP:$(HTTP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 		echo "status-api already on :$(HTTP_PORT)"; \
 	else \
-		nohup $(NODE) $(DIST) status-api >> $(LOG_DIR)/status-api.log 2>&1 & \
-		echo $$! > $(LOG_DIR)/status-api.pid; \
-		echo "status-api → :$(HTTP_PORT) (pid $$!)"; \
+		chmod +x scripts/supervise-status-api.sh; \
+		nohup bash scripts/supervise-status-api.sh >/dev/null 2>&1 & \
+		echo $$! > $(LOG_DIR)/status-api-supervise.pid; \
+		echo "status-api supervise → pid $$!"; \
 	fi
 	@if [ -f $(LOG_DIR)/browser-worker-supervise.pid ] && kill -0 $$(cat $(LOG_DIR)/browser-worker-supervise.pid) 2>/dev/null; then \
 		echo "browser-worker supervise already running (pid $$(cat $(LOG_DIR)/browser-worker-supervise.pid))"; \
@@ -98,11 +102,12 @@ up-bg: build ## Background: status-api + browser-worker + remote-mcp
 
 down: ## Stop status-api + browser-worker + remote-mcp (Chrome CDP stays up)
 	-pkill -f 'supervise-browser-worker.sh' 2>/dev/null || true
+	-pkill -f 'supervise-status-api.sh' 2>/dev/null || true
 	-pkill -f 'node dist/index.js worker' 2>/dev/null || true
 	-pkill -f 'node dist/index.js browser-worker' 2>/dev/null || true
 	-pkill -f 'node dist/index.js status-api' 2>/dev/null || true
 	-pkill -f 'node dist/index.js remote-mcp' 2>/dev/null || true
-	-rm -f $(LOG_DIR)/worker.pid $(LOG_DIR)/remote-mcp.pid $(LOG_DIR)/status-api.pid $(LOG_DIR)/browser-worker.pid $(LOG_DIR)/browser-worker-supervise.pid
+	-rm -f $(LOG_DIR)/worker.pid $(LOG_DIR)/remote-mcp.pid $(LOG_DIR)/status-api.pid $(LOG_DIR)/status-api-supervise.pid $(LOG_DIR)/browser-worker.pid $(LOG_DIR)/browser-worker-supervise.pid
 	@echo "Stopped status-api (:$(HTTP_PORT)), browser-worker, remote-mcp (:$(REMOTE_PORT))."
 
 restart: down up-bg ## Restart background stack (split status-api + browser-worker)
@@ -117,7 +122,15 @@ status: ## Health + /workers + listening ports
 doctor: build ## Topology + schema + status-api health
 	npm run doctor
 
-dashboard: ## Print ops dashboard URL (needs status-api)
+dashboard: ## Print ops dashboard URL (does not start services)
+	@echo "Open http://127.0.0.1:$(HTTP_PORT)/dashboard/"
+	@echo "(start stack: make dashboard-up)"
+
+dashboard-up: build ## Start A1-S stack for dashboard (supervised status-api + remote-mcp + broker)
+	@chmod +x scripts/start-broker-stack.sh
+	HANDOFF_WORKERS_FILE=$${HANDOFF_WORKERS_FILE:-$(CURDIR)/data/workers.a1s.json} \
+		./scripts/start-broker-stack.sh
+	@echo ""
 	@echo "Open http://127.0.0.1:$(HTTP_PORT)/dashboard/"
 
 test-leases: ## Lease/fencing unit tests (no browser)
@@ -163,14 +176,17 @@ worker-bg: build ## Background worker (status-api + one browser; single-worker d
 		echo "worker pid $$!"; \
 	fi
 
-status-api-bg: build ## Background status-api only (HTTP + lease reaper)
+status-api-bg: build ## Background status-api only (HTTP + lease reaper, supervised)
 	@mkdir -p $(LOG_DIR)
-	@if lsof -nP -iTCP:$(HTTP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
+	@if [ -f $(LOG_DIR)/status-api-supervise.pid ] && kill -0 $$(cat $(LOG_DIR)/status-api-supervise.pid) 2>/dev/null; then \
+		echo "status-api supervise already running (pid $$(cat $(LOG_DIR)/status-api-supervise.pid))"; \
+	elif lsof -nP -iTCP:$(HTTP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 		echo "status-api already on :$(HTTP_PORT)"; \
 	else \
-		nohup $(NODE) $(DIST) status-api >> $(LOG_DIR)/status-api.log 2>&1 & \
-		echo $$! > $(LOG_DIR)/status-api.pid; \
-		echo "status-api pid $$!"; \
+		chmod +x scripts/supervise-status-api.sh; \
+		nohup bash scripts/supervise-status-api.sh >/dev/null 2>&1 & \
+		echo $$! > $(LOG_DIR)/status-api-supervise.pid; \
+		echo "status-api supervise → pid $$!"; \
 	fi
 
 remote-bg: build ## Background remote-mcp only
