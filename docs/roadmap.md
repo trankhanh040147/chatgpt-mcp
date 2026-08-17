@@ -56,6 +56,8 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 
 **Evidence:** `spike:a1s`, `test:leases`, `test:create-worker`, live `e2e:dual`, live burst `--n=4` on three workers, live create → `w3` READY.
 
+**Worker profile (2026-08-18):** production workers run on **Chat** surface + **Cursor** plugin (not Work/Codex). `create-worker` switches Work→Chat, attaches Cursor from the + menu, then bootstraps. Avoids shared Codex/agentic credit pool exhaustion. Verified: per-worker canaries + broker burst `--n=3` on w1/w2/w3 all **COMPLETED**.
+
 **Consent model (A):** wizard/CLI guides the human; no auto-login / auto-approve MCP writes.
 
 #### Non-goals for 0.3.0
@@ -163,6 +165,7 @@ Formerly 0.6.0.
 ## Current milestone
 
 - **Shipped:** **0.1.0**, **0.2.0**, **0.3.0**, **0.4.0** (ops dashboard 0.1–0.3 + usage).
+- **Ops complete (2026-08-18):** w1/w2/w3 migrated to Chat + Cursor; dispatch false-ack fix; create-worker canary releases instance on exit.
 - **In progress:** **0.5.0** — agent UX + worker chat rotation.
 - **Then:** **0.6.0** portable → **0.7.0** Claude.
 
@@ -186,6 +189,7 @@ Formerly 0.6.0.
 
 | Date | Decision | Reason | Supersedes |
 |------|----------|--------|------------|
+| 2026-08-18 | Workers on **Chat + Cursor plugin**; `create-worker` ensures Chat surface + attaches Cursor | Work/Codex profile exhausted shared agentic credits; Chat handoffs do not consume that pool; burst `--n=3` PASS on w1/w2/w3 | Work-profile workers + §17-only bootstrap |
 | 2026-08-17 | Mark **0.4.0 shipped**; next is **0.5.0** agent UX + rotation | Dashboard 0.1–0.3 + usage landed; `docs/dashboard.md`; `test:ops` / `test:usage`; tag `v0.4.0` | “0.4.0 open until smoke/docs/tag” |
 | 2026-08-16 | Usage $ = optional **reference cost** vs Cursor scenario (default Claude Sonnet 5); tokens primary; never label counterfactual as ChatGPT runtime `Model` | Operator confusion + review `ho_01M04W2BNFGZE25YAQ6T0Z602W` | “API-equiv. avoided” as headline / bare `Model: claude-sonnet-5` |
 | 2026-08-16 | Dash **0.3** = guarded recover / fail-task + topology read-only; purge stays CLI | Live smoke `/ops/*` + typed confirm UI | Silent GET mutate / dashboard purge |

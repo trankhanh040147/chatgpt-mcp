@@ -22,6 +22,45 @@ export interface CreatedWorkerChat {
   browser: Browser;
 }
 
+/**
+ * ChatGPT web defaults to Work (shared Codex/agentic pool). Worker handoffs
+ * should run on Chat so they do not consume Work/Codex credits.
+ */
+async function ensureChatSurface(page: Page): Promise<void> {
+  const chatRadio = page.getByRole("radio", { name: "Chat", exact: true });
+  const visible = await chatRadio.isVisible({ timeout: 5000 }).catch(() => false);
+  if (!visible) return;
+
+  const checked = await chatRadio.getAttribute("aria-checked");
+  if (checked === "true") return;
+
+  await chatRadio.click({ timeout: 5000 });
+  await page.waitForTimeout(800);
+  const after = await chatRadio.getAttribute("aria-checked");
+  if (after !== "true") {
+    throw new Error(
+      "create-worker: failed to switch ChatGPT surface from Work to Chat. " +
+        "Switch manually to Chat in the CDP Chrome, then retry."
+    );
+  }
+}
+
+/** Attach the Cursor plugin from the composer + menu (list, not search). */
+async function attachCursorPlugin(page: Page): Promise<void> {
+  const plus = page.locator('[data-testid="composer-plus-btn"]').first();
+  await plus.waitFor({ state: "visible", timeout: 15_000 });
+  await plus.click({ timeout: 5000 });
+  await page
+    .getByText(/Type to search plugins/i)
+    .waitFor({ state: "visible", timeout: 15_000 });
+  await page.waitForTimeout(1500);
+
+  const cursor = page.getByText("Cursor", { exact: true }).first();
+  await cursor.waitFor({ state: "visible", timeout: 10_000 });
+  await cursor.click({ timeout: 5000 });
+  await page.waitForTimeout(800);
+}
+
 async function sendBootstrap(page: Page, message: string): Promise<void> {
   const composer = page.locator(selectors.composer).first();
   await composer.waitFor({ state: "visible", timeout: 30_000 });
@@ -101,6 +140,8 @@ export async function createWorkerChat(
       );
     }
 
+    await ensureChatSurface(page);
+
     // Best-effort New chat click if we landed on an existing conversation.
     if (chatIdFromUrl(page.url())) {
       const newChat = page
@@ -121,6 +162,7 @@ export async function createWorkerChat(
 
     let chatId = chatIdFromUrl(page.url());
     if (!chatId) {
+      await attachCursorPlugin(page);
       await sendBootstrap(page, bootstrapMessage);
     }
 

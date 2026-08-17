@@ -189,6 +189,11 @@ async function runCanary(opts: {
   } finally {
     await browser.close().catch(() => undefined);
     try {
+      repo.releaseWorkerInstance(workerId, instanceToken);
+    } catch {
+      // ignore
+    }
+    try {
       closeDatabase();
     } catch {
       // ignore

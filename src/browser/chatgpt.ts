@@ -219,9 +219,14 @@ export class ChatGptBrowser {
     const message = DISPATCH_MESSAGE(taskId);
     const marker = `TASK_ID=${taskId}`;
 
-    // If a prior attempt already posted this exact task id, do not send again.
+    const composer = page.locator(selectors.composer).first();
+    await composer.waitFor({ state: "visible", timeout: 30000 });
+
+    // User turns only — matching `text=TASK_ID=…` also hits the composer
+    // and used to skip send after a failed type-into-box.
     const alreadySent = await page
-      .locator(`text=${marker}`)
+      .locator('[data-message-author-role="user"]')
+      .filter({ hasText: marker })
       .first()
       .isVisible({ timeout: 1500 })
       .catch(() => false);
@@ -235,8 +240,6 @@ export class ChatGptBrowser {
       return;
     }
 
-    const composer = page.locator(selectors.composer).first();
-    await composer.waitFor({ state: "visible", timeout: 30000 });
     if (!opts?.skipIdleWait) {
       await this.waitForComposerIdle(page);
     }
@@ -252,31 +255,7 @@ export class ChatGptBrowser {
       );
     }
 
-    const sendButton = page.locator(selectors.sendButton).first();
-    if (await sendButton.isVisible({ timeout: 3000 }).catch(() => false)) {
-      try {
-        await sendButton.click({ timeout: 5000 });
-      } catch {
-        await sendButton.click({ force: true, timeout: 5000 });
-      }
-    } else {
-      await page.keyboard.press("Enter");
-    }
-
-    // Acknowledge: either composer clears or the marker appears in the thread.
-    const ackDeadline = Date.now() + 8000;
-    while (Date.now() < ackDeadline) {
-      const inThread = await page
-        .locator(`text=${marker}`)
-        .first()
-        .isVisible()
-        .catch(() => false);
-      if (inThread) break;
-      const composerText = ((await composer.innerText().catch(() => "")) ?? "")
-        .trim();
-      if (!composerText.includes(marker)) break;
-      await page.waitForTimeout(250);
-    }
+    await this.clickSendUntilComposerClears(page, composer, marker);
   }
 
   /** Short reminder to call handoff_submit_result (best-effort, idempotent per nudge stage). */
@@ -295,16 +274,7 @@ export class ChatGptBrowser {
     }
     await this.fillComposer(page, composer, message);
 
-    const sendButton = page.locator(selectors.sendButton).first();
-    if (await sendButton.isVisible({ timeout: 3000 }).catch(() => false)) {
-      try {
-        await sendButton.click({ timeout: 5000 });
-      } catch {
-        await sendButton.click({ force: true, timeout: 5000 });
-      }
-    } else {
-      await page.keyboard.press("Enter");
-    }
+    await this.clickSendUntilComposerClears(page, composer, marker);
 
     log({
       event: "INFO",
@@ -312,6 +282,50 @@ export class ChatGptBrowser {
       taskId,
       message: `Sent submit nudge (${marker})`,
     });
+  }
+
+  /**
+   * Click Send (or Enter) until the dispatch text leaves the composer.
+   * Matching `text=TASK_ID=…` in the page is not enough — that hits the
+   * composer itself and used to ack a typed-but-unsent message.
+   */
+  private async clickSendUntilComposerClears(
+    page: Page,
+    composer: ReturnType<Page["locator"]>,
+    marker: string
+  ): Promise<void> {
+    const sendButton = page.locator(selectors.sendButton).first();
+    const attemptSend = async (): Promise<void> => {
+      if (await sendButton.isVisible({ timeout: 3000 }).catch(() => false)) {
+        try {
+          await sendButton.click({ timeout: 5000 });
+        } catch {
+          await sendButton.click({ force: true, timeout: 5000 });
+        }
+      } else {
+        await page.keyboard.press("Enter");
+      }
+    };
+
+    await attemptSend();
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const composerText = (
+        (await composer.innerText().catch(() => "")) ?? ""
+      ).trim();
+      if (!composerText.includes(marker)) return;
+      await page.waitForTimeout(250);
+    }
+
+    await page.keyboard.press("Enter");
+    await attemptSend();
+    await page.waitForTimeout(800);
+    const leftover = ((await composer.innerText().catch(() => "")) ?? "").trim();
+    if (leftover.includes(marker)) {
+      throw new Error(
+        `Dispatch typed but not sent (composer still has ${marker})`
+      );
+    }
   }
 
   /** Wait until ChatGPT is not streaming — Send stays disabled while composer is empty. */
