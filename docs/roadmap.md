@@ -26,7 +26,7 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | Windows / WSL / headless | Not supported | — |
 | Multi-worker | **0.2.0** | Leases + fencing + status-api; dual CDP E2E |
 | Single-CDP multi-tab (A1-S) + create-worker CLI | **0.3.0** | Broker + UI mutex; dual/burst canary; `npm run create-worker` |
-| Ops dashboard | **0.4.0** (in progress) | Dashboard **0.1** at `/dashboard/` on status-api |
+| Ops dashboard | **0.4.0** | Dashboard **0.1–0.3** + usage at `/dashboard/` on status-api |
 
 ## Sequencing principles
 
@@ -64,7 +64,7 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 - Elastic cloud worker pool / auto-create `wN` when queue depth exceeds workers
 - Self-regulate context / auto-rotate worker chat → **0.5.0**
 
-### 0.4.0 — Ops dashboard (**in progress**)
+### 0.4.0 — Ops dashboard (**shipped**)
 
 Operator pain after multi-worker + broker: diagnosing health, leases, and stuck tasks still means `curl` + logs.
 
@@ -134,10 +134,12 @@ Per ChatGPT research `ho_01M04T15ETEKJ3KXKN5F47JAGJ` + framing fix `ho_01M04W2BN
 | Redacted content | `HANDOFF_DASHBOARD_TASK_CONTENT=redacted` (default off) |
 | Backfill / tests | `npm run usage:backfill`, `npm run test:usage` |
 
-#### Remaining to claim package **0.4.0** shipped
+#### Evidence
 
-- Live smoke evidence + short docs (`make dashboard` / connect path)
-- Tag `v0.4.0` when exit criteria signed off
+- `npm run test:ops`, `npm run test:usage`
+- `make dashboard` / `make dashboard-up` → `http://127.0.0.1:8787/dashboard/`
+- Connect path: [`docs/dashboard.md`](dashboard.md)
+- Tag `v0.4.0`
 
 #### Non-goals for 0.4.0
 
@@ -146,7 +148,7 @@ Per ChatGPT research `ho_01M04T15ETEKJ3KXKN5F47JAGJ` + framing fix `ho_01M04W2BN
 - Auto-scaling workers
 - Claiming ChatGPT per-handoff invoices or cash savings from estimates
 
-### 0.5.0 — Agent UX + worker chat rotation
+### 0.5.0 — Agent UX + worker chat rotation (**next**)
 
 Formerly 0.4.0. Skill/rule handoff policy + self-regulate context (measure → threshold → create-worker → rotate). Depends on 0.3 create-worker.
 
@@ -160,14 +162,14 @@ Formerly 0.6.0.
 
 ## Current milestone
 
-- **Shipped:** **0.1.0**, **0.2.0**, **0.3.0** (A1-S + create-worker CLI).
-- **In progress:** **0.4.0** — ops dashboard (**0.1–0.3 + usage estimates landed**; smoke/docs → tag).
-- **Then:** **0.5.0** agent UX + rotation → **0.6.0** portable → **0.7.0** Claude.
+- **Shipped:** **0.1.0**, **0.2.0**, **0.3.0**, **0.4.0** (ops dashboard 0.1–0.3 + usage).
+- **In progress:** **0.5.0** — agent UX + worker chat rotation.
+- **Then:** **0.6.0** portable → **0.7.0** Claude.
 
 ## Near-term queue
 
-1. Package **0.4.0** gate: smoke evidence, docs → tag.
-2. Then **0.5.0** (agent UX + self-regulate / max-per-chat).
+1. **0.5.0** (agent UX + self-regulate / max-per-chat).
+2. Then **0.6.0** portable core.
 
 ## Deferred / non-goals
 
@@ -184,6 +186,7 @@ Formerly 0.6.0.
 
 | Date | Decision | Reason | Supersedes |
 |------|----------|--------|------------|
+| 2026-08-17 | Mark **0.4.0 shipped**; next is **0.5.0** agent UX + rotation | Dashboard 0.1–0.3 + usage landed; `docs/dashboard.md`; `test:ops` / `test:usage`; tag `v0.4.0` | “0.4.0 open until smoke/docs/tag” |
 | 2026-08-16 | Usage $ = optional **reference cost** vs Cursor scenario (default Claude Sonnet 5); tokens primary; never label counterfactual as ChatGPT runtime `Model` | Operator confusion + review `ho_01M04W2BNFGZE25YAQ6T0Z602W` | “API-equiv. avoided” as headline / bare `Model: claude-sonnet-5` |
 | 2026-08-16 | Dash **0.3** = guarded recover / fail-task + topology read-only; purge stays CLI | Live smoke `/ops/*` + typed confirm UI | Silent GET mutate / dashboard purge |
 | 2026-08-16 | Dash **0.2** = read-only drill-down (timing, redacted inspector, chat links, honest counts, indicators); mutations → 0.3+; capacity bar → 0.5 | ChatGPT review `ho_01M04PJWX91DS0C3R07W3WBEPF` | “0.2 = recover/clear actions” |

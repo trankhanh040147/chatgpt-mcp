@@ -19,7 +19,7 @@ Tools such as ngrok can expose `:8790`, but:
 
 - Prefer **no-auth** only for non-sensitive demos (ChatGPT connector UIs often support OAuth / No Auth / Mixed — not a custom “paste bearer” field).
 - If you enable `HANDOFF_REMOTE_MCP_TOKEN`, generic MCP clients can send `Authorization: Bearer …`; do **not** assume ChatGPT’s UI can configure that header.
-- Never tunnel `:8787` (status/worker diagnostics). The remote MCP process listens only on `:8790` and only serves `/mcp`.
+- Never tunnel `:8787` (status/worker diagnostics, including `/dashboard/`). The remote MCP process listens only on `:8790` and only serves `/mcp`. Ops UI: [dashboard.md](dashboard.md).
 - Do not put tokens in the URL query string.
 - Prefer a tunnel/proxy that path-restricts to `/mcp` only.
 

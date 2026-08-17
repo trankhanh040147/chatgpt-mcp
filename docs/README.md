@@ -7,6 +7,7 @@ Durable product truth for **chatgpt-mcp**. Session execution memory lives in [`.
 | [roadmap.md](roadmap.md) | Versions, milestones, defer boundaries (SSOT) |
 | [architecture.md](architecture.md) | How the system works today |
 | [spec.md](spec.md) | Behavioral contracts / tools |
+| [dashboard.md](dashboard.md) | Local ops UI (`make dashboard` / `:8787/dashboard/`) |
 | [connect-chatgpt.md](connect-chatgpt.md) | Tunnel, Developer Mode, write approval |
 | [timeouts.md](timeouts.md) | `TIMED_OUT` vs MCP approve, late submit, wait clocks |
 | [onboarding-timing.md](onboarding-timing.md) | Stranger ≤15 min protocol |

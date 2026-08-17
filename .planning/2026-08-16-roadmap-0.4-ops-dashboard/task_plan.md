@@ -28,5 +28,5 @@ SSOT: `docs/roadmap.md` §0.4.0.
 
 ## Next
 
-- Package 0.4 smoke/docs/tag
-- Dash charts / create-worker UI when needed
+- **0.5.0** agent UX + self-regulate / max-per-chat
+- Dash charts / create-worker UI when needed (deferred past 0.4.0)

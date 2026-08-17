@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Cursor ↔ ChatGPT MCP handoff (portable taskId; Cursor E2E, other hosts experimental)",
   "license": "MIT",
   "repository": {

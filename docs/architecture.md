@@ -91,7 +91,7 @@ Worker claims with a **lease** (`lease_owner` + `lease_token` + TTL). Before typ
 
 The worker defers `TIMED_OUT` while ChatGPT is still generating (stop button visible), up to `DISPATCH_HARD_TIMEOUT_MS` (default 15m). Cursor’s wait hook does **not** treat `TIMED_OUT` as immediately terminal, so a late submit can still resume the agent.
 
-**0.2.0 multi-worker:** N `browser-worker` processes (one Chrome profile/CDP/chat each) + one `status-api` on `:8787` (HTTP wait/status + lease reaper). Single-worker default still runs `worker`/`all` = status-api + one browser in-process. **Cost:** N CDP Chromes burn RAM and desktop space — accepted for 0.2.0; **0.3.0** targets CDP optimize + assisted create-worker.
+**0.2.0 multi-worker:** N `browser-worker` processes (one Chrome profile/CDP/chat each) + one `status-api` on `:8787` (HTTP wait/status + lease reaper + **0.4.0** ops dashboard at `/dashboard/`). Single-worker default still runs `worker`/`all` = status-api + one browser in-process. **Cost:** N CDP Chromes burn RAM and desktop space — accepted for 0.2.0; **0.3.0** shipped CDP optimize + assisted create-worker.
 
 ```text
 QUEUED → DISPATCHING → [fence] DISPATCHED → PROCESSING → COMPLETED
@@ -135,6 +135,7 @@ CDP Chrome (debug dir)     ← worker attaches here — login Pro again once
 | Leases / fencing | `src/tasks/task.repository.ts` |
 | Topology validation | `src/config/workers-topology.ts` |
 | Env inventory | Obsidian `vault-mac-1/configs/chatgpt-mcp-env.md` |
+| Ops dashboard | `src/dashboard/public/` served at `/dashboard/` by status-api (`docs/dashboard.md`) |
 | Full product spec | `docs/spec.md` |
 
 ## Caveats

@@ -10,4 +10,6 @@
 | 2026-08-16 | Usage estimates (tokens + optional Claude Sonnet 5 reference cost) | done |
 | 2026-08-16 | Usage UI polish (metric chips) + framing fix (no fake runtime Model) | done |
 | 2026-08-16 | status-api supervise / durable restart | done |
-| — | Package 0.4 smoke/docs/tag | pending |
+| 2026-08-17 | Package 0.4 smoke/docs (`docs/dashboard.md`) + mark shipped / tag | done |
+
+Next product milestone: **0.5.0** agent UX + worker chat rotation.
