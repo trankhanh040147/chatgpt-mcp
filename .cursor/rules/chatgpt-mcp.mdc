@@ -53,7 +53,11 @@ Scenarios: `.planning/2026-08-18-roadmap-0.5-agent-ux-rotation/scenarios-agent-u
 
 Do thin local work yourself (wire APIs, edit files, run tests). Offload only the independent reasoning pass when it materially helps.
 
-## Do NOT hand off (always Light)
+## User explicit override
+
+If the user **explicitly requests** a handoff — `/chatgpt-mcp`, "handoff to ChatGPT", "bắt buộc gọi mcp", "gửi qua ChatGPT", or similar — treat it as **Standard** (or Deep if the prompt warrants it) regardless of whether you would otherwise classify it as Light. The user's intent to use external reasoning overrides the agent's tier classification.
+
+## Do NOT hand off (always Light) — unless user explicitly overrides above
 
 - Trivial coding, formatting, renames
 - Simple syntax questions
@@ -62,7 +66,7 @@ Do thin local work yourself (wire APIs, edit files, run tests). Offload only the
 
 ## When creating a task
 
-1. State tier (Light/Standard/Deep) — Light must not call MCP (`handoff_create_task`).
+1. State tier (Light/Standard/Deep) — Light must not call MCP (`handoff_create_task`), unless user explicitly overrode.
 2. Explain the exact question.
 3. Include relevant constraints.
 4. Include only necessary context.

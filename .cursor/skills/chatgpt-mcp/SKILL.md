@@ -37,9 +37,13 @@ Production-critical or security decisions stay Standard/Deep even if some facts 
 
 Scenarios: `.planning/2026-08-18-roadmap-0.5-agent-ux-rotation/scenarios-agent-ux.md`
 
+## User explicit override
+
+If the user **explicitly requests** a handoff — `/chatgpt-mcp`, "handoff to ChatGPT", "bắt buộc gọi mcp", "gửi qua ChatGPT", or similar — treat as **Standard** (or Deep) regardless of Light classification. The user's intent overrides the agent's tier.
+
 ## Invoke (every Cursor workspace)
 
-1. **Light → stop** — Light must not call MCP (`handoff_create_task`).
+1. **Light → stop** — Light must not call MCP (`handoff_create_task`), unless user explicitly overrode (see above).
 2. Standard/Deep: if a handoff would materially help, call `handoff_create_task` on `chatgpt-mcp` / `user-chatgpt-mcp` with `type` + `prompt` (optional `context`). Skip if local context became sufficient.
 3. Do **not** write SQLite yourself.
 4. **End the turn immediately** after create succeeds.
