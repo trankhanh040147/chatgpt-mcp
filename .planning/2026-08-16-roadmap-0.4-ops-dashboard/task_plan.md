@@ -28,5 +28,5 @@ SSOT: `docs/roadmap.md` §0.4.0.
 
 ## Next
 
-- **0.5.0** agent UX + self-regulate / max-per-chat
+- **0.6.0** portable core (`taskId` authoritative)
 - Dash charts / create-worker UI when needed (deferred past 0.4.0)

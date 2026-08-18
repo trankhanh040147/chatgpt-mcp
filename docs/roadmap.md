@@ -27,6 +27,7 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | Multi-worker | **0.2.0** | Leases + fencing + status-api; dual CDP E2E |
 | Single-CDP multi-tab (A1-S) + create-worker CLI | **0.3.0** | Broker + UI mutex; dual/burst canary; `npm run create-worker` |
 | Ops dashboard | **0.4.0** | Dashboard **0.1–0.3** + usage at `/dashboard/` on status-api |
+| Agent UX + chat rotation | **0.5.0** | Light/Standard/Deep; `HANDOFF_MAX_TASKS_PER_CHAT=20`; idle `rotate-worker` |
 
 ## Sequencing principles
 
@@ -150,13 +151,36 @@ Per ChatGPT research `ho_01M04T15ETEKJ3KXKN5F47JAGJ` + framing fix `ho_01M04W2BN
 - Auto-scaling workers
 - Claiming ChatGPT per-handoff invoices or cash savings from estimates
 
-### 0.5.0 — Agent UX + worker chat rotation (**in progress**)
+### 0.5.0 — Agent UX + worker chat rotation (**shipped**)
 
 Formerly 0.4.0. Skill/rule handoff policy + self-regulate context (measure → threshold → create-worker → rotate). Depends on 0.3 create-worker.
 
-**Landed (2026-08-18, not tagged):** Light/Standard/Deep policy; `HANDOFF_MAX_TASKS_PER_CHAT=20`; idle-only `rotate-worker` with claim reservation; dashboard `n/20` budget. Live: rotate `w3` → broker restart → burst `--n=3` PASS.
+#### P0 — Agent handoff policy
 
-### 0.6.0 — Portable core
+Light = **0** handoffs; Standard/Deep = **at most 1** per decision; anti-loop (no immediate re-handoff of the same decision). Rule + skill + `npm run test:agent-policy`. Scenarios: `.planning/2026-08-18-roadmap-0.5-agent-ux-rotation/scenarios-agent-ux.md`.
+
+#### P0 — Self-regulate context
+
+1. **Measure** — `tasks_on_chat` at dispatch (includes later FAILED/TIMED_OUT); tied to `{worker_id, chat_url}`.
+2. **Threshold** — `HANDOFF_MAX_TASKS_PER_CHAT=20`; at `== N` no further claims.
+3. **Replace** — idle-only `npm run rotate-worker` / `make rotate-worker`; Chat + Cursor; topology then DB reset.
+4. **Rotate** — `ROTATION_PENDING` reservation; `CONSENT_REQUIRED` / `RESTART_REQUIRED`; operator restarts broker.
+
+Recovery: [`docs/rotation.md`](rotation.md).
+
+#### Evidence
+
+- `npm run test:agent-policy`, `npm run test:rotation`
+- Live: rotate `w3` → broker restart → burst `--n=3` PASS (`logs/e2e/burst-3-2026-08-18T00-34-19-139Z.json`)
+- Tag `v0.5.0`
+
+#### Non-goals for 0.5.0
+
+- Host-generic “chooser”; unattended login
+- Auto self-restart broker; per-worker max override; age/token heuristics
+- Dashboard rotation controls (CLI + docs only)
+
+### 0.6.0 — Portable core (**next**)
 
 Formerly 0.5.0.
 
@@ -166,15 +190,15 @@ Formerly 0.6.0.
 
 ## Current milestone
 
-- **Shipped:** **0.1.0**, **0.2.0**, **0.3.0**, **0.4.0** (ops dashboard 0.1–0.3 + usage).
-- **Ops complete (2026-08-18):** w1/w2/w3 migrated to Chat + Cursor; dispatch false-ack fix; create-worker canary releases instance on exit.
-- **In progress:** **0.5.0** — agent UX + worker chat rotation.
-- **Then:** **0.6.0** portable → **0.7.0** Claude.
+- **Shipped:** **0.1.0**, **0.2.0**, **0.3.0**, **0.4.0**, **0.5.0** (agent UX + chat rotation).
+- **Ops complete (2026-08-18):** w1/w2/w3 on Chat + Cursor; dispatch false-ack fix; create-worker canary releases instance on exit.
+- **In progress:** **0.6.0** — portable core.
+- **Then:** **0.7.0** Claude.
 
 ## Near-term queue
 
-1. **0.5.0** (agent UX + self-regulate / max-per-chat).
-2. Then **0.6.0** portable core.
+1. **0.6.0** portable core (`taskId` authoritative; optional `clientSessionId`).
+2. Then **0.7.0** Claude host.
 
 ## Deferred / non-goals
 
@@ -182,7 +206,7 @@ Formerly 0.6.0.
 |------|----------------|
 | Dynamic worker pool / auto-create on queue depth | After **0.3.0** proven + explicit product consent |
 | Auto-login / cookie export / auto-approve writes | Never as default |
-| Self-regulate context (message/context threshold → new worker chat) | **0.5.0** |
+| Self-regulate context (message/context threshold → new worker chat) | **0.5.0** (shipped) |
 | “Works with all coding agents” claim | After each host has evidence (**0.7.0+**) |
 | Marketplace / Windows | After macOS+Cursor multi-worker bar is solid |
 | Dashboard history/charts / create-worker UI | Dash **0.3+** later |
@@ -191,6 +215,7 @@ Formerly 0.6.0.
 
 | Date | Decision | Reason | Supersedes |
 |------|----------|--------|------------|
+| 2026-08-18 | Mark **0.5.0 shipped**; next is **0.6.0** portable core | Policy + idle rotate-worker + live w3 rotate/burst; `docs/rotation.md`; tag `v0.5.0` | “0.5.0 in progress / not tagged” |
 | 2026-08-18 | Workers on **Chat + Cursor plugin**; `create-worker` ensures Chat surface + attaches Cursor | Work/Codex profile exhausted shared agentic credits; Chat handoffs do not consume that pool; burst `--n=3` PASS on w1/w2/w3 | Work-profile workers + §17-only bootstrap |
 | 2026-08-17 | Mark **0.4.0 shipped**; next is **0.5.0** agent UX + rotation | Dashboard 0.1–0.3 + usage landed; `docs/dashboard.md`; `test:ops` / `test:usage`; tag `v0.4.0` | “0.4.0 open until smoke/docs/tag” |
 | 2026-08-16 | Usage $ = optional **reference cost** vs Cursor scenario (default Claude Sonnet 5); tokens primary; never label counterfactual as ChatGPT runtime `Model` | Operator confusion + review `ho_01M04W2BNFGZE25YAQ6T0Z602W` | “API-equiv. avoided” as headline / bare `Model: claude-sonnet-5` |

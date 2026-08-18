@@ -53,27 +53,27 @@
 
 ## Exit criteria checklist (v0.5.0 tag)
 
-- [ ] Rule + skill define Light/Standard/Deep consistently with examples
-- [ ] Anti-loop invariant explicit (no re-handoff same decision)
-- [ ] 12 scenarios in `scenarios-agent-ux.md` signed off in release evidence
-- [ ] `test:agent-policy` static lint (rule/skill consistency)
-- [ ] `HANDOFF_MAX_TASKS_PER_CHAT=20` default; invalid config fails validation
-- [ ] Counter at dispatch boundary; includes FAILED/TIMED_OUT after send
-- [ ] Counter persists across restart; tied to chat URL
-- [ ] At count `< N` worker may claim; at `== N` cannot claim N+1 until rotation/recovery
-- [ ] Rotation never on in-flight worker; manual CLI refuses busy
-- [ ] URL committed before counter reset effective
-- [ ] Fail-closed readiness reasons actionable
-- [ ] CONSENT_REQUIRED path documented and tested
-- [ ] Broker restart path tested; loads new URL + counter
-- [ ] Crash injection: pre-commit preserves old; post-commit fail-closed
-- [ ] Concurrent threshold hits: serialized topology writes, no clobber
-- [ ] Dashboard capacity informational (`18/20`, restart required, failure reason)
-- [ ] Live manual rotation (Chat+Cursor)
-- [ ] Live threshold rotation (low test threshold)
-- [ ] Post-rotation `burst --n=3` PASS
-- [ ] Existing test suite green
-- [ ] Roadmap/docs recovery procedure
+- [x] Rule + skill define Light/Standard/Deep consistently with examples
+- [x] Anti-loop invariant explicit (no re-handoff same decision)
+- [x] 12 scenarios in `scenarios-agent-ux.md` signed off in release evidence
+- [x] `test:agent-policy` static lint (rule/skill consistency)
+- [x] `HANDOFF_MAX_TASKS_PER_CHAT=20` default; invalid config fails validation
+- [x] Counter at dispatch boundary; includes FAILED/TIMED_OUT after send
+- [x] Counter persists across restart; tied to chat URL
+- [x] At count `< N` worker may claim; at `== N` cannot claim N+1 until rotation/recovery
+- [x] Rotation never on in-flight worker; manual CLI refuses busy
+- [x] URL committed before counter reset effective
+- [x] Fail-closed readiness reasons actionable
+- [x] CONSENT_REQUIRED path documented and tested
+- [x] Broker restart path tested; loads new URL + counter
+- [x] Crash injection: pre-commit preserves old; post-commit fail-closed
+- [x] Concurrent threshold hits: serialized topology writes, no clobber
+- [x] Dashboard capacity informational (`18/20`, restart required, failure reason)
+- [x] Live manual rotation (Chat+Cursor)
+- [x] Live threshold rotation (low test threshold)
+- [x] Post-rotation `burst --n=3` PASS
+- [x] Existing test suite green
+- [x] Roadmap/docs recovery procedure
 
 ---
 

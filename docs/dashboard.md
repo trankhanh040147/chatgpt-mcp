@@ -15,15 +15,18 @@ URL: `http://127.0.0.1:8787/dashboard/`
 
 `make dashboard` does not start services. If the page shows API unreachable, start the stack (`make dashboard-up` or `npm run start`) and confirm `make status`.
 
-## What it covers (0.4.0)
+## What it covers (0.4.0 + 0.5 budget)
 
 | Area | Notes |
 |------|--------|
 | Control plane | Health, lease reaper, last tick, requeued / timed out / failed |
 | Workers | id, status, healthy, pid, heartbeat, current task, error |
+| Chat budget | `tasks_on_chat / max` (default 20); warn at N−1; rotation readiness chips |
 | Tasks | Recent list + drawer (timing, indicators, optional redacted content) |
 | Recover / fail-task | Preview → typed confirm (`RECOVER <n>` / `FAIL <id>`); CSRF + origin allowlist |
 | Usage | Estimated visible-text tokens; optional reference $ vs Cursor scenario (off by default) |
+
+Rotation is **CLI + restart**, not a dashboard button. Procedure: [rotation.md](rotation.md).
 
 Tests: `npm run test:ops`, `npm run test:usage`. Backfill snapshots: `npm run usage:backfill`.
 

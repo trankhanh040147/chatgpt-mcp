@@ -1,6 +1,6 @@
 # Progress — 0.5.0 agent UX + rotation
 
-## Status: **planning / review loop**
+## Status: **shipped** (tag `v0.5.0`)
 
 | Phase | Status | Notes |
 |-------|--------|-------|
@@ -18,3 +18,6 @@
 | 0.5-b code review #5 | done | APPROVE_WITH_CHANGES → reservation CAS |
 | 0.5-b confirm review | done | **APPROVE** ho_01M094BSB5W014VCK8EZV83J0Q |
 | 0.5 live rotate + burst | done | w3 rotated; burst --n=3 PASS |
+| 0.5-ship docs + tag | done | `docs/rotation.md`; package `0.5.0`; tag `v0.5.0` |
+
+Next product milestone: **0.6.0** portable core.

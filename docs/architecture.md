@@ -100,6 +100,8 @@ QUEUED → DISPATCHING → [fence] DISPATCHED → PROCESSING → COMPLETED
 
 Worker only claims work when its own state is **READY**. If stuck at `QUEUED`, the HTTP API may still be up while the dispatcher is not READY (e.g. `STARTING`).
 
+**0.5.0 chat budget:** each successful `TASK_ID` send increments `tasks_on_chat` (once per task, including later FAILED/TIMED_OUT). At `HANDOFF_MAX_TASKS_PER_CHAT` (default 20) the worker cannot claim until idle `rotate-worker` commits a new Chat+Cursor URL. Operator then approves MCP writes if needed and restarts the broker. Details: [rotation.md](rotation.md).
+
 ## Usage estimates (ops dashboard)
 
 On successful `handoff_submit_result`, chatgpt-mcp snapshots **estimated** tokens for the stored prompt + result (`js-tiktoken` / `o200k_base`).
@@ -136,6 +138,7 @@ CDP Chrome (debug dir)     ← worker attaches here — login Pro again once
 | Topology validation | `src/config/workers-topology.ts` |
 | Env inventory | Obsidian `vault-mac-1/configs/chatgpt-mcp-env.md` |
 | Ops dashboard | `src/dashboard/public/` served at `/dashboard/` by status-api (`docs/dashboard.md`) |
+| Chat rotation | `src/ops/rotate-worker.ts`, `src/workers/chat-budget.ts` (`docs/rotation.md`) |
 | Full product spec | `docs/spec.md` |
 
 ## Caveats

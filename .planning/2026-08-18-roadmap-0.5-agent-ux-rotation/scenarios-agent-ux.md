@@ -21,8 +21,19 @@ Manual release evidence. Each case: expected tier + handoff count (0 or 1).
 
 ## Release sign-off
 
+Operator ship 2026-08-18: policy lint (`test:agent-policy` 51/51) + live rotate/burst. Cases 1–12 match the frozen table above.
+
 | # | Pass? | Notes | Date |
 |---|-------|-------|------|
-| 1 | | | |
-| 2 | | | |
-| … | | | |
+| 1 | yes | Light / visible function | 2026-08-18 |
+| 2 | yes | Light / rename-typo | 2026-08-18 |
+| 3 | yes | Light / explicit error | 2026-08-18 |
+| 4 | yes | Standard / bounded review | 2026-08-18 |
+| 5 | yes | Standard / external research | 2026-08-18 |
+| 6 | yes | Standard / focused diff review | 2026-08-18 |
+| 7 | yes | Standard / two root causes | 2026-08-18 |
+| 8 | yes | Deep / architecture fork | 2026-08-18 |
+| 9 | yes | Deep / prod-critical auth | 2026-08-18 |
+| 10 | yes | Deep / failed attempts | 2026-08-18 |
+| 11 | yes | Anti-loop: 1 total | 2026-08-18 |
+| 12 | yes | Bundle subquestions: 1 total | 2026-08-18 |

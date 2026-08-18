@@ -12,4 +12,4 @@
 | 2026-08-16 | status-api supervise / durable restart | done |
 | 2026-08-17 | Package 0.4 smoke/docs (`docs/dashboard.md`) + mark shipped / tag | done |
 
-Next product milestone: **0.5.0** agent UX + worker chat rotation.
+Next product milestone: **0.6.0** portable core (0.5.0 agent UX + rotation shipped).

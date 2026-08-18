@@ -7,7 +7,7 @@
 
 Delegate selected Cursor tasks to a dedicated ChatGPT Web worker and receive the result through MCP — without copying prompts or scraping the ChatGPT DOM.
 
-> **Developer preview** `0.4.0` — not production.  
+> **Developer preview** `0.5.0` — not production.  
 > **macOS** supported · **Ubuntu desktop** experimental · **Windows** not supported.  
 > **Clients:** Cursor E2E · Claude Code / other MCP hosts — experimental (manual poll by `taskId`).  
 > Unofficial — not affiliated with OpenAI or Cursor.
@@ -172,6 +172,7 @@ A/B quality suite is **frozen** at [docs/benchmark/](docs/benchmark/README.md) (
 - [Docs index](docs/README.md)
 - [Roadmap](docs/roadmap.md) — versions & exit criteria (SSOT)
 - [Ops dashboard](docs/dashboard.md) — `make dashboard` / `http://127.0.0.1:8787/dashboard/`
+- [Chat rotation](docs/rotation.md) — max-per-chat + `make rotate-worker`
 - [Connect ChatGPT](docs/connect-chatgpt.md) — Secure Tunnel, Developer Mode
 - [Timeouts and late submit](docs/timeouts.md) — `TIMED_OUT` vs MCP approve
 - [Architecture](docs/architecture.md)
@@ -196,6 +197,7 @@ A/B quality suite is **frozen** at [docs/benchmark/](docs/benchmark/README.md) (
 | `npm run mcp` | Cursor stdio MCP |
 | `npm run worker` | HTTP `:8787` + CDP dispatcher |
 | `make dashboard-up` | Ops UI at `http://127.0.0.1:8787/dashboard/` |
+| `make rotate-worker ARGS='--id=w2'` | Idle-only new worker chat (restart broker after) |
 | `npm run remote-mcp` | ChatGPT HTTP MCP `:8790/mcp` |
 | `npm run e2e:reliability` | Transport canary |
 
