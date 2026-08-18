@@ -10,6 +10,12 @@ import type {
   WorkerStatus,
 } from "../tasks/task.types.js";
 import { DEFAULT_WORKER_ID } from "../tasks/task.types.js";
+import {
+  isChatBudgetExhausted,
+  parseMaxTasksPerChat,
+  readinessBlocksClaim,
+  type WorkerReadinessReason,
+} from "../workers/chat-budget.js";
 
 type SqlParam = string | number | bigint | null;
 
@@ -49,6 +55,11 @@ interface WorkerRow {
   http_port: number | null;
   started_at: string | null;
   pid: number | null;
+  tasks_on_chat: number | null;
+  tasks_on_chat_url: string | null;
+  previous_worker_url: string | null;
+  chat_rotated_at: string | null;
+  readiness_reason: string | null;
 }
 
 const MAX_DISPATCH_RETRIES = 3;
@@ -96,6 +107,12 @@ function rowToWorker(row: WorkerRow): WorkerStateRow {
     httpPort: row.http_port ?? undefined,
     startedAt: row.started_at ?? undefined,
     pid: row.pid ?? undefined,
+    tasksOnChat: row.tasks_on_chat ?? 0,
+    tasksOnChatUrl: row.tasks_on_chat_url ?? undefined,
+    previousWorkerUrl: row.previous_worker_url ?? undefined,
+    chatRotatedAt: row.chat_rotated_at ?? undefined,
+    readinessReason: (row.readiness_reason as WorkerStateRow["readinessReason"]) ??
+      undefined,
   };
 }
 
@@ -363,6 +380,26 @@ export class TaskRepository {
         .get(workerId, instanceToken, staleCutoff) as WorkerRow | undefined;
 
       if (!worker) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+
+      if (readinessBlocksClaim(worker.readiness_reason)) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+
+      const maxTasks = parseMaxTasksPerChat(
+        process.env.HANDOFF_MAX_TASKS_PER_CHAT
+      );
+      if (isChatBudgetExhausted(worker.tasks_on_chat ?? 0, maxTasks)) {
+        this.db
+          .prepare(
+            `UPDATE worker_state
+             SET readiness_reason = COALESCE(readiness_reason, 'THRESHOLD_REACHED')
+             WHERE id = ? AND (readiness_reason IS NULL OR readiness_reason = '')`
+          )
+          .run(workerId);
         this.db.exec("COMMIT");
         return null;
       }
@@ -964,8 +1001,9 @@ export class TaskRepository {
           .prepare(
             `INSERT INTO worker_state (
                id, status, last_seen_at, current_task_id, error,
-               instance_token, worker_url, cdp_endpoint, http_port, started_at, pid
-             ) VALUES (?, 'STARTING', ?, NULL, NULL, ?, ?, ?, ?, ?, ?)`
+               instance_token, worker_url, cdp_endpoint, http_port, started_at, pid,
+               tasks_on_chat, tasks_on_chat_url
+             ) VALUES (?, 'STARTING', ?, NULL, NULL, ?, ?, ?, ?, ?, ?, 0, ?)`
           )
           .run(
             input.workerId,
@@ -975,7 +1013,8 @@ export class TaskRepository {
             input.cdpEndpoint,
             input.httpPort ?? null,
             now,
-            pid
+            pid,
+            input.workerUrl
           );
       } else {
         this.db
@@ -1003,6 +1042,12 @@ export class TaskRepository {
             pid,
             input.workerId
           );
+        this.syncChatBudgetUrlOnRegister(
+          input.workerId,
+          input.workerUrl,
+          existing,
+          now
+        );
       }
 
       this.db.exec("COMMIT");
@@ -1013,6 +1058,294 @@ export class TaskRepository {
         /* ignore */
       }
       throw err;
+    }
+  }
+
+  /**
+   * Record a successful TASK_ID send into the worker chat budget.
+   * Idempotent per (worker_id, task_id) — retries do not double-count.
+   */
+  recordChatDispatch(input: {
+    workerId: string;
+    taskId: string;
+    chatUrl: string;
+  }): { recorded: boolean; tasksOnChat: number } {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const now = new Date().toISOString();
+      const ins = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO worker_chat_dispatch
+             (worker_id, task_id, chat_url, dispatched_at)
+           VALUES (?, ?, ?, ?)`
+        )
+        .run(input.workerId, input.taskId, input.chatUrl, now);
+
+      const worker = this.db
+        .prepare(
+          `SELECT tasks_on_chat, tasks_on_chat_url FROM worker_state WHERE id = ?`
+        )
+        .get(input.workerId) as
+        | { tasks_on_chat: number | null; tasks_on_chat_url: string | null }
+        | undefined;
+
+      if (!worker) {
+        this.db.exec("ROLLBACK");
+        throw new Error(`Worker not registered: ${input.workerId}`);
+      }
+
+      if (Number(ins.changes ?? 0) === 0) {
+        this.db.exec("COMMIT");
+        return {
+          recorded: false,
+          tasksOnChat: worker.tasks_on_chat ?? 0,
+        };
+      }
+
+      let tasksOnChat: number;
+      if (
+        !worker.tasks_on_chat_url ||
+        worker.tasks_on_chat_url !== input.chatUrl
+      ) {
+        tasksOnChat = 1;
+        this.db
+          .prepare(
+            `UPDATE worker_state
+             SET tasks_on_chat = ?, tasks_on_chat_url = ?
+             WHERE id = ?`
+          )
+          .run(tasksOnChat, input.chatUrl, input.workerId);
+      } else {
+        tasksOnChat = (worker.tasks_on_chat ?? 0) + 1;
+        this.db
+          .prepare(`UPDATE worker_state SET tasks_on_chat = ? WHERE id = ?`)
+          .run(tasksOnChat, input.workerId);
+      }
+
+      const maxTasks = parseMaxTasksPerChat(
+        process.env.HANDOFF_MAX_TASKS_PER_CHAT
+      );
+      if (isChatBudgetExhausted(tasksOnChat, maxTasks)) {
+        this.db
+          .prepare(
+            `UPDATE worker_state
+             SET readiness_reason = COALESCE(readiness_reason, 'THRESHOLD_REACHED')
+             WHERE id = ? AND (readiness_reason IS NULL OR readiness_reason = '')`
+          )
+          .run(input.workerId);
+      }
+
+      this.db.exec("COMMIT");
+      return { recorded: true, tasksOnChat };
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+  }
+
+  /** When topology URL changes, reset counter for the new chat identity. */
+  private syncChatBudgetUrlOnRegister(
+    workerId: string,
+    workerUrl: string,
+    existing: WorkerRow,
+    now: string
+  ): void {
+    const boundUrl = existing.tasks_on_chat_url ?? existing.worker_url;
+    if (boundUrl && boundUrl !== workerUrl) {
+      this.db
+        .prepare(
+          `UPDATE worker_state
+           SET tasks_on_chat = 0,
+               tasks_on_chat_url = ?,
+               previous_worker_url = ?,
+               chat_rotated_at = ?,
+               readiness_reason = CASE
+                 WHEN readiness_reason IN ('RESTART_REQUIRED', 'CONSENT_REQUIRED', 'ROTATION_FAILED')
+                   THEN readiness_reason
+                 ELSE 'CONSENT_REQUIRED'
+               END
+           WHERE id = ?`
+        )
+        .run(workerUrl, boundUrl, now, workerId);
+      return;
+    }
+    if (!existing.tasks_on_chat_url) {
+      this.db
+        .prepare(`UPDATE worker_state SET tasks_on_chat_url = ? WHERE id = ?`)
+        .run(workerUrl, workerId);
+    }
+    if (existing.readiness_reason === "RESTART_REQUIRED") {
+      this.db
+        .prepare(
+          `UPDATE worker_state SET readiness_reason = NULL, error = NULL WHERE id = ?`
+        )
+        .run(workerId);
+    }
+  }
+
+  /** True if this worker currently owns a leased/in-flight task. */
+  workerHasInFlight(workerId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT id FROM handoff_tasks
+         WHERE lease_owner = ?
+           AND status IN ('DISPATCHING','DISPATCHED','PROCESSING','WAITING_APPROVAL')
+         LIMIT 1`
+      )
+      .get(workerId) as { id: string } | undefined;
+    const state = this.db
+      .prepare(`SELECT current_task_id FROM worker_state WHERE id = ?`)
+      .get(workerId) as { current_task_id: string | null } | undefined;
+    return Boolean(row || state?.current_task_id);
+  }
+
+  assertWorkerIdle(workerId: string): void {
+    if (this.workerHasInFlight(workerId)) {
+      throw new Error(
+        `Worker ${workerId} is busy — refuse rotation while a task is in flight`
+      );
+    }
+  }
+
+  /**
+   * Same SQLite IMMEDIATE lock as claimNextQueued: idle + not already reserved
+   * → ROTATION_PENDING so the broker cannot claim during slow chat create.
+   */
+  beginRotationReservation(workerId: string): {
+    previousReason: WorkerReadinessReason | null;
+  } {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const worker = this.db
+        .prepare(`SELECT * FROM worker_state WHERE id = ?`)
+        .get(workerId) as WorkerRow | undefined;
+      if (!worker) {
+        this.db.exec("ROLLBACK");
+        throw new Error(`Worker ${workerId} not found`);
+      }
+      const inFlight = this.db
+        .prepare(
+          `SELECT id FROM handoff_tasks
+           WHERE lease_owner = ?
+             AND status IN ('DISPATCHING','DISPATCHED','PROCESSING','WAITING_APPROVAL')
+           LIMIT 1`
+        )
+        .get(workerId) as { id: string } | undefined;
+      if (inFlight || worker.current_task_id) {
+        this.db.exec("ROLLBACK");
+        throw new Error(
+          `Worker ${workerId} is busy — refuse rotation while a task is in flight`
+        );
+      }
+      const prev = (worker.readiness_reason ?? null) as
+        | WorkerReadinessReason
+        | null;
+      if (
+        prev === "ROTATION_PENDING" ||
+        prev === "CONSENT_REQUIRED" ||
+        prev === "RESTART_REQUIRED" ||
+        prev === "ROTATION_FAILED"
+      ) {
+        this.db.exec("ROLLBACK");
+        throw new Error(
+          `Worker ${workerId} already blocked (${prev}) — refuse concurrent rotation`
+        );
+      }
+      this.db
+        .prepare(
+          `UPDATE worker_state
+           SET readiness_reason = 'ROTATION_PENDING',
+               error = ?
+           WHERE id = ?`
+        )
+        .run(
+          prev
+            ? `ROTATION_PENDING:prev=${prev}`
+            : "ROTATION_PENDING: rotate-worker reserved",
+          workerId
+        );
+      this.db.exec("COMMIT");
+      return { previousReason: prev };
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+  }
+
+  abortRotationReservation(
+    workerId: string,
+    previousReason: WorkerReadinessReason | null
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET readiness_reason = ?, error = NULL
+         WHERE id = ? AND readiness_reason = 'ROTATION_PENDING'`
+      )
+      .run(previousReason, workerId);
+  }
+
+  setReadinessReason(
+    workerId: string,
+    reason: WorkerReadinessReason | null,
+    error?: string | null
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET readiness_reason = ?, error = COALESCE(?, error)
+         WHERE id = ?`
+      )
+      .run(reason, error ?? null, workerId);
+  }
+
+  /**
+   * Durable rotation commit: bind counter to new URL, reset count, set readiness.
+   * Call only after topology file write succeeded (or in tests without a file).
+   */
+  commitChatRotation(input: {
+    workerId: string;
+    newWorkerUrl: string;
+    previousWorkerUrl: string;
+    readinessReason: WorkerReadinessReason;
+    error?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    const info = this.db
+      .prepare(
+        `UPDATE worker_state
+         SET worker_url = ?,
+             tasks_on_chat = 0,
+             tasks_on_chat_url = ?,
+             previous_worker_url = ?,
+             chat_rotated_at = ?,
+             readiness_reason = ?,
+             error = ?,
+             current_task_id = NULL
+         WHERE id = ?
+           AND readiness_reason = 'ROTATION_PENDING'`
+      )
+      .run(
+        input.newWorkerUrl,
+        input.newWorkerUrl,
+        input.previousWorkerUrl,
+        now,
+        input.readinessReason,
+        input.error ?? `${input.readinessReason}: rotate-worker`,
+        input.workerId
+      );
+    if (Number(info.changes ?? 0) !== 1) {
+      throw new Error(
+        `commitChatRotation: worker ${input.workerId} is not ROTATION_PENDING`
+      );
     }
   }
 
@@ -1070,6 +1403,7 @@ export class TaskRepository {
       currentTaskId: string | null;
       error: string | null;
       instanceToken?: string;
+      readinessReason?: WorkerReadinessReason | null;
     }> = {}
   ): void {
     const existing = this.db
@@ -1117,6 +1451,10 @@ export class TaskRepository {
     if ("error" in extra) {
       sets.push("error = ?");
       values.push(extra.error ?? null);
+    }
+    if ("readinessReason" in extra) {
+      sets.push("readiness_reason = ?");
+      values.push(extra.readinessReason ?? null);
     }
 
     if (extra.instanceToken) {

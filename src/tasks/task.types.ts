@@ -1,3 +1,5 @@
+import type { WorkerReadinessReason } from "../workers/chat-budget.js";
+
 export type HandoffTaskStatus =
   | "QUEUED"
   | "DISPATCHING"
@@ -81,6 +83,13 @@ export interface WorkerStateRow {
   httpPort?: number;
   startedAt?: string;
   pid?: number;
+  /** Dispatched tasks on the current chat URL (0.5 rotation budget). */
+  tasksOnChat?: number;
+  /** Chat URL the counter is bound to. */
+  tasksOnChatUrl?: string;
+  previousWorkerUrl?: string;
+  chatRotatedAt?: string;
+  readinessReason?: WorkerReadinessReason;
 }
 
 /** Statuses that hold a lease_owner (partial unique index). */

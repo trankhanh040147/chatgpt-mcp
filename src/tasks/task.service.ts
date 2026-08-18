@@ -426,4 +426,13 @@ export class TaskService {
       workerStaleMs
     );
   }
+
+  /** Increment chat budget after TASK_ID successfully sent (idempotent per task). */
+  recordChatDispatch(
+    workerId: string,
+    taskId: string,
+    chatUrl: string
+  ): { recorded: boolean; tasksOnChat: number } {
+    return this.repo.recordChatDispatch({ workerId, taskId, chatUrl });
+  }
 }

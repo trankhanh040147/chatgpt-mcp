@@ -411,6 +411,20 @@ export class BrowserWorker {
         await browser.submitTaskId(task.id, { skipIdleWait: true });
       });
 
+      const budget = taskService.recordChatDispatch(
+        this.workerId,
+        task.id,
+        this.options.workerUrl
+      );
+      log({
+        event: "INFO",
+        component: "browser-worker",
+        taskId: task.id,
+        message: budget.recorded
+          ? `Chat dispatch recorded (${budget.tasksOnChat} on chat)`
+          : `Chat dispatch already recorded (${budget.tasksOnChat} on chat)`,
+      });
+
       taskService.renewLease(
         task.id,
         this.workerId,

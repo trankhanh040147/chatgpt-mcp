@@ -35,7 +35,7 @@ HANDOFF_PATHS := \
 .PHONY: help install build setup chrome up up-bg down restart status wait-ready \
 	check doctor recover recover-clean recover-all clear-tasks clear-task \
 	logs worker-bg remote-bg status-api-bg test-leases e2e-1 e2e-20 e2e-dual \
-	create-worker dashboard dashboard-up handoff-zip
+	create-worker rotate-worker dashboard dashboard-up handoff-zip
 
 help: ## Show targets
 	@echo "chatgpt-mcp — quick ops"
@@ -53,6 +53,7 @@ help: ## Show targets
 	@echo "  make up-bg && make wait-ready && make check"
 	@echo "  make clear-tasks            # wipe SQLite queue (ID=ho_… for one)"
 	@echo "  make create-worker          # assisted New chat → workers.json (A1-S)"
+	@echo "  make rotate-worker ARGS='--id=w2'  # idle-only chat rotation"
 
 install: ## npm install
 	npm install
@@ -141,6 +142,9 @@ e2e-dual: ## Live dual-worker canary (needs 2 CDP + start-dual-stack.sh)
 
 create-worker: ## Assisted New chat → write workers file → optional canary
 	npm run create-worker
+
+rotate-worker: ## Rotate worker chat (idle-only; restart broker after)
+	npm run rotate-worker -- $(ARGS)
 
 wait-ready: ## Wait until GET /worker reports READY (120s default)
 	@chmod +x scripts/wait-ready.sh

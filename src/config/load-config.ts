@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { DEFAULT_WORKER_ID } from "../tasks/task.types.js";
+import { parseMaxTasksPerChat } from "../workers/chat-budget.js";
 
 export interface AppConfig {
   dbPath: string;
@@ -21,6 +22,8 @@ export interface AppConfig {
   workerStaleMs: number;
   workersFile?: string;
   reaperIntervalMs: number;
+  /** Max TASK_ID dispatches per worker chat before rotation (0.5). */
+  maxTasksPerChat: number;
 }
 
 /** Resolve env paths. Node's path.resolve does not expand `~`. */
@@ -98,6 +101,9 @@ export function loadConfig(): AppConfig {
   if (!Number.isFinite(reaperIntervalMs) || reaperIntervalMs < 500) {
     throw new Error(`HANDOFF_REAPER_INTERVAL_MS invalid: ${reaperIntervalMs}`);
   }
+  const maxTasksPerChat = parseMaxTasksPerChat(
+    process.env.HANDOFF_MAX_TASKS_PER_CHAT
+  );
 
   return {
     dbPath: resolveUserPath(
@@ -124,5 +130,6 @@ export function loadConfig(): AppConfig {
     workerStaleMs,
     workersFile: process.env.HANDOFF_WORKERS_FILE?.trim() || undefined,
     reaperIntervalMs,
+    maxTasksPerChat,
   };
 }

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
   type ResolvedTopology,
@@ -21,6 +21,28 @@ export function nextWorkerId(existing: WorkerRegistryEntry[]): string {
   throw new Error("Could not allocate worker id");
 }
 
+export function withWorkersFileLock<T>(filePath: string, fn: () => T): T {
+  const abs = resolve(filePath);
+  mkdirSync(dirname(abs), { recursive: true });
+  const lockPath = `${abs}.lock`;
+  try {
+    writeFileSync(lockPath, `${process.pid}\n`, { flag: "wx" });
+  } catch {
+    throw new Error(
+      `Workers file is locked (${lockPath}). Another rotate/create-worker may be in progress.`
+    );
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      // ignore
+    }
+  }
+}
+
 /**
  * Atomically append (or replace-by-id) a worker entry in workers.json.
  * Validates topology before commit (A1-S: allowSharedCdp when all CDPs match).
@@ -29,6 +51,16 @@ export function upsertWorkerRegistryEntry(opts: {
   filePath: string;
   entry: WorkerRegistryEntry;
   /** Replace existing id instead of throwing. */
+  replace?: boolean;
+}): { workers: WorkerRegistryEntry[]; filePath: string } {
+  return withWorkersFileLock(opts.filePath, () =>
+    upsertWorkerRegistryEntryUnlocked(opts)
+  );
+}
+
+function upsertWorkerRegistryEntryUnlocked(opts: {
+  filePath: string;
+  entry: WorkerRegistryEntry;
   replace?: boolean;
 }): { workers: WorkerRegistryEntry[]; filePath: string } {
   const abs = resolve(opts.filePath);

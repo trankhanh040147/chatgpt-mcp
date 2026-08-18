@@ -9,8 +9,8 @@ import { ensureTaskUsageTable } from "../usage/task-usage.repository.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-/** Multi-worker leases / fencing + task_usage. Bump when migrations change. */
-export const SCHEMA_USER_VERSION = 4;
+/** Multi-worker leases / fencing + task_usage + chat rotation budget. */
+export const SCHEMA_USER_VERSION = 5;
 
 let dbInstance: DatabaseSync | null = null;
 
@@ -85,6 +85,36 @@ export function migrateDatabase(db: DatabaseSync): void {
   ensureLegacyBaseTables(db);
   if (tableExists(db, "worker_state")) {
     addColumnIfMissing(db, "worker_state", "pid", "pid INTEGER");
+    addColumnIfMissing(
+      db,
+      "worker_state",
+      "tasks_on_chat",
+      "tasks_on_chat INTEGER NOT NULL DEFAULT 0"
+    );
+    addColumnIfMissing(
+      db,
+      "worker_state",
+      "tasks_on_chat_url",
+      "tasks_on_chat_url TEXT"
+    );
+    addColumnIfMissing(
+      db,
+      "worker_state",
+      "previous_worker_url",
+      "previous_worker_url TEXT"
+    );
+    addColumnIfMissing(
+      db,
+      "worker_state",
+      "chat_rotated_at",
+      "chat_rotated_at TEXT"
+    );
+    addColumnIfMissing(
+      db,
+      "worker_state",
+      "readiness_reason",
+      "readiness_reason TEXT"
+    );
   }
 
   if (version >= SCHEMA_USER_VERSION) {

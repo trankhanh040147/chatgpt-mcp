@@ -52,8 +52,24 @@ CREATE TABLE IF NOT EXISTS worker_state (
     cdp_endpoint TEXT,
     http_port INTEGER,
     started_at TEXT,
-    pid INTEGER
+    pid INTEGER,
+    tasks_on_chat INTEGER NOT NULL DEFAULT 0,
+    tasks_on_chat_url TEXT,
+    previous_worker_url TEXT,
+    chat_rotated_at TEXT,
+    readiness_reason TEXT
 );
+
+CREATE TABLE IF NOT EXISTS worker_chat_dispatch (
+    worker_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    chat_url TEXT NOT NULL,
+    dispatched_at TEXT NOT NULL,
+    PRIMARY KEY (worker_id, task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_chat_dispatch_url
+ON worker_chat_dispatch(worker_id, chat_url);
 
 CREATE TABLE IF NOT EXISTS task_usage (
     task_id TEXT PRIMARY KEY REFERENCES handoff_tasks(id) ON DELETE CASCADE,

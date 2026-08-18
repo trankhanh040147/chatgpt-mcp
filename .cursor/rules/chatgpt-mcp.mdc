@@ -8,35 +8,67 @@ alwaysApply: true
 
 You have access to an external ChatGPT handoff system via MCP tools.
 
-Prefer the user skill `chatgpt-mcp` (`/chatgpt-mcp`).
+Prefer the user skill `chatgpt-mcp` (`/chatgpt-mcp`). This rule is the **normative** handoff policy; the skill repeats the same invariants.
 
-## Prefer handoff (save Cursor tokens)
+## Handoff depth (pick one before any create)
 
-For this repo, **prefer `handoff_create_task`** when the work is independent external reasoning and would burn a large Cursor context:
+A **decision** is the bounded user/engineering choice being resolved. Related subquestions belong to the same decision; rephrasing does not reset the budget. One decision → at most **one** `handoff_create_task`. State the tier in one sentence before calling MCP.
 
-- architecture / design review
-- independent code review
-- technical research (libraries, APIs, SOTA, best practices)
-- comparing complex approaches
-- checking uncertain assumptions
-- debugging after multiple failed attempts
-- validating a production-critical decision
+| Tier | When | Handoffs |
+|------|------|----------|
+| **Light** | Answer is already explicit and low-risk in context; trivial fix; ≤3 tool calls and you are confident | **0** — do locally; Light must not call MCP (`handoff_create_task`) |
+| **Standard** | Independent review/research; bounded question; single deliverable | **at most 1** (optional — only when independent reasoning materially helps; not mandatory) |
+| **Deep** | Architecture fork; multi-option compare; production-critical; multiple failed local attempts | **at most 1** (optional). Deep changes reasoning depth, not handoff count |
 
-Do the thin local work yourself (wire APIs, edit files, run tests). Offload the heavy review/research/comparison pass to ChatGPT when it would materially help.
+**Standard prompt shape:** exact question + constraints + only necessary context (relevant files, no paste walls).
 
-## Do NOT hand off
+**Deep adds:** current approach + alternatives considered + explicit “decision needed”.
 
-- trivial coding, formatting, renames
-- simple syntax questions
-- facts already in the current context
-- tasks you can confidently finish in a few tool calls
+Production-critical or security decisions stay Standard/Deep even if some facts are already in context — Light is for low-risk answers that are already explicit.
+
+### Anti-loop
+
+- If the handoff result is insufficient for the **same decision** (substantially same unresolved issue) → continue locally or ask the user. **Do not** immediately create another handoff for the same decision.
+- Several subquestions supporting **one** release decision → **one bundled** handoff, not one per subquestion.
+
+Scenarios: `.planning/2026-08-18-roadmap-0.5-agent-ux-rotation/scenarios-agent-ux.md`
+
+### Examples (Light = 0)
+
+- Explain a function already visible in open files
+- Rename, typo, obvious one-line fix
+- Error cause and fix already explicit in supplied log/context
+
+### Examples (Standard = at most 1)
+
+- Focused diff review before ship
+- External best practice / version behavior not in repo
+- Two plausible root causes after local debug — need independent diagnosis
+
+### Examples (Deep = at most 1)
+
+- Persistence or concurrency design fork with material trade-offs
+- Production-critical auth/security review before rollout
+- Reassess assumptions after multiple failed fix attempts
+
+Do thin local work yourself (wire APIs, edit files, run tests). Offload only the independent reasoning pass when it materially helps.
+
+## Do NOT hand off (always Light)
+
+- Trivial coding, formatting, renames
+- Simple syntax questions
+- Facts already in the current context (and the remaining work is low-risk)
+- Tasks you can confidently finish in a few tool calls
 
 ## When creating a task
 
-1. Explain the exact question.
-2. Include relevant constraints.
-3. Include only necessary context.
-4. Request actionable output.
+1. State tier (Light/Standard/Deep) — Light must not call MCP (`handoff_create_task`).
+2. Explain the exact question.
+3. Include relevant constraints.
+4. Include only necessary context.
+5. Request actionable output.
+
+MCP `type` (`research`, `architecture_review`, `code_review`, `second_opinion`, `debug_analysis`) is orthogonal to tier.
 
 ## After handoff_create_task succeeds
 

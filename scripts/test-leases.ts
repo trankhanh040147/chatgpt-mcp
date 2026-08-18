@@ -151,7 +151,7 @@ async function main(): Promise<void> {
     repo.registerWorkerInstance({
       workerId: "w1",
       instanceToken: "new",
-      workerUrl: "https://chatgpt.com/c/w1b",
+      workerUrl: "https://chatgpt.com/c/w1",
       cdpEndpoint: "http://127.0.0.1:9333",
       staleMs: 60_000,
     });

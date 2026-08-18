@@ -89,7 +89,10 @@ export type IndicatorKind =
   | "recent_timeouts"
   | "pid_dead"
   | "session_lost"
-  | "rate_limited";
+  | "rate_limited"
+  | "chat_budget_warn"
+  | "chat_budget_full"
+  | "rotation_blocked";
 
 export interface WorkerIndicator {
   kind: IndicatorKind;
@@ -107,6 +110,9 @@ export function deriveWorkerIndicators(input: {
   recentFailed: number;
   recentTimedOut: number;
   longRunningMs?: number;
+  readinessReason?: string | null;
+  chatBudgetWarn?: boolean;
+  chatBudgetExhausted?: boolean;
 }): WorkerIndicator[] {
   const longMs = input.longRunningMs ?? 10 * 60_000;
   const out: WorkerIndicator[] = [];
@@ -164,6 +170,36 @@ export function deriveWorkerIndicators(input: {
       label: `${input.recentTimedOut} timed out · 24h`,
       severity: "warn",
     });
+  }
+  if (input.chatBudgetExhausted) {
+    out.push({
+      kind: "chat_budget_full",
+      label: "Chat budget full",
+      severity: "warn",
+    });
+  } else if (input.chatBudgetWarn) {
+    out.push({
+      kind: "chat_budget_warn",
+      label: "Chat budget near max",
+      severity: "warn",
+    });
+  }
+  if (input.readinessReason) {
+    const labels: Record<string, string> = {
+      THRESHOLD_REACHED: "Chat budget full — rotate",
+      ROTATION_PENDING: "Rotation pending",
+      ROTATION_FAILED: "Rotation failed",
+      RESTART_REQUIRED: "Restart broker required",
+      CONSENT_REQUIRED: "MCP consent required",
+    };
+    const label = labels[input.readinessReason];
+    if (label) {
+      out.push({
+        kind: "rotation_blocked",
+        label,
+        severity: input.readinessReason === "ROTATION_FAILED" ? "bad" : "warn",
+      });
+    }
   }
   return out;
 }

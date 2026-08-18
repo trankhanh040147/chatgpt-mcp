@@ -150,9 +150,11 @@ Per ChatGPT research `ho_01M04T15ETEKJ3KXKN5F47JAGJ` + framing fix `ho_01M04W2BN
 - Auto-scaling workers
 - Claiming ChatGPT per-handoff invoices or cash savings from estimates
 
-### 0.5.0 — Agent UX + worker chat rotation (**next**)
+### 0.5.0 — Agent UX + worker chat rotation (**in progress**)
 
 Formerly 0.4.0. Skill/rule handoff policy + self-regulate context (measure → threshold → create-worker → rotate). Depends on 0.3 create-worker.
+
+**Landed (2026-08-18, not tagged):** Light/Standard/Deep policy; `HANDOFF_MAX_TASKS_PER_CHAT=20`; idle-only `rotate-worker` with claim reservation; dashboard `n/20` budget. Live: rotate `w3` → broker restart → burst `--n=3` PASS.
 
 ### 0.6.0 — Portable core
 

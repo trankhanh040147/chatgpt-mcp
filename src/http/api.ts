@@ -21,6 +21,11 @@ import {
 } from "../dashboard/observability.js";
 import { loadWorkersTopology } from "../config/workers-topology.js";
 import {
+  isChatBudgetExhausted,
+  parseMaxTasksPerChat,
+  shouldWarnChatBudget,
+} from "../workers/chat-budget.js";
+import {
   executeRecover,
   failTaskById,
   newOpsToken,
@@ -372,6 +377,9 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         const nowIso = new Date(now).toISOString();
         const staleMs = Number(process.env.HANDOFF_WORKER_STALE_MS ?? 120_000);
         const since24h = new Date(now - 24 * 3600_000).toISOString();
+        const maxTasksPerChat = parseMaxTasksPerChat(
+          process.env.HANDOFF_MAX_TASKS_PER_CHAT
+        );
         const counts = repo.countTerminalByLeaseOwner(since24h);
         const db = getDatabase();
         const workers = repo.listWorkers().map((w) => {
@@ -406,6 +414,7 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
             }
           }
           const chatUrl = sanitizeChatUrl(w.workerUrl);
+          const tasksOnChat = w.tasksOnChat ?? 0;
           return {
             id: w.id,
             status: w.status,
@@ -421,6 +430,14 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
             httpPort: w.httpPort ?? null,
             chatUrl,
             chatAvailable: Boolean(chatUrl),
+            tasksOnChat,
+            maxTasksPerChat,
+            chatBudgetWarn: shouldWarnChatBudget(tasksOnChat, maxTasksPerChat),
+            chatBudgetExhausted: isChatBudgetExhausted(
+              tasksOnChat,
+              maxTasksPerChat
+            ),
+            readinessReason: w.readinessReason ?? null,
             completedLast24h: agg.completed,
             failedLast24h: agg.failed,
             timedOutLast24h: agg.timedOut,
@@ -434,6 +451,12 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
               currentTaskAgeMs,
               recentFailed: agg.failed,
               recentTimedOut: agg.timedOut,
+              readinessReason: w.readinessReason,
+              chatBudgetWarn: shouldWarnChatBudget(tasksOnChat, maxTasksPerChat),
+              chatBudgetExhausted: isChatBudgetExhausted(
+                tasksOnChat,
+                maxTasksPerChat
+              ),
             }),
             errorCode: w.error
               ? w.error.split(":")[0]?.slice(0, 64) ?? "ERROR"

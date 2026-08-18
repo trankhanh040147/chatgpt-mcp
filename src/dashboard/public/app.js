@@ -577,6 +577,7 @@ function renderWorkers(workers, showReference) {
         <div class="row"><span class="muted">PID</span><span>${w.pidAlive ? `${w.pid ?? "—"} · alive` : "dead"}</span></div>
         <div class="row"><span class="muted">Heartbeat</span><span>${w.heartbeatStale ? "stale" : "fresh"} · ${age(w.lastSeenAt)}</span></div>
         <div class="row"><span class="muted">Current task</span><span class="mono" title="${escapeHtml(w.currentTaskId ?? "")}">${escapeHtml(task)}</span></div>
+        <div class="row"><span class="muted">Chat budget</span><span class="mono">${w.tasksOnChat ?? 0}/${w.maxTasksPerChat ?? "—"}</span></div>
         <div class="row"><span class="muted">Completed 24h</span><span>${w.completedLast24h ?? 0}</span></div>
         <div class="row"><span class="muted">Failed / TO 24h</span><span>${w.failedLast24h ?? 0} / ${w.timedOutLast24h ?? 0}</span></div>
         ${refRows}
@@ -645,10 +646,14 @@ function renderHints(workers, health) {
     kind: "neutral",
     text: "Use doctor before restarting the stack",
   });
-  hints.push({
-    kind: "neutral",
-    text: "No rotation max configured — counts are informational (0.5 owns budget)",
-  });
+
+  const maxChat = live.find((w) => w.maxTasksPerChat)?.maxTasksPerChat;
+  if (maxChat) {
+    hints.push({
+      kind: "neutral",
+      text: `Chat rotation max ${maxChat} dispatches/chat — npm run rotate-worker -- --id=wN`,
+    });
+  }
 
   if (live.length === 0) {
     hints.push({
