@@ -20,6 +20,8 @@ If ChatGPT finishes later, **the same `TASK_ID` can still complete** (`TIMED_OUT
 | Hard cap | `DISPATCH_HARD_TIMEOUT_MS` | `max(3× approval, 15m)` | Even if ChatGPT is still generating (Stop button), cut here |
 | Cursor wait | `HANDOFF_WAIT_TIMEOUT` | 960s | Stop-hook long-poll. Keep **≥ hard cap**. `GET /tasks/:id/wait` does **not** treat `TIMED_OUT` as immediately terminal |
 | Cursor hook kill | `.cursor/hooks.json` `stop.timeout` | 1000s (user + this repo) | Must be **> `HANDOFF_WAIT_TIMEOUT`**, or Cursor kills the wait script first |
+| Stop followup loops | `stop.loop_limit` | **1** (required) | `null` re-fires forever on every `followup_message` — spam on FAILED/stuck QUEUED |
+| Followup ack | `cursor_followup_at` / `cursor_wait_notified_at` | schema v7 | CAS so each task notifies at most once per phase (wait-timeout vs terminal) |
 
 While Stop is visible, the worker **defers** `TIMED_OUT` until idle or the hard cap. After `TIMED_OUT`, it holds that chat (~20s after idle) so a new `TASK_ID` is not typed over an in-flight submit.
 
@@ -69,4 +71,5 @@ Root cause: **wall clock vs Figma browse**, plus **rejecting late submit**. Not 
 | Allowed transition | `src/tasks/task-state.ts` |
 | Wait route ignores `TIMED_OUT` as terminal | `src/http/api.ts` |
 | Stop hook keeps waiting | `cursor/wait-handoff.py` |
+| Followup dedupe (no FAILED/QUEUED spam) | `cursor_followup_at` / `cursor_wait_notified_at`; `POST /tasks/ack-followup` |
 | “Submit from inventory; late submit OK” | `src/mcp/worker-policy.ts` |

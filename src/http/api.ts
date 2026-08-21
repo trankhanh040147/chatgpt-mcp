@@ -641,6 +641,25 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
 
       if (
         req.method === "GET" &&
+        url.pathname === "/conversations/unresumed-terminal"
+      ) {
+        const conversationId = url.searchParams.get("conversationId");
+        if (!conversationId) {
+          sendJson(res, 400, { error: "conversationId required" });
+          return;
+        }
+        const task =
+          taskService.findUnresumedTerminalForConversation(conversationId);
+        sendJson(res, 200, {
+          task: task
+            ? { id: task.id, status: task.status }
+            : null,
+        });
+        return;
+      }
+
+      if (
+        req.method === "GET" &&
         url.pathname === "/conversations/completed"
       ) {
         const conversationId = url.searchParams.get("conversationId");
@@ -651,6 +670,24 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         const completed =
           taskService.findCompletedForConversation(conversationId);
         sendJson(res, 200, { completed: completed ?? null });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/tasks/ack-followup") {
+        const body = JSON.parse(await readBody(req)) as {
+          taskId?: string;
+          kind?: string;
+        };
+        if (!body.taskId) {
+          sendJson(res, 400, { error: "taskId required" });
+          return;
+        }
+        const kind = body.kind === "wait_timeout" ? "wait_timeout" : "terminal";
+        const claimed =
+          kind === "wait_timeout"
+            ? taskService.claimWaitTimeoutNotify(body.taskId)
+            : taskService.claimTerminalFollowup(body.taskId);
+        sendJson(res, 200, { ok: true, claimed, kind });
         return;
       }
 

@@ -1,7 +1,10 @@
 import { z } from "zod";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { TaskService } from "../../tasks/task.service.js";
-import { UNSCOPED_CLIENT_SESSION_ID } from "../../tasks/task.types.js";
+import {
+  HandoffFileError,
+  UNSCOPED_CLIENT_SESSION_ID,
+} from "../../tasks/task.types.js";
 import {
   SUBMIT_POLICY,
   SUBMIT_RESULT_TOOL_DESCRIPTION,
@@ -35,6 +38,12 @@ const contextSchema = z
   })
   .optional();
 
+const fileIdSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^f_[A-Z0-9]+$/i, "fileId must look like f_…");
+
 type ToolRegistrar = {
   tool: (
     name: string,
@@ -67,6 +76,8 @@ export function registerHandoffTools(
       type: taskTypeSchema,
       prompt: z.string().min(1).max(MAX_PROMPT),
       context: contextSchema,
+      files: z.array(z.string().min(1).max(1_000)).max(10).optional()
+        .describe("Workspace-relative evidence file paths already in the current decision. No globs."),
       clientSessionId: z.string().min(1).max(200).optional(),
       cursorConversationId: z
         .string()
@@ -93,6 +104,7 @@ export function registerHandoffTools(
         type: args.type as Parameters<TaskService["createTask"]>[0]["type"],
         prompt: args.prompt as string,
         context: args.context as Parameters<TaskService["createTask"]>[0]["context"],
+        files: args.files as string[] | undefined,
         cursorConversationId: clientSessionId,
       });
 
@@ -127,17 +139,65 @@ export function registerHandoffTools(
         throw new Error(`Task not found: ${args.taskId}`);
       }
 
+      const files = (task.files ?? []).map((f) => ({
+        fileId: f.fileId,
+        displayName: f.displayName,
+        relativePath: f.relativePath,
+        size: f.sizeBytes,
+        sha256: f.sha256,
+        mediaType: f.mediaType,
+      }));
+
       return jsonContent({
         taskId: task.id,
         type: task.type,
         prompt: task.prompt,
         context: task.context ?? {},
         status: task.status,
+        files,
+        mustReadAttachedFiles:
+          files.length > 0
+            ? "Call handoff_read_file({taskId, fileId}) for each file above before answering."
+            : undefined,
         submitPolicy: {
           ...SUBMIT_POLICY,
           lateSubmitAccepted: task.status === "TIMED_OUT" && !task.result,
         },
       });
+    }
+  );
+
+  server.tool(
+    "handoff_read_file",
+    "Read one evidence file attached to a handoff task by taskId + fileId (never a raw path). "
+      + "Read-only; returns sanitized content with offset/maxBytes ranging.",
+    {
+      taskId: taskIdSchema,
+      fileId: fileIdSchema,
+      offset: z.number().int().min(0).optional(),
+      maxBytes: z.number().int().min(1).max(262_144).optional(),
+    },
+    {
+      title: "Read handoff task file",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
+    async (args) => {
+      try {
+        const output = taskService.readFile(
+          args.taskId as string,
+          args.fileId as string,
+          args.offset as number | undefined,
+          args.maxBytes as number | undefined
+        );
+        return jsonContent(output);
+      } catch (err) {
+        if (err instanceof HandoffFileError) {
+          throw new Error(err.code);
+        }
+        throw new Error("FILE_NOT_ALLOWED");
+      }
     }
   );
 

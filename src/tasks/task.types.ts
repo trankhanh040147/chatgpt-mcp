@@ -42,6 +42,34 @@ export interface HandoffResultMetadata {
   confidence?: "low" | "medium" | "high";
 }
 
+export interface HandoffTaskFile {
+  fileId: string;
+  displayName: string;
+  relativePath: string;
+  sourcePath: string;
+  sizeBytes: number;
+  sha256: string;
+  mediaType: string;
+  createdAt: string;
+}
+
+export type HandoffFileErrorCode =
+  | "FILE_NOT_ON_TASK"
+  | "FILE_NOT_FOUND"
+  | "FILE_NOT_ALLOWED"
+  | "FILE_CHANGED_REATTACH"
+  | "FILE_TOO_LARGE"
+  | "FILES_INVALID";
+
+export class HandoffFileError extends Error {
+  code: HandoffFileErrorCode;
+  constructor(code: HandoffFileErrorCode, message: string) {
+    super(message);
+    this.name = "HandoffFileError";
+    this.code = code;
+  }
+}
+
 export interface HandoffTask {
   id: string;
   cursorConversationId: string;
@@ -64,6 +92,8 @@ export interface HandoffTask {
   dispatchAttempt: number;
   nudgeStartedAt?: string;
   nudgeAttempt: number;
+  workspaceRoot?: string;
+  files?: HandoffTaskFile[];
 }
 
 export interface ClaimResult {
@@ -106,6 +136,8 @@ export interface CreateTaskInput {
   context?: HandoffTaskContext;
   /** Host session / correlation key. Optional for portable MCP hosts. */
   cursorConversationId: string;
+  /** Workspace-relative evidence file paths (max 10). Never absolute paths. */
+  files?: string[];
 }
 
 /** Sentinel when the host does not supply a session id (manual poll by taskId). */

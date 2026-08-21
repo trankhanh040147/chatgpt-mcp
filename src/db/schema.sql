@@ -19,7 +19,23 @@ CREATE TABLE IF NOT EXISTS handoff_tasks (
     dispatch_started_at TEXT,
     dispatch_attempt INTEGER NOT NULL DEFAULT 0,
     nudge_started_at TEXT,
-    nudge_attempt INTEGER NOT NULL DEFAULT 0
+    nudge_attempt INTEGER NOT NULL DEFAULT 0,
+    workspace_root TEXT,
+    cursor_followup_at TEXT,
+    cursor_wait_notified_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS handoff_task_files (
+    task_id TEXT NOT NULL REFERENCES handoff_tasks(id) ON DELETE CASCADE,
+    file_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, file_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_handoff_status

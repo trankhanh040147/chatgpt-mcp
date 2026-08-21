@@ -882,7 +882,7 @@ Conceptual configuration:
       {
         "command": "python cursor/wait-handoff.py",
         "timeout": 500,
-        "loop_limit": null
+        "loop_limit": 1
       }
     ]
   }
