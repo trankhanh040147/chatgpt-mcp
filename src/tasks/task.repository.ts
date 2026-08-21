@@ -4,6 +4,7 @@ import type {
   ClaimResult,
   HandoffTask,
   HandoffTaskContext,
+  HandoffTaskFile,
   HandoffResultMetadata,
   HandoffTaskStatus,
   WorkerStateRow,
@@ -41,6 +42,32 @@ interface TaskRow {
   dispatch_attempt: number | null;
   nudge_started_at: string | null;
   nudge_attempt: number | null;
+  workspace_root: string | null;
+}
+
+interface TaskFileRow {
+  task_id: string;
+  file_id: string;
+  display_name: string;
+  relative_path: string;
+  source_path: string;
+  size_bytes: number;
+  sha256: string;
+  media_type: string;
+  created_at: string;
+}
+
+function rowToTaskFile(row: TaskFileRow): HandoffTaskFile {
+  return {
+    fileId: row.file_id,
+    displayName: row.display_name,
+    relativePath: row.relative_path,
+    sourcePath: row.source_path,
+    sizeBytes: row.size_bytes,
+    sha256: row.sha256,
+    mediaType: row.media_type,
+    createdAt: row.created_at,
+  };
 }
 
 interface WorkerRow {
@@ -91,6 +118,7 @@ function rowToTask(row: TaskRow): HandoffTask {
     dispatchAttempt: row.dispatch_attempt ?? 0,
     nudgeStartedAt: row.nudge_started_at ?? undefined,
     nudgeAttempt: row.nudge_attempt ?? 0,
+    workspaceRoot: row.workspace_root ?? undefined,
   };
 }
 
@@ -140,33 +168,82 @@ export class TaskRepository {
   constructor(private readonly db: DatabaseSync) {}
 
   insertTask(task: HandoffTask): void {
-    this.db
-      .prepare(
-        `INSERT INTO handoff_tasks (
-          id, cursor_conversation_id, type, prompt, context_json,
-          status, retry_count, created_at,
-          dispatch_attempt, nudge_attempt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        task.id,
-        task.cursorConversationId,
-        task.type,
-        task.prompt,
-        task.context ? JSON.stringify(task.context) : null,
-        task.status,
-        task.retryCount,
-        task.createdAt,
-        task.dispatchAttempt ?? 0,
-        task.nudgeAttempt ?? 0
+    this.insertTaskWithFiles(task, []);
+  }
+
+  /** Validate-all-then-insert: task row + all file rows in one transaction. */
+  insertTaskWithFiles(task: HandoffTask, files: HandoffTaskFile[]): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO handoff_tasks (
+            id, cursor_conversation_id, type, prompt, context_json,
+            status, retry_count, created_at,
+            dispatch_attempt, nudge_attempt, workspace_root
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          task.id,
+          task.cursorConversationId,
+          task.type,
+          task.prompt,
+          task.context ? JSON.stringify(task.context) : null,
+          task.status,
+          task.retryCount,
+          task.createdAt,
+          task.dispatchAttempt ?? 0,
+          task.nudgeAttempt ?? 0,
+          task.workspaceRoot ?? null
+        );
+
+      const insertFile = this.db.prepare(
+        `INSERT INTO handoff_task_files (
+          task_id, file_id, display_name, relative_path, source_path,
+          size_bytes, sha256, media_type, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
+      for (const f of files) {
+        insertFile.run(
+          task.id,
+          f.fileId,
+          f.displayName,
+          f.relativePath,
+          f.sourcePath,
+          f.sizeBytes,
+          f.sha256,
+          f.mediaType,
+          f.createdAt
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
   }
 
   getTaskById(id: string): HandoffTask | null {
     const row = this.db
       .prepare("SELECT * FROM handoff_tasks WHERE id = ?")
       .get(id) as TaskRow | undefined;
-    return row ? rowToTask(row) : null;
+    if (!row) return null;
+    const task = rowToTask(row);
+    const fileRows = this.db
+      .prepare("SELECT * FROM handoff_task_files WHERE task_id = ?")
+      .all(id) as unknown as TaskFileRow[];
+    task.files = fileRows.map(rowToTaskFile);
+    return task;
+  }
+
+  /** Frozen lookup: always keyed by (task_id, file_id) together — never a global file_id lookup. */
+  getTaskFile(taskId: string, fileId: string): HandoffTaskFile | null {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM handoff_task_files WHERE task_id = ? AND file_id = ?"
+      )
+      .get(taskId, fileId) as TaskFileRow | undefined;
+    return row ? rowToTaskFile(row) : null;
   }
 
   /** Newest-first task rows for ops dashboard (full rows; callers must scrub). */
@@ -332,11 +409,71 @@ export class TaskRepository {
         `SELECT * FROM handoff_tasks
          WHERE cursor_conversation_id = ?
            AND status IN ('QUEUED', 'DISPATCHING', 'DISPATCHED', 'PROCESSING', 'WAITING_APPROVAL', 'RATE_LIMITED')
+           AND cursor_wait_notified_at IS NULL
          ORDER BY created_at ASC
          LIMIT 1`
       )
       .get(conversationId) as TaskRow | undefined;
     return row ? rowToTask(row) : null;
+  }
+
+  /**
+   * Terminal task for this conversation that the Cursor stop hook has not
+   * delivered a followup for yet (dedupes FAILED/QUEUED→terminal spam).
+   */
+  findUnresumedTerminalByConversation(
+    conversationId: string
+  ): HandoffTask | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM handoff_tasks
+         WHERE cursor_conversation_id = ?
+           AND status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT')
+           AND cursor_followup_at IS NULL
+         ORDER BY COALESCE(completed_at, created_at) ASC
+         LIMIT 1`
+      )
+      .get(conversationId) as TaskRow | undefined;
+    return row ? rowToTask(row) : null;
+  }
+
+  /** CAS: claim one terminal followup delivery. Returns false if already claimed. */
+  claimTerminalFollowup(taskId: string): boolean {
+    const now = new Date().toISOString();
+    const info = this.db
+      .prepare(
+        `UPDATE handoff_tasks
+         SET cursor_followup_at = ?
+         WHERE id = ?
+           AND cursor_followup_at IS NULL
+           AND status IN (
+             'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'READY_BUT_CURSOR_IDLE'
+           )`
+      )
+      .run(now, taskId);
+    return Number(info.changes ?? 0) === 1;
+  }
+
+  /**
+   * CAS: mark wait-timeout followup delivered while task is still non-terminal.
+   * Excludes the row from findPending so the stop hook does not re-wait/spam.
+   * Later terminal completion can still notify via findUnresumedTerminal.
+   */
+  claimWaitTimeoutNotify(taskId: string): boolean {
+    const now = new Date().toISOString();
+    const info = this.db
+      .prepare(
+        `UPDATE handoff_tasks
+         SET cursor_wait_notified_at = ?
+         WHERE id = ?
+           AND cursor_wait_notified_at IS NULL
+           AND status IN (
+             'QUEUED', 'DISPATCHING', 'DISPATCHED',
+             'PROCESSING', 'WAITING_APPROVAL', 'RATE_LIMITED'
+           )`
+      )
+      .run(now, taskId);
+    return Number(info.changes ?? 0) === 1;
   }
 
   findCompletedByConversation(conversationId: string): HandoffTask | null {

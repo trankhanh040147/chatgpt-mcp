@@ -1,14 +1,25 @@
+import { createHash } from "node:crypto";
+import { closeSync, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import { isAbsolute, relative } from "node:path";
 import { ulid } from "ulid";
 import type { TaskRepository } from "./task.repository.js";
 import { sanitizeContext, sanitizeSecrets } from "./sanitize.js";
 import { assertTransition } from "./task-state.js";
 import { log, logTransition } from "../logging/logger.js";
-import type {
-  ClaimResult,
-  CreateTaskInput,
-  HandoffTask,
-  HandoffResultMetadata,
-  SubmitResultInput,
+import {
+  DEFAULT_READ_BYTES,
+  MAX_BYTES_PER_FILE,
+  MAX_READ_BYTES,
+  resolveWorkspaceRoot,
+  validateAndLoadFiles,
+} from "./files.js";
+import {
+  HandoffFileError,
+  type ClaimResult,
+  type CreateTaskInput,
+  type HandoffTask,
+  type HandoffResultMetadata,
+  type SubmitResultInput,
 } from "./task.types.js";
 import { estimateTaskUsage, loadCostConfig } from "../usage/pricing.js";
 import {
@@ -24,6 +35,13 @@ export class TaskService {
     const id = `ho_${ulid()}`;
     const now = new Date().toISOString();
 
+    let workspaceRoot: string | undefined;
+    let files: HandoffTask["files"] = [];
+    if (input.files && input.files.length > 0) {
+      workspaceRoot = resolveWorkspaceRoot();
+      files = validateAndLoadFiles(input.files, workspaceRoot, now);
+    }
+
     const task: HandoffTask = {
       id,
       cursorConversationId: input.cursorConversationId,
@@ -37,18 +55,103 @@ export class TaskService {
       createdAt: now,
       dispatchAttempt: 0,
       nudgeAttempt: 0,
+      workspaceRoot,
     };
 
-    this.repo.insertTask(task);
+    this.repo.insertTaskWithFiles(task, files ?? []);
 
     log({
       event: "TASK_CREATED",
       component: "task-service",
       taskId: id,
-      message: `type=${input.type}`,
+      message: `type=${input.type} files=${files?.length ?? 0}`,
     });
 
     return { taskId: id, status: "QUEUED" };
+  }
+
+  /** Frozen single-handle pipeline: open once, hash those bytes, sanitize whole, then range. */
+  readFile(
+    taskId: string,
+    fileId: string,
+    offset = 0,
+    maxBytes = DEFAULT_READ_BYTES
+  ): {
+    fileId: string;
+    displayName: string;
+    relativePath: string;
+    sha256: string;
+    offset: number;
+    returnedBytes: number;
+    totalBytes: number;
+    eof: boolean;
+    content: string;
+  } {
+    const task = this.repo.getTaskById(taskId);
+    if (!task || !task.workspaceRoot) {
+      throw new HandoffFileError("FILE_NOT_ON_TASK", "File not attached to task");
+    }
+    const fileRow = this.repo.getTaskFile(taskId, fileId);
+    if (!fileRow) {
+      throw new HandoffFileError("FILE_NOT_ON_TASK", "File not attached to task");
+    }
+
+    let lst;
+    try {
+      lst = lstatSync(fileRow.sourcePath);
+    } catch {
+      throw new HandoffFileError("FILE_NOT_FOUND", "File missing");
+    }
+    if (lst.isSymbolicLink() || !lst.isFile()) {
+      throw new HandoffFileError("FILE_NOT_ALLOWED", "Not a regular file");
+    }
+    const rel = relative(task.workspaceRoot, fileRow.sourcePath);
+    if (rel.startsWith("..") || isAbsolute(rel)) {
+      throw new HandoffFileError("FILE_NOT_ALLOWED", "Escapes workspace root");
+    }
+    if (lst.size > MAX_BYTES_PER_FILE) {
+      throw new HandoffFileError("FILE_TOO_LARGE", "File exceeds cap");
+    }
+
+    const fd = openSync(fileRow.sourcePath, "r");
+    let raw: Buffer;
+    try {
+      const st = fstatSync(fd);
+      if (!st.isFile()) {
+        throw new HandoffFileError("FILE_NOT_ALLOWED", "Not a regular file");
+      }
+      raw = Buffer.alloc(st.size);
+      if (st.size > 0) readSync(fd, raw, 0, st.size, 0);
+    } finally {
+      closeSync(fd);
+    }
+
+    const actualHash = createHash("sha256").update(raw).digest("hex");
+    if (actualHash !== fileRow.sha256) {
+      throw new HandoffFileError(
+        "FILE_CHANGED_REATTACH",
+        "File changed since attach; re-attach required"
+      );
+    }
+
+    const sanitizedBuf = Buffer.from(sanitizeSecrets(raw.toString("utf-8")), "utf-8");
+    const totalBytes = sanitizedBuf.length;
+    const clampedMax = Math.min(Math.max(0, maxBytes ?? DEFAULT_READ_BYTES), MAX_READ_BYTES);
+    const start = Math.min(Math.max(0, offset ?? 0), totalBytes);
+    const end = Math.min(start + clampedMax, totalBytes);
+    const slice = sanitizedBuf.subarray(start, end);
+
+    return {
+      fileId: fileRow.fileId,
+      displayName: fileRow.displayName,
+      relativePath: fileRow.relativePath,
+      sha256: fileRow.sha256,
+      offset: start,
+      returnedBytes: slice.length,
+      totalBytes,
+      eof: start + slice.length >= totalBytes,
+      content: slice.toString("utf-8"),
+    };
   }
 
   getTask(taskId: string): HandoffTask | null {
@@ -407,6 +510,20 @@ export class TaskService {
 
   findPendingForConversation(conversationId: string): HandoffTask | null {
     return this.repo.findPendingByConversation(conversationId);
+  }
+
+  findUnresumedTerminalForConversation(
+    conversationId: string
+  ): HandoffTask | null {
+    return this.repo.findUnresumedTerminalByConversation(conversationId);
+  }
+
+  claimTerminalFollowup(taskId: string): boolean {
+    return this.repo.claimTerminalFollowup(taskId);
+  }
+
+  claimWaitTimeoutNotify(taskId: string): boolean {
+    return this.repo.claimWaitTimeoutNotify(taskId);
   }
 
   findCompletedForConversation(conversationId: string): HandoffTask | null {

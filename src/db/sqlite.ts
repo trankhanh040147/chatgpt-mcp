@@ -9,8 +9,8 @@ import { ensureTaskUsageTable } from "../usage/task-usage.repository.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-/** Multi-worker leases / fencing + task_usage + chat rotation budget. */
-export const SCHEMA_USER_VERSION = 5;
+/** Multi-worker leases / fencing + task_usage + chat rotation + hook followup ack. */
+export const SCHEMA_USER_VERSION = 7;
 
 let dbInstance: DatabaseSync | null = null;
 
@@ -83,6 +83,21 @@ export function migrateDatabase(db: DatabaseSync): void {
   // Always ensure new columns exist even when version already bumped
   // (e.g. v2→v3 pid) without re-failing closed tasks.
   ensureLegacyBaseTables(db);
+  if (tableExists(db, "handoff_tasks")) {
+    addColumnIfMissing(db, "handoff_tasks", "workspace_root", "workspace_root TEXT");
+    addColumnIfMissing(
+      db,
+      "handoff_tasks",
+      "cursor_followup_at",
+      "cursor_followup_at TEXT"
+    );
+    addColumnIfMissing(
+      db,
+      "handoff_tasks",
+      "cursor_wait_notified_at",
+      "cursor_wait_notified_at TEXT"
+    );
+  }
   if (tableExists(db, "worker_state")) {
     addColumnIfMissing(db, "worker_state", "pid", "pid INTEGER");
     addColumnIfMissing(
@@ -202,6 +217,18 @@ export function migrateDatabase(db: DatabaseSync): void {
            'DISPATCHING', 'DISPATCHED', 'PROCESSING', 'WAITING_APPROVAL', 'RATE_LIMITED'
          )`
       ).run(now);
+    }
+
+    // v7: stop-hook followup ack — backfill so old terminal rows are not re-notified.
+    if (tableExists(db, "handoff_tasks") && version < 7) {
+      db.prepare(
+        `UPDATE handoff_tasks
+         SET cursor_followup_at = COALESCE(completed_at, created_at)
+         WHERE cursor_followup_at IS NULL
+           AND status IN (
+             'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'READY_BUT_CURSOR_IDLE'
+           )`
+      ).run();
     }
 
     db.exec(`PRAGMA user_version = ${SCHEMA_USER_VERSION}`);
