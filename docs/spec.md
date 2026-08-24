@@ -54,14 +54,16 @@ Không đặt mục tiêu V1 là unattended production service 24/7.
 MVP bắt buộc tuân thủ:
 
 ```text
-NO OpenAI Responses API inference
-NO Codex
+NO OpenAI Responses / Chat Completions API as the worker inference path
+NO Codex as the production worker (ChatGPT Web Chat + Cursor plugin only)
 NO scraping ChatGPT assistant output
 NO parsing assistant DOM
 NO auto bypass CAPTCHA
 NO auto bypass confirmation
 NO rate-limit bypass
 ```
+
+**Codex CLI spike (2026-08-24):** spec originally listed a hard `NO Codex`. Production workers stay on Chat (Work/Codex share a credit pool — 2026-08-18). A parallel, non-version spike of `codex exec` as an alternative dispatcher is allowed; it must not become the default until a live credit/concurrency probe passes. Contract, kill criteria, and ranking **D > C > A >>> B**: [codex-cli-worker.md](codex-cli-worker.md). API-key Codex (Platform billing) remains forbidden as the worker path.
 
 Sử dụng:
 
