@@ -1,6 +1,6 @@
 # ADR-004 — Dispatch fence placement vs resource attachment
 
-**Status:** Accepted (pending PR #5 implementation)  
+**Status:** Accepted (implement in v0.6 single PR, Phase C)  
 **Date:** 2026-08-29
 
 ## Context
@@ -56,7 +56,7 @@ Attachment failure **after** fence should not occur if ordering is correct.
 
 ## Consequences
 
-- PR #5 must refactor `worker.ts` ordering — not only add `composer-attach.ts`.
+- Phase C of v0.6 PR must refactor `worker.ts` ordering — not only add `composer-attach.ts`.
 - `markDispatchStarted` name may stay; semantics = “TASK_ID send imminent,” not “any prep started.”
 - E2E and unit tests must cover pre-fence requeue on `CHIP_MISMATCH` / `UPLOAD_TIMEOUT`.
 
