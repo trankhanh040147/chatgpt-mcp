@@ -3,6 +3,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { basename, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { ulid } from "ulid";
 import { HandoffFileError, type HandoffTaskFile } from "./task.types.js";
+import { writeResourceSnapshot } from "./snapshot-store.js";
 
 export const MAX_FILES_PER_TASK = 10;
 export const MAX_BYTES_PER_FILE = 256 * 1024;
@@ -38,10 +39,11 @@ export function resolveWorkspaceRoot(): string {
   }
 }
 
-/** Validate + load all requested files against the persisted workspace root. Throws on any failure — no partial insert. */
-export function validateAndLoadFiles(
+/** Validate + snapshot all requested files. Throws on any failure — no partial insert. */
+export function validateAndSnapshotFiles(
   paths: string[],
   workspaceRoot: string,
+  taskId: string,
   now: string
 ): HandoffTaskFile[] {
   if (paths.length > MAX_FILES_PER_TASK) {
@@ -113,11 +115,13 @@ export function validateAndLoadFiles(
     }
 
     const sha256 = createHash("sha256").update(buf).digest("hex");
+    const fileId = `f_${ulid()}`;
+    const snapshotPath = writeResourceSnapshot(taskId, fileId, buf);
     results.push({
-      fileId: `f_${ulid()}`,
+      fileId,
       displayName: basename(relPosix),
       relativePath: relPosix,
-      sourcePath: realCandidate,
+      snapshotPath,
       sizeBytes: lst.size,
       sha256,
       mediaType: "text/plain",

@@ -82,7 +82,8 @@ Cursor handoff_get_result → continue work
 | `handoff_create_task` | Coding agent | Create task → `QUEUED` (optional `clientSessionId`) |
 | `handoff_get_task_status` | Both | Poll status without full result |
 | `handoff_get_result` | Cursor | Read completed answer |
-| `handoff_get_task` | ChatGPT | Load full prompt + context |
+| `handoff_get_task` | ChatGPT | Load full prompt + context + file manifest |
+| `handoff_read_file` | ChatGPT | Read one task-scoped evidence file (lazy; `fileId` only) |
 | `handoff_submit_result` | ChatGPT | Write answer → `COMPLETED` |
 
 ### Task status (simplified)

@@ -1,9 +1,28 @@
-# `.planning/` — agent working memory
+# `.planning/` — product planning
 
-planning-with-files session plans only. **Not** product documentation.
+**Version ladder:** [ROADMAP.md](ROADMAP.md)  
+**Active spec:** [active/](active/) (one authoritative spec per active version)  
+**Experiments:** [experiments/](experiments/) — unknowns + evidence (not committed architecture)  
+**Decisions:** [decisions/](decisions/) — ADRs after evidence  
+**Archive:** [archive/](archive/) — shipped or absorbed milestones  
 
-- Active pointer: `.active_plan`
-- Each initiative: `<YYYY-MM-DD-slug>/{task_plan,findings,progress}.md`
-- Version / milestone authority: [`docs/roadmap.md`](../docs/roadmap.md)
+**Public mirror:** [`docs/roadmap.md`](../docs/roadmap.md)
 
-At session start: read `.active_plan` → active `progress.md` → `task_plan.md` → confirm milestone in `docs/roadmap.md`.
+## Lifecycle
+
+```text
+IDEA → SPIKE → PROPOSED → ACTIVE → SHIP-BAR → SHIPPED
+```
+
+| Layer | Says |
+|-------|------|
+| ROADMAP | WHAT + WHY + ORDER |
+| active/*.md | HOW + acceptance criteria |
+| experiments/*.md | UNKNOWN + evidence plan |
+| decisions/ADR-*.md | DECISION |
+
+## Session plans (legacy)
+
+Dated folders (`2026-08-*-*/`) are agent working memory from past initiatives. They are **not** version SSOT. Prefer `active/` for current milestone work.
+
+**Active pointer:** `.active_plan`
