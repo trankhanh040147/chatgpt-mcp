@@ -1,30 +1,31 @@
 # ADR-003 — Resource transport selection
 
-**Status:** Proposed (pending benchmark)  
-**Date:** 2026-08-29
+**Status:** Accepted  
+**Date:** 2026-08-29 (updated after review)
 
-## Decision (proposed)
+## Decision
 
-**Agent chooses context; runtime chooses transport.** Transports are adapters over the same immutable resource manifest:
+**Agent chooses context; runtime chooses transport.**
 
-- `NativeAttachmentTransport` — **initial production** for ChatGPT web worker
-- `McpResourceTransport` — lazy read (tool façade shipped; MCP Resource primitive experimental)
-- `ContextPackTransport` — benchmark candidate
-- ZIP — benchmark only; not default abstraction
+| Transport | Role in v0.6 |
+|-----------|----------------|
+| `NativeAttachmentTransport` | **Production ship bar** — guaranteed delivery as model input |
+| `McpResourceTransport` (tool façade) | Shipped; **not** production substitute for attach |
+| `ContextPackTransport` | Post-0.6 experiment |
+| ZIP | Experiment only |
 
-Automatic routing deferred until experiment matrix has evidence.
+**No silent fallback:** if native attach fails → fail closed. Do **not** auto-route to MCP read.
 
-## Context
+Rationale: v0.6 goal is *runtime guarantees selected resources are delivered*, not merely that ChatGPT *can* pull them via tool. Native attachment makes files direct turn input; MCP lazy read is pull-based and model-dependent.
 
-Research compared native attach, context-pack, MCP lazy, MCP embedded, and ZIP. No production auto-policy until probes complete.
+Automatic routing deferred until post-0.6 benchmark evidence.
 
 ## Consequences
 
-- v0.6 ship bar = resource core + **native attach** E2E
-- MCP `handoff_read_file` remains available; not required for web worker ship bar
-- Experiments live in `.planning/experiments/` until promoted here
+- E2E must prove native path with nonce — not MCP read (see active spec).
+- `handoff_read_file` stays for Codex spike / experiments; web worker ship bar = attach.
 
-## Open questions
+## Open questions (post-0.6)
 
-- Does ChatGPT consume MCP `ResourceLink` / `EmbeddedResource` reliably?
-- Context-pack vs N native chips for 10×20KB code files?
+- MCP Resource primitive (`ResourceLink`) reliability on ChatGPT host
+- Context-pack vs N native chips for many small files
