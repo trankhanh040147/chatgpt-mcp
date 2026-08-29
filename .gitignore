@@ -10,3 +10,4 @@ logs/
 .DS_Store
 .gitnexus/
 *-handoff-*.zip
+*.tgz

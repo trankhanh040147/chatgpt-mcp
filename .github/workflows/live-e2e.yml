@@ -1,0 +1,79 @@
+name: Live E2E
+
+# Self-hosted runner with real Chrome + ChatGPT session.
+# NEVER trigger on pull_request — untrusted workflow code can read browser credentials.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Trusted commit SHA, tag, or branch (must resolve to main history)
+        required: true
+        default: main
+      mode:
+        description: Test mode
+        required: true
+        default: reliability
+        type: choice
+        options:
+          - reliability
+          - reliability-20
+          - dual
+
+concurrency:
+  group: live-chatgpt-e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on:
+      - self-hosted
+      - macOS
+      - chatgpt-mcp-live
+    timeout-minutes: 30
+    steps:
+      - name: Fetch repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Resolve trusted SHA
+        id: trust
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: bash scripts/ci-validate-trusted-ref.sh
+
+      - name: Checkout trusted commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ steps.trust.outputs.trusted_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Preflight
+        run: npm run check
+
+      - name: Reliability
+        if: inputs.mode == 'reliability'
+        run: npm run e2e:reliability
+
+      - name: Reliability x20
+        if: inputs.mode == 'reliability-20'
+        run: npm run e2e:reliability:20
+
+      - name: Dual worker
+        if: inputs.mode == 'dual'
+        run: npm run e2e:dual

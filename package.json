@@ -13,8 +13,18 @@
     "chatgpt-mcp": "dist/index.js",
     "handoff": "dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc && mkdir -p dist/db dist/dashboard dist/config && cp src/db/schema.sql dist/db/schema.sql && cp config/model-prices.json dist/config/model-prices.json && rm -rf dist/dashboard/public && cp -R src/dashboard/public dist/dashboard/public",
+    "test": "npm run test:unit",
+    "test:unit": "npm run test:leases && npm run test:ops && npm run test:hook-ack && npm run test:usage && npm run test:create-worker && npm run test:agent-policy && npm run test:files && npm run test:rotation",
+    "check:unit": "npm run typecheck && npm run test:unit",
+    "verify": "npm run check:unit && npm run build",
+    "prepack": "npm run build",
+    "package:check": "npm pack --dry-run",
+    "package:smoke": "bash scripts/ci-package-smoke.sh",
+    "build": "tsc && mkdir -p dist/db dist/dashboard dist/config && cp src/db/schema.sql dist/db/schema.sql && cp config/model-prices.json dist/config/model-prices.json && rm -rf dist/dashboard/public && cp -R src/dashboard/public dist/dashboard/public && node scripts/add-bin-shebang.mjs",
     "start": "tsx scripts/start.ts",
     "dev": "tsx src/index.ts",
     "mcp": "node dist/index.js mcp",
@@ -48,7 +58,7 @@
     "chrome-cdp": "node scripts/start-chrome-cdp.mjs"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.14"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

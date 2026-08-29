@@ -16,16 +16,20 @@ HEALTH_URL  ?= http://127.0.0.1:$(HTTP_PORT)
 
 HANDOFF_PATHS := \
 	README.md \
+	CONTRIBUTING.md \
+	LICENSE \
 	Makefile \
 	package.json \
+	package-lock.json \
 	tsconfig.json \
 	.gitignore \
 	.env.example \
 	AGENTS.md \
 	CLAUDE.md \
+	.github \
+	config \
 	src \
 	docs \
-	cursor \
 	scripts \
 	.cursor \
 	.planning

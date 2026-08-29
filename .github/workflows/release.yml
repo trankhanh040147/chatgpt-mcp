@@ -1,0 +1,279 @@
+name: Release
+
+# Manual release: pick semver bump → Live E2E gate → version commit + tag → package → approval → publish.
+# Do NOT push tags manually; this workflow creates tags from verified main commits only.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semver bump
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      e2e_mode:
+        description: Live E2E mode (self-hosted Mac — must pass before publish)
+        required: true
+        default: reliability
+        type: choice
+        options:
+          - reliability
+          - reliability-20
+          - dual
+
+concurrency:
+  group: release-chatgpt-mcp
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-main:
+    name: Resolve main HEAD
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.trust.outputs.trusted_sha }}
+    steps:
+      - name: Fetch main
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve trusted SHA
+        id: trust
+        env:
+          INPUT_REF: main
+        run: bash scripts/ci-validate-trusted-ref.sh
+
+  live-e2e:
+    name: Live E2E gate
+    needs: resolve-main
+    runs-on:
+      - self-hosted
+      - macOS
+      - chatgpt-mcp-live
+    timeout-minutes: 30
+    steps:
+      - name: Fetch repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Resolve trusted SHA
+        id: trust
+        env:
+          INPUT_REF: ${{ needs.resolve-main.outputs.sha }}
+        run: bash scripts/ci-validate-trusted-ref.sh
+
+      - name: Checkout trusted commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ steps.trust.outputs.trusted_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Preflight
+        run: npm run check
+
+      - name: Reliability
+        if: inputs.e2e_mode == 'reliability'
+        run: npm run e2e:reliability
+
+      - name: Reliability x20
+        if: inputs.e2e_mode == 'reliability-20'
+        run: npm run e2e:reliability:20
+
+      - name: Dual worker
+        if: inputs.e2e_mode == 'dual'
+        run: npm run e2e:dual
+
+  bump-and-tag:
+    name: Bump version and tag
+    needs: [resolve-main, live-e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      - name: Checkout release base
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.resolve-main.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Ensure main has not moved
+        shell: bash
+        run: |
+          git fetch origin main
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            echo "main advanced during Live E2E; re-run Release workflow" >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Bump version
+        run: npm version ${{ inputs.bump }} --no-git-tag-version
+
+      - name: Commit, tag, and push
+        id: meta
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore: release ${TAG}"
+          git tag "$TAG"
+          git push origin HEAD:main
+          git push origin "$TAG"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  prepare:
+    name: Prepare release artifact
+    needs: bump-and-tag
+    runs-on: ubuntu-latest
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      tag: ${{ needs.bump-and-tag.outputs.tag }}
+      version: ${{ needs.bump-and-tag.outputs.version }}
+      sha: ${{ needs.bump-and-tag.outputs.sha }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.bump-and-tag.outputs.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Pin npm 11
+        run: npm install --global npm@11
+
+      - name: Install
+        run: npm ci
+
+      - name: Verify release commit is on main
+        shell: bash
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$(git rev-parse HEAD)" origin/main; then
+            echo "Release commit is not on origin/main" >&2
+            exit 1
+          fi
+
+      - name: Check version matches tag
+        shell: bash
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          TAG="${{ needs.bump-and-tag.outputs.tag }}"
+          TAG_VER="${TAG#v}"
+          test "$PKG" = "$TAG_VER"
+
+      - name: Unit check (no build)
+        run: npm run check:unit
+
+      - name: Pack, smoke, and SHA256
+        id: pack
+        shell: bash
+        run: |
+          npm pack
+          TARBALL="$(ls chatgpt-mcp-*.tgz)"
+          sha256sum "$TARBALL" > "$TARBALL.sha256"
+          bash scripts/ci-package-smoke.sh "$TARBALL"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-package
+          path: |
+            ${{ steps.pack.outputs.tarball }}
+            ${{ steps.pack.outputs.tarball }}.sha256
+          retention-days: 7
+
+  publish:
+    name: Publish
+    needs: [bump-and-tag, prepare]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
+        with:
+          name: release-package
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Pin npm 11
+        run: npm install --global npm@11
+
+      - name: Resolve tarball path
+        id: artifact
+        shell: bash
+        run: |
+          TARBALL="$(ls chatgpt-mcp-*.tgz)"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Attest release tarball
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: ${{ steps.artifact.outputs.tarball }}
+
+      - name: Publish to npm
+        run: npm publish "${{ steps.artifact.outputs.tarball }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TARBALL="${{ steps.artifact.outputs.tarball }}"
+          TAG="${{ needs.bump-and-tag.outputs.tag }}"
+          SHA="${{ needs.bump-and-tag.outputs.sha }}"
+          gh release create "$TAG" \
+            "$TARBALL" \
+            "$TARBALL.sha256" \
+            --generate-notes \
+            --verify-tag \
+            --notes "Commit: ${SHA}"$'\n'"Node: 24 · npm: 11"

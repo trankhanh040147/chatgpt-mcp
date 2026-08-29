@@ -1,7 +1,7 @@
 # chatgpt-mcp
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node.js ≥22.5](https://img.shields.io/badge/node-%3E%3D22.5-brightgreen)](package.json)
+[![Node.js ≥22.14](https://img.shields.io/badge/node-%3E%3D22.14-brightgreen)](package.json)
 [![macOS supported](https://img.shields.io/badge/macOS-supported-0A7-success)](#support-and-limitations)
 [![Linux experimental](https://img.shields.io/badge/Linux-experimental-yellow)](#support-and-limitations)
 
@@ -27,7 +27,7 @@ Delegate selected Cursor tasks to a dedicated ChatGPT Web worker and receive the
 
 ### Prerequisites
 
-- Node.js **22.5+** (built-in `node:sqlite`)
+- Node.js **22.14+** (built-in `node:sqlite`; required for npm OIDC release toolchain)
 - Python 3 (hooks in this repo)
 - Google Chrome / Chromium with CDP on a **dedicated** profile (Chrome 136+ will **not** debug Default)
 - ChatGPT **Developer Mode** + MCP write (plan/workspace permitting)
@@ -204,6 +204,18 @@ A/B quality suite is **frozen** at [docs/benchmark/](docs/benchmark/README.md) (
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Issues: [github.com/trankhanh040147/chatgpt-mcp/issues](https://github.com/trankhanh040147/chatgpt-mcp/issues).
+
+### CI
+
+Pull requests run **Quality** (Node 24 — unit check + tarball smoke), **Compat** (Node 22.14), and **Dependency Review**. Live ChatGPT E2E stays on a dedicated self-hosted Mac.
+
+**Release:** Actions → **Release** workflow → pick patch/minor/major → Live E2E gate → auto tag → npm approval → publish. No manual tag push.
+
+```bash
+npm run check:unit              # typecheck + unit tests
+npm run verify                  # check:unit + build
+npm pack && npm run package:smoke
+```
 
 ## License
 
