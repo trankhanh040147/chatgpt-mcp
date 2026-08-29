@@ -39,8 +39,7 @@ Not a full secret scanner product — no entropy/heuristic beyond shared pattern
 ## Consequences
 
 - v0.6 single PR Phase A: `scanSecretsInBuffer()` in `files.ts` / shared with `sanitize.ts`
-- Unit test: file with embedded `sk-…` rejected at create
-- Native attach E2E uses nonce in file body — must not trip patterns
+- Document as **best-effort secret-content guard**, not DLP guarantee
 
 ## Alternatives rejected
 
