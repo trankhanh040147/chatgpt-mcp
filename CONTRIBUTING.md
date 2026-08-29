@@ -14,7 +14,8 @@ Thanks for interest in chatgpt-mcp.
 npm install
 npm run build
 npm run typecheck
-npm run verify         # typecheck + unit tests + build (CI merge bar)
+npm run check:unit         # typecheck + unit tests (CI merge bar)
+npm run verify             # check:unit + build
 npm run check          # needs CDP Chrome + worker for full green
 ```
 

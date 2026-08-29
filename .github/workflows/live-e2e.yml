@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Trusted commit SHA, tag, or branch (must be on main history)
+        description: Trusted commit SHA, tag, or branch (must resolve to main history)
         required: true
         default: main
       mode:
@@ -34,28 +34,22 @@ jobs:
       - chatgpt-mcp-live
     timeout-minutes: 30
     steps:
-      - name: Checkout
+      - name: Fetch repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
-          ref: ${{ inputs.ref }}
+          ref: main
 
-      - name: Validate trusted ref
-        shell: bash
-        run: |
-          set -euo pipefail
-          REF="${{ inputs.ref }}"
-          git fetch origin main --tags
-          if git merge-base --is-ancestor "$REF" origin/main 2>/dev/null; then
-            echo "Ref is on main history"
-          elif [ "$(git rev-parse "$REF" 2>/dev/null)" = "$(git rev-parse origin/main)" ]; then
-            echo "Ref is main HEAD"
-          elif git rev-parse "$REF" >/dev/null 2>&1 && [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Ref is release tag"
-          else
-            echo "Ref is not trusted (must be main, ancestor of main, or v*.*.* tag)" >&2
-            exit 1
-          fi
+      - name: Resolve trusted SHA
+        id: trust
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: bash scripts/ci-validate-trusted-ref.sh
+
+      - name: Checkout trusted commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ steps.trust.outputs.trusted_sha }}
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0

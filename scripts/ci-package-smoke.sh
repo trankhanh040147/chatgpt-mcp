@@ -25,7 +25,13 @@ npm install "$ROOT/$TARBALL" >/dev/null 2>&1
 
 du -sh node_modules
 
-SMOKE_OUT="$(npx chatgpt-mcp __ci_smoke_invalid__ 2>&1 || true)"
+BIN="./node_modules/.bin/chatgpt-mcp"
+if [ ! -x "$BIN" ]; then
+  echo "CLI bin missing from installed tarball: $BIN" >&2
+  exit 1
+fi
+
+SMOKE_OUT="$("$BIN" __ci_smoke_invalid__ 2>&1 || true)"
 if ! echo "$SMOKE_OUT" | grep -q "Unknown mode"; then
   echo "CLI smoke failed: expected Unknown mode message" >&2
   echo "$SMOKE_OUT" >&2

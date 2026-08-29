@@ -207,11 +207,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Issues: [github.com/trankhanh040147/chat
 
 ### CI
 
-Pull requests run **Quality** (Node 24 — full verify + tarball install smoke), **Compat** (Node 22.14 — build + CLI smoke), and **Dependency Review**. Live ChatGPT E2E stays on a dedicated self-hosted Mac (`workflow_dispatch` only). Release: push tag `v*.*.*` → verified artifact → npm environment approval → publish.
+Pull requests run **Quality** (Node 24 — unit check + tarball smoke), **Compat** (Node 22.14), and **Dependency Review**. Live ChatGPT E2E stays on a dedicated self-hosted Mac.
+
+**Release:** Actions → **Release** workflow → pick patch/minor/major → Live E2E gate → auto tag → npm approval → publish. No manual tag push.
 
 ```bash
-npm run verify                  # local merge bar (typecheck + unit tests + build)
-npm pack && npm run package:smoke # tarball install smoke
+npm run check:unit              # typecheck + unit tests
+npm run verify                  # check:unit + build
+npm pack && npm run package:smoke
 ```
 
 ## License
