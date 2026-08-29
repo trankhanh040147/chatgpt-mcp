@@ -38,7 +38,7 @@ jobs:
       sha: ${{ steps.trust.outputs.trusted_sha }}
     steps:
       - name: Fetch main
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
@@ -59,7 +59,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Fetch repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: main
@@ -71,7 +71,7 @@ jobs:
         run: bash scripts/ci-validate-trusted-ref.sh
 
       - name: Checkout trusted commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.trust.outputs.trusted_sha }}
 
@@ -114,7 +114,7 @@ jobs:
       sha: ${{ steps.meta.outputs.sha }}
     steps:
       - name: Checkout release base
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve-main.outputs.sha }}
           fetch-depth: 0
@@ -168,7 +168,7 @@ jobs:
       sha: ${{ needs.bump-and-tag.outputs.sha }}
     steps:
       - name: Checkout release commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.bump-and-tag.outputs.sha }}
 
