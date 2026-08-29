@@ -1,0 +1,48 @@
+# ADR-005 — Create-time secret content scan
+
+**Status:** Accepted  
+**Date:** 2026-08-29
+
+## Context
+
+v0.6 adds **native attachment**: snapshot bytes upload directly to ChatGPT, bypassing `handoff_read_file()` → `sanitizeSecrets()` on the MCP path.
+
+Filename denylist (`SECRET_NAME_RE`) and read-time sanitize are insufficient:
+
+```ts
+// src/config.ts — allowed extension, not secret filename
+const OPENAI_API_KEY = "sk-...";
+```
+
+would snapshot and attach raw.
+
+## Decision
+
+Scan file **content** for secrets **before snapshot**, using the same pattern set as `sanitize.ts` (`SECRET_PATTERNS`). On match:
+
+```text
+throw HandoffFileError("FILES_SECRET_DETECTED", ...)
+```
+
+Reject the **whole** create — no partial task, no text-only fallback.
+
+Read-time `sanitizeSecrets()` remains defense-in-depth for MCP lazy read.
+
+## Scope (v0.6)
+
+Reuse existing patterns:
+
+- `sk-…`, `ghp_…`, PEM blocks, `Bearer …`, `password=`, `secret=`
+
+Not a full secret scanner product — no entropy/heuristic beyond shared patterns.
+
+## Consequences
+
+- PR #4: add `scanSecretsInBuffer()` in `files.ts` / shared with `sanitize.ts`
+- Unit test: file with embedded `sk-…` rejected at create
+- Native attach E2E uses nonce in file body — must not trip patterns
+
+## Alternatives rejected
+
+- Read-time only sanitize — bypassed by native attach
+- Strip secrets at snapshot — silent mutation; fail-closed reject preferred
