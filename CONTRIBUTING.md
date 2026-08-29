@@ -14,6 +14,7 @@ Thanks for interest in chatgpt-mcp.
 npm install
 npm run build
 npm run typecheck
+npm run verify         # typecheck + unit tests + build (CI merge bar)
 npm run check          # needs CDP Chrome + worker for full green
 ```
 
@@ -22,9 +23,10 @@ Do not commit `.env`, SQLite databases, or Chrome profile data.
 ## Pull requests
 
 1. One concern per PR when practical  
-2. Include a short test plan (commands run, platforms)  
-3. Do not claim reliability numbers without linking the harness method (`npm run e2e:reliability`)  
-4. Update docs when behavior or setup steps change  
+2. Run `npm run verify` before opening; use `npm pack && npm run package:smoke` if you changed publish surface  
+3. Include a short test plan (commands run, platforms)  
+4. Do not claim reliability numbers without linking the harness method (`npm run e2e:reliability` or Live E2E workflow)  
+5. Update docs when behavior or setup steps change  
 
 ## Code of conduct
 

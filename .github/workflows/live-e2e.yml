@@ -1,0 +1,85 @@
+name: Live E2E
+
+# Self-hosted runner with real Chrome + ChatGPT session.
+# NEVER trigger on pull_request — untrusted workflow code can read browser credentials.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Trusted commit SHA, tag, or branch (must be on main history)
+        required: true
+        default: main
+      mode:
+        description: Test mode
+        required: true
+        default: reliability
+        type: choice
+        options:
+          - reliability
+          - reliability-20
+          - dual
+
+concurrency:
+  group: live-chatgpt-e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on:
+      - self-hosted
+      - macOS
+      - chatgpt-mcp-live
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref }}
+
+      - name: Validate trusted ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF="${{ inputs.ref }}"
+          git fetch origin main --tags
+          if git merge-base --is-ancestor "$REF" origin/main 2>/dev/null; then
+            echo "Ref is on main history"
+          elif [ "$(git rev-parse "$REF" 2>/dev/null)" = "$(git rev-parse origin/main)" ]; then
+            echo "Ref is main HEAD"
+          elif git rev-parse "$REF" >/dev/null 2>&1 && [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Ref is release tag"
+          else
+            echo "Ref is not trusted (must be main, ancestor of main, or v*.*.* tag)" >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Preflight
+        run: npm run check
+
+      - name: Reliability
+        if: inputs.mode == 'reliability'
+        run: npm run e2e:reliability
+
+      - name: Reliability x20
+        if: inputs.mode == 'reliability-20'
+        run: npm run e2e:reliability:20
+
+      - name: Dual worker
+        if: inputs.mode == 'dual'
+        run: npm run e2e:dual

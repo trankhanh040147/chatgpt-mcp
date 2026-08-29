@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare release artifact
+    runs-on: ubuntu-latest
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Pin npm 11
+        run: npm install --global npm@11
+
+      - name: Install
+        run: npm ci
+
+      - name: Check tag matches package version
+        shell: bash
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "package.json: $PACKAGE_VERSION"
+          echo "git tag:      $TAG_VERSION"
+          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "Tag does not match package.json version"
+            exit 1
+          fi
+
+      - name: Verify
+        run: npm run verify
+
+      - name: Pack, smoke, and SHA256
+        id: pack
+        shell: bash
+        run: |
+          npm pack
+          TARBALL="$(ls chatgpt-mcp-*.tgz)"
+          sha256sum "$TARBALL" > "$TARBALL.sha256"
+          bash scripts/ci-package-smoke.sh "$TARBALL"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-package
+          path: |
+            ${{ steps.pack.outputs.tarball }}
+            ${{ steps.pack.outputs.tarball }}.sha256
+          retention-days: 7
+
+  publish:
+    name: Publish
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
+        with:
+          name: release-package
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Pin npm 11
+        run: npm install --global npm@11
+
+      - name: Resolve tarball path
+        id: artifact
+        shell: bash
+        run: |
+          TARBALL="$(ls chatgpt-mcp-*.tgz)"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Attest release tarball
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: ${{ steps.artifact.outputs.tarball }}
+
+      - name: Publish to npm
+        run: npm publish "${{ steps.artifact.outputs.tarball }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TARBALL="${{ steps.artifact.outputs.tarball }}"
+          gh release create "${GITHUB_REF_NAME}" \
+            "$TARBALL" \
+            "$TARBALL.sha256" \
+            --generate-notes \
+            --verify-tag \
+            --notes "Commit: ${GITHUB_SHA}"$'\n'"Node: 24 · npm: 11"
