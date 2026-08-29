@@ -46,7 +46,8 @@ export interface HandoffTaskFile {
   fileId: string;
   displayName: string;
   relativePath: string;
-  sourcePath: string;
+  /** Absolute path to immutable snapshot copy (not live workspace). */
+  snapshotPath: string;
   sizeBytes: number;
   sha256: string;
   mediaType: string;
@@ -57,7 +58,6 @@ export type HandoffFileErrorCode =
   | "FILE_NOT_ON_TASK"
   | "FILE_NOT_FOUND"
   | "FILE_NOT_ALLOWED"
-  | "FILE_CHANGED_REATTACH"
   | "FILE_TOO_LARGE"
   | "FILES_INVALID";
 

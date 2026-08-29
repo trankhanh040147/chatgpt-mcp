@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { closeSync, fstatSync, lstatSync, openSync, readSync } from "node:fs";
-import { isAbsolute, relative } from "node:path";
 import { ulid } from "ulid";
 import type { TaskRepository } from "./task.repository.js";
 import { sanitizeContext, sanitizeSecrets } from "./sanitize.js";
@@ -11,7 +10,7 @@ import {
   MAX_BYTES_PER_FILE,
   MAX_READ_BYTES,
   resolveWorkspaceRoot,
-  validateAndLoadFiles,
+  validateAndSnapshotFiles,
 } from "./files.js";
 import {
   HandoffFileError,
@@ -42,7 +41,7 @@ export class TaskService {
     let files: HandoffTask["files"] = [];
     if (input.files && input.files.length > 0) {
       workspaceRoot = resolveWorkspaceRoot();
-      files = validateAndLoadFiles(input.files, workspaceRoot, now);
+      files = validateAndSnapshotFiles(input.files, workspaceRoot, id, now);
     }
 
     const task: HandoffTask = {
@@ -227,7 +226,7 @@ export class TaskService {
     });
   }
 
-  /** Frozen single-handle pipeline: open once, hash those bytes, sanitize whole, then range. */
+  /** Read one snapshotted resource; sanitize-on-read for defence in depth. */
   readFile(
     taskId: string,
     fileId: string,
@@ -244,10 +243,6 @@ export class TaskService {
     eof: boolean;
     content: string;
   } {
-    const task = this.repo.getTaskById(taskId);
-    if (!task || !task.workspaceRoot) {
-      throw new HandoffFileError("FILE_NOT_ON_TASK", "File not attached to task");
-    }
     const fileRow = this.repo.getTaskFile(taskId, fileId);
     if (!fileRow) {
       throw new HandoffFileError("FILE_NOT_ON_TASK", "File not attached to task");
@@ -255,22 +250,18 @@ export class TaskService {
 
     let lst;
     try {
-      lst = lstatSync(fileRow.sourcePath);
+      lst = lstatSync(fileRow.snapshotPath);
     } catch {
-      throw new HandoffFileError("FILE_NOT_FOUND", "File missing");
+      throw new HandoffFileError("FILE_NOT_FOUND", "Snapshot missing");
     }
     if (lst.isSymbolicLink() || !lst.isFile()) {
       throw new HandoffFileError("FILE_NOT_ALLOWED", "Not a regular file");
-    }
-    const rel = relative(task.workspaceRoot, fileRow.sourcePath);
-    if (rel.startsWith("..") || isAbsolute(rel)) {
-      throw new HandoffFileError("FILE_NOT_ALLOWED", "Escapes workspace root");
     }
     if (lst.size > MAX_BYTES_PER_FILE) {
       throw new HandoffFileError("FILE_TOO_LARGE", "File exceeds cap");
     }
 
-    const fd = openSync(fileRow.sourcePath, "r");
+    const fd = openSync(fileRow.snapshotPath, "r");
     let raw: Buffer;
     try {
       const st = fstatSync(fd);
@@ -286,8 +277,8 @@ export class TaskService {
     const actualHash = createHash("sha256").update(raw).digest("hex");
     if (actualHash !== fileRow.sha256) {
       throw new HandoffFileError(
-        "FILE_CHANGED_REATTACH",
-        "File changed since attach; re-attach required"
+        "FILE_NOT_FOUND",
+        "Snapshot integrity check failed"
       );
     }
 

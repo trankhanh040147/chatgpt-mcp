@@ -137,7 +137,7 @@ async function main() {
     );
   }
 
-  // --- Mutate after create -> FILE_CHANGED_REATTACH ---
+  // --- Mutate workspace after create → snapshot unchanged ---
   {
     const { service } = freshDb(dbDir);
     const path = join(wsDir, "mut.ts");
@@ -145,14 +145,11 @@ async function main() {
     const { taskId } = service.createTask({ type: "research", prompt: "p", cursorConversationId: "c5", files: ["mut.ts"] });
     const task = service.getTask(taskId)!;
     writeFileSync(path, "mutated!!");
-    expectFileError(
-      () => service.readFile(taskId, task.files![0].fileId),
-      "FILE_CHANGED_REATTACH",
-      "reject: mutated file"
-    );
+    const read = service.readFile(taskId, task.files![0].fileId);
+    assert(read.content === "original", "snapshot: workspace mutation does not affect read");
   }
 
-  // --- Delete after create -> FILE_NOT_FOUND ---
+  // --- Delete workspace file after create → snapshot still readable ---
   {
     const { service } = freshDb(dbDir);
     const path = join(wsDir, "del.ts");
@@ -160,10 +157,21 @@ async function main() {
     const { taskId } = service.createTask({ type: "research", prompt: "p", cursorConversationId: "c6", files: ["del.ts"] });
     const task = service.getTask(taskId)!;
     unlinkSync(path);
+    const read = service.readFile(taskId, task.files![0].fileId);
+    assert(read.content === "gone-soon", "snapshot: survives workspace file deletion");
+  }
+
+  // --- Delete snapshot file → FILE_NOT_FOUND ---
+  {
+    const { service } = freshDb(dbDir);
+    writeFileSync(join(wsDir, "snap-del.ts"), "snap");
+    const { taskId } = service.createTask({ type: "research", prompt: "p", cursorConversationId: "c6b", files: ["snap-del.ts"] });
+    const task = service.getTask(taskId)!;
+    unlinkSync(task.files![0].snapshotPath);
     expectFileError(
       () => service.readFile(taskId, task.files![0].fileId),
       "FILE_NOT_FOUND",
-      "reject: deleted file"
+      "reject: deleted snapshot"
     );
   }
 
@@ -291,6 +299,7 @@ async function main() {
       })),
     });
     assert(!serialized.includes(wsDir), "leakage: get_task manifest excludes workspace_root");
+    assert(!serialized.includes("snapshot_path"), "leakage: get_task manifest excludes snapshot_path key");
     assert(!serialized.includes("source_path"), "leakage: get_task manifest excludes source_path key");
 
     try {
