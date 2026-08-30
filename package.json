@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-mcp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Cursor ↔ ChatGPT MCP handoff (portable taskId; Cursor E2E, other hosts experimental)",
   "license": "MIT",
   "repository": {
@@ -66,6 +66,8 @@
     "test:create-worker": "tsx scripts/test-create-worker-registry.ts",
     "test:agent-policy": "tsx scripts/test-agent-policy.ts",
     "test:files": "tsx scripts/test-files.ts",
+    "test:attachment-match": "tsx scripts/test-attachment-match.ts",
+    "e2e:files-attach": "tsx scripts/e2e-files-attach.ts",
     "test:rotation": "tsx scripts/test-rotation.ts",
     "test:worker-ops": "tsx scripts/test-worker-ops.ts",
     "test:chrome-cdp": "node scripts/test-chrome-cdp.mjs",

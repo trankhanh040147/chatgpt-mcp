@@ -37,6 +37,14 @@ export const selectors = {
   rateLimitBanner: ':text("rate limit"), :text("Rate limit"), :text("too many requests")',
   /** Worker URL not accessible to logged-in account */
   chatAccessDenied: ':text("don\'t have access to this conversation")',
+  /** Hidden file input for composer attachments */
+  fileInput: 'input[type="file"]',
+  /** Open attach menu when file input is not directly visible */
+  attachMenuButton:
+    'button[data-testid="composer-plus-btn"], button[aria-label="Attach files"], button[aria-label="Add photos & files"]',
+  /** Attachment chips in composer staging area */
+  attachmentRemoveButton:
+    'button[aria-label^="Remove "], button[aria-label*="Remove file"]',
 } as const;
 
 /** One line only — long dispatch text is truncated by ChatGPT's composer. */

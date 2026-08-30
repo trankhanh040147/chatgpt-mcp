@@ -59,7 +59,9 @@ export type HandoffFileErrorCode =
   | "FILE_NOT_FOUND"
   | "FILE_NOT_ALLOWED"
   | "FILE_TOO_LARGE"
-  | "FILES_INVALID";
+  | "FILES_INVALID"
+  | "FILES_DUPLICATE_BASENAME"
+  | "FILES_SECRET_DETECTED";
 
 export class HandoffFileError extends Error {
   code: HandoffFileErrorCode;

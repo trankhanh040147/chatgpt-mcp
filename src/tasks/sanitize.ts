@@ -7,9 +7,23 @@ const SECRET_PATTERNS: RegExp[] = [
   /secret\s*=\s*\S+/gi,
 ];
 
+function resetPattern(pattern: RegExp): void {
+  pattern.lastIndex = 0;
+}
+
+/** Best-effort create-time guard — not a DLP boundary (ADR-005). */
+export function containsKnownSecrets(text: string): boolean {
+  for (const pattern of SECRET_PATTERNS) {
+    resetPattern(pattern);
+    if (pattern.test(text)) return true;
+  }
+  return false;
+}
+
 export function sanitizeSecrets(text: string): string {
   let sanitized = text;
   for (const pattern of SECRET_PATTERNS) {
+    resetPattern(pattern);
     sanitized = sanitized.replace(pattern, "[REDACTED]");
   }
   return sanitized;

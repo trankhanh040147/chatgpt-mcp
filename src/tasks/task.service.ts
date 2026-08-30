@@ -577,6 +577,8 @@ export class TaskService {
       workerId: string;
       leaseToken: string;
       instanceToken: string;
+      /** When true, fail immediately — no requeue (UPLOAD_REJECTED, cleanup failure). */
+      permanent?: boolean;
     }
   ): void {
     if (opts) {
@@ -585,7 +587,8 @@ export class TaskService {
         opts.workerId,
         opts.leaseToken,
         opts.instanceToken,
-        error
+        error,
+        opts.permanent === true
       );
       if (outcome === "requeued") {
         logTransition("browser-worker", taskId, "DISPATCHING", "QUEUED");

@@ -3,7 +3,7 @@
  * Task-scoped evidence file tests (0.6 D1) — no browser, no ChatGPT.
  *   npx tsx scripts/test-files.ts
  */
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync, unlinkSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -192,6 +192,43 @@ async function main() {
     );
   }
 
+  // --- Duplicate basename (v0.6 Phase A) ---
+  {
+    const { service } = freshDb(dbDir);
+    mkdirSync(join(wsDir, "src"), { recursive: true });
+    mkdirSync(join(wsDir, "tests"), { recursive: true });
+    writeFileSync(join(wsDir, "src", "foo.ts"), "src foo");
+    writeFileSync(join(wsDir, "tests", "foo.ts"), "tests foo");
+    expectFileError(
+      () =>
+        service.createTask({
+          type: "research",
+          prompt: "p",
+          cursorConversationId: "c7b",
+          files: ["src/foo.ts", "tests/foo.ts"],
+        }),
+      "FILES_DUPLICATE_BASENAME",
+      "reject: duplicate display basename"
+    );
+  }
+
+  // --- Secret content guard at create (v0.6 Phase A) ---
+  {
+    const { service } = freshDb(dbDir);
+    writeFileSync(join(wsDir, "secret.ts"), "const k = 'sk-123456789012345678901234';\n");
+    expectFileError(
+      () =>
+        service.createTask({
+          type: "research",
+          prompt: "p",
+          cursorConversationId: "c7c",
+          files: ["secret.ts"],
+        }),
+      "FILES_SECRET_DETECTED",
+      "reject: secret pattern in content"
+    );
+  }
+
   // --- NUL / binary content ---
   {
     const { service } = freshDb(dbDir);
@@ -258,23 +295,24 @@ async function main() {
     assert(r2.eof === true, "range: eof at end");
   }
 
-  // --- Secret spanning the 64 KiB sanitize boundary ---
+  // --- Secret at 64 KiB boundary — create-time guard (v0.6) ---
   {
     const { service } = freshDb(dbDir);
     const secret = "sk-" + "A".repeat(40);
-    const boundary = 65536;
-    const prefixLen = boundary - 10;
-    const content = "x".repeat(prefixLen) + secret + "y".repeat(1000);
+    const prefixLen = 65536 - 10;
+    const content = "x".repeat(prefixLen) + secret + "y".repeat(100);
     writeFileSync(join(wsDir, "boundary.ts"), content);
-    const { taskId } = service.createTask({ type: "research", prompt: "p", cursorConversationId: "c11", files: ["boundary.ts"] });
-    const task = service.getTask(taskId)!;
-    const fileId = task.files![0].fileId;
-    const chunk1 = service.readFile(taskId, fileId, 0, boundary);
-    const chunk2 = service.readFile(taskId, fileId, chunk1.returnedBytes, 262144);
-    assert(!chunk1.content.includes(secret), "boundary: secret absent from chunk1");
-    assert(!chunk2.content.includes(secret), "boundary: secret absent from chunk2");
-    const reconstructed = chunk1.content + chunk2.content;
-    assert(!reconstructed.includes(secret), "boundary: secret absent from reconstruction");
+    expectFileError(
+      () =>
+        service.createTask({
+          type: "research",
+          prompt: "p",
+          cursorConversationId: "c11",
+          files: ["boundary.ts"],
+        }),
+      "FILES_SECRET_DETECTED",
+      "boundary: secret at 64k caught at create"
+    );
   }
 
   // --- get_task / errors / logs: no source_path or workspace_root leakage ---

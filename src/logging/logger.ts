@@ -7,6 +7,7 @@ export type LogComponent =
   | "browser-worker"
   | "browser-broker"
   | "create-worker"
+  | "composer-attach"
   | "http-api"
   | "ops"
   | "worker-controller"
@@ -27,6 +28,10 @@ export type LogEvent =
   | "TASK_FAILED"
   | "TASK_TIMED_OUT"
   | "STATE_TRANSITION"
+  | "RESOURCE_PREPARE_STARTED"
+  | "RESOURCE_ATTACHED"
+  | "RESOURCE_VERIFIED"
+  | "RESOURCE_PREPARE_FAILED"
   | "INFO"
   | "WARN"
   | "ERROR";

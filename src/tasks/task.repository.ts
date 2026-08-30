@@ -1122,7 +1122,8 @@ export class TaskRepository {
     workerId: string,
     leaseToken: string,
     instanceToken: string,
-    error: string
+    error: string,
+    forceFail = false
   ): "requeued" | "failed" | "noop" {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -1143,7 +1144,7 @@ export class TaskRepository {
       }
 
       const retryCount = row.retry_count + 1;
-      if (retryCount < MAX_DISPATCH_RETRIES) {
+      if (!forceFail && retryCount < MAX_DISPATCH_RETRIES) {
         this.db
           .prepare(
             `UPDATE handoff_tasks

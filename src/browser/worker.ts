@@ -4,6 +4,7 @@ import { TaskRepository } from "../tasks/task.repository.js";
 import { TaskService } from "../tasks/task.service.js";
 import { WorkerStateManager } from "./worker-state.js";
 import { ChatGptBrowser } from "./chatgpt.js";
+import { createNativeDeliveryTarget } from "../transport/native-delivery.js";
 import type { UiWriteMutex } from "./ui-write-mutex.js";
 import { log } from "../logging/logger.js";
 import type { WorkerStatus } from "../tasks/task.types.js";
@@ -374,7 +375,7 @@ export class BrowserWorker {
         return;
       }
 
-      // Reversible prep only — open conversation / locate composer (outside mutex).
+      // Reversible prep — open conversation + attach resources (outside fence).
       await browser.openWorkerConversation();
       if (
         !taskService.renewLease(
@@ -394,6 +395,54 @@ export class BrowserWorker {
         });
         this.clearActiveTask(workerState);
         return;
+      }
+
+      await browser.waitUntilComposerIdle();
+
+      const taskFiles = task.files ?? [];
+      if (taskFiles.length > 0) {
+        const transport = createNativeDeliveryTarget(browser.getPage());
+        const prepared = await this.withUiWrite(async () => {
+          this.options.assertBindingFresh?.();
+          return transport.prepare(taskFiles, task.id);
+        });
+
+        if (!prepared.ok) {
+          await this.withUiWrite(async () => {
+            await transport.cleanup();
+          });
+
+          const clean = await transport.isClean();
+          const failOpts = {
+            workerId: this.workerId,
+            leaseToken,
+            instanceToken: this.instanceToken,
+          };
+          const errMsg = `Resource prepare failed: ${prepared.reason}`;
+
+          if (!clean) {
+            taskService.markDispatchFailed(task.id, `${errMsg}; composer not clean`, {
+              ...failOpts,
+              permanent: true,
+            });
+          } else if (prepared.retryable) {
+            taskService.markDispatchFailed(task.id, errMsg, failOpts);
+          } else {
+            taskService.markDispatchFailed(task.id, errMsg, {
+              ...failOpts,
+              permanent: true,
+            });
+          }
+
+          log({
+            event: "WARN",
+            component: "browser-worker",
+            taskId: task.id,
+            message: `${errMsg} (retryable=${prepared.retryable}, clean=${clean})`,
+          });
+          this.clearActiveTask(workerState);
+          return;
+        }
       }
 
       // Lease CAS outside UI mutex (must not stall other actors on DB/MCP).
@@ -437,8 +486,7 @@ export class BrowserWorker {
         return;
       }
 
-      // Wait for composer idle OUTSIDE the mutex — holding it blocks other actors.
-      await browser.waitUntilComposerIdle();
+      // POINT OF NO RETURN — dispatch_started_at set; no automatic redispatch.
       await this.withUiWrite(async () => {
         this.options.assertBindingFresh?.();
         await browser.submitTaskId(task.id, { skipIdleWait: true });

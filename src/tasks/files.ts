@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { basename, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { ulid } from "ulid";
+import { containsKnownSecrets } from "./sanitize.js";
 import { HandoffFileError, type HandoffTaskFile } from "./task.types.js";
 import { writeResourceSnapshot } from "./snapshot-store.js";
 
@@ -52,6 +53,7 @@ export function validateAndSnapshotFiles(
 
   const results: HandoffTaskFile[] = [];
   const seenRel = new Set<string>();
+  const seenBasename = new Set<string>();
   let totalBytes = 0;
 
   for (const raw of paths) {
@@ -109,9 +111,26 @@ export function validateAndSnapshotFiles(
     }
     seenRel.add(relPosix);
 
+    const displayBase = basename(relPosix).toLowerCase();
+    if (seenBasename.has(displayBase)) {
+      throw new HandoffFileError(
+        "FILES_DUPLICATE_BASENAME",
+        "Duplicate display basename rejected"
+      );
+    }
+    seenBasename.add(displayBase);
+
     const buf = readFileSync(realCandidate);
     if (buf.subarray(0, 8192).includes(0)) {
       throw new HandoffFileError("FILES_INVALID", "Binary/NUL content rejected");
+    }
+
+    const textSample = buf.toString("utf8", 0, Math.min(buf.length, 512 * 1024));
+    if (containsKnownSecrets(textSample)) {
+      throw new HandoffFileError(
+        "FILES_SECRET_DETECTED",
+        "Known secret pattern detected in file content"
+      );
     }
 
     const sha256 = createHash("sha256").update(buf).digest("hex");
