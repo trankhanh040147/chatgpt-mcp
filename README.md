@@ -7,7 +7,7 @@
 
 Delegate selected Cursor tasks to a dedicated ChatGPT Web worker and receive the result through MCP — without copying prompts or scraping the ChatGPT DOM.
 
-> **Developer preview** `0.5.0` — not production.  
+> **Developer preview** `0.6.0` — not production.  
 > **macOS** supported · **Ubuntu desktop** experimental · **Windows** not supported.  
 > **Clients:** Cursor E2E · Claude Code / other MCP hosts — experimental (manual poll by `taskId`).  
 > Unofficial — not affiliated with OpenAI or Cursor.
@@ -28,7 +28,6 @@ Delegate selected Cursor tasks to a dedicated ChatGPT Web worker and receive the
 ### Prerequisites
 
 - Node.js **22.14+** (built-in `node:sqlite`; required for npm OIDC release toolchain)
-- Python 3 (hooks in this repo)
 - Google Chrome / Chromium with CDP on a **dedicated** profile (Chrome 136+ will **not** debug Default)
 - ChatGPT **Developer Mode** + MCP write (plan/workspace permitting)
 - Linux experimental: graphical session (`DISPLAY` / `WAYLAND_DISPLAY`); not WSL/headless
@@ -36,38 +35,52 @@ Delegate selected Cursor tasks to a dedicated ChatGPT Web worker and receive the
 ### 1. Install
 
 ```bash
+./scripts/install.sh       # npm ci/install + build + setup + optional npm link
+```
+
+Or step-by-step from a source checkout:
+
+```bash
 npm install
 npm run build
-npm run setup          # ~/.chatgpt-mcp + prints Cursor MCP JSON
+npm run setup          # repo .env + ~/.chatgpt-mcp + workers.json + MCP JSON
 ```
+
+For an installed package, `gptmcp setup` bootstraps only user-scoped state and prints MCP JSON; it does not write a `.env` into your current directory.
 
 Copy the printed JSON into `~/.cursor/mcp.json`, then reload Cursor MCP.
 
-### 2. Configure worker URL
+`npm link` is best-effort (install still succeeds if global prefix is not writable). Fallback from a source checkout: `npm run gptmcp -- …` or `node dist/gptmcp.js …` (avoid `npx gptmcp`, which may resolve a published registry version).
+
+Package install is also supported after publish:
 
 ```bash
-cp .env.example .env
-# set CHATGPT_WORKER_URL=https://chatgpt.com/c/...
+npm install -g chatgpt-mcp
+gptmcp setup
+gptmcp start
 ```
+
+The published package includes the runtime lifecycle scripts required by `gptmcp start`; developer/test scripts remain source-checkout only.
+
+### 2. Connect ChatGPT + assign worker
+
+Prefer **OpenAI Secure MCP Tunnel**. Full steps: [docs/connect-chatgpt.md](docs/connect-chatgpt.md).
+
+Worker chats are managed via the ops dashboard / `gptmcp worker add` (registry: `$CHATGPT_MCP_HOME/data/workers.json`). You do **not** need to hand-edit `CHATGPT_WORKER_URL` for the default A1-S path.
 
 ### 3. Start the stack
 
 ```bash
-npm run start                   # CDP Chrome + remote-mcp (:8790) + worker (:8787)
-# Log into ChatGPT Pro in the CDP window if needed (manual — no login automation)
-# Ctrl+C later stops remote-mcp + worker; Chrome stays open
-
-# other terminal:
-npm run check                   # expect CDP + worker READY
+gptmcp start              # CDP + status-api + remote-mcp + broker
+gptmcp open               # ops dashboard → Assign URL / New chat
+gptmcp status             # exit 0 = healthy
 ```
 
-If ports are already taken, use `./scripts/start-chrome-cdp.sh`, `npm run remote-mcp`, and `npm run worker` separately.
+Daily workflow: `gptmcp start` → `gptmcp open`. When something breaks: `gptmcp doctor` → `gptmcp recover`.
 
-### 4. Connect ChatGPT (first time)
+`make` / npm scripts remain for developers and CI — see `gptmcp help`. Shell completion is generated from CLI metadata: `gptmcp completion fish` or `gptmcp completion bash`.
 
-Prefer **OpenAI Secure MCP Tunnel**. Full steps (Developer Mode, write approval, worker instructions): [docs/connect-chatgpt.md](docs/connect-chatgpt.md).
-
-### 5. First handoff
+### 4. First handoff
 
 In Cursor (with MCP loaded and worker `READY`):
 
@@ -77,7 +90,7 @@ handoff sang ChatGPT: Summarize the architecture of this repo in 5 bullets.
 
 Or say `/chatgpt-mcp` / `chạy task ChatGPT: …`. The agent calls `handoff_create_task` and **ends the turn** (no status-poll loop). User-level Cursor hooks (`~/.cursor/hooks/chatgpt-mcp-*.sh`) plus this repo’s stop hook long-poll and resume for `handoff_get_result`.
 
-**Expected:** `npm run check` shows worker `READY`; after the handoff, `handoff_get_result` returns ChatGPT’s answer (not a scraped DOM dump).
+**Expected:** `gptmcp status` shows worker `READY`; after the handoff, `handoff_get_result` returns ChatGPT’s answer (not a scraped DOM dump).
 
 Other workspaces: keep the user skill/rule (`~/.cursor/skills/chatgpt-mcp`, `~/.cursor/rules/chatgpt-mcp.mdc`) **and** the user hooks above so every Cursor chat gets inject + stop/resume without polling.
 
@@ -141,7 +154,8 @@ See [.env.example](.env.example). Critical variables:
 |----------|-----------------|
 | `CHATGPT_MCP_HOME` | `~/.chatgpt-mcp` — DB + logs root |
 | `CHATGPT_CDP_ENDPOINT` | `http://127.0.0.1:9222` |
-| `CHATGPT_WORKER_URL` | Required — worker chat URL |
+| `HANDOFF_WORKERS_FILE` | `$CHATGPT_MCP_HOME/data/workers.json` — primary A1-S worker registry |
+| `CHATGPT_WORKER_URL` | Legacy single-worker fallback; not required for default A1-S onboarding |
 | `HANDOFF_HTTP_PORT` | `8787` — status API (loopback) |
 | `HANDOFF_REMOTE_MCP_PORT` | `8790` — ChatGPT MCP |
 | `HANDOFF_WAIT_TIMEOUT` | `960` — stop hook seconds (keep ≥ hard timeout) |
@@ -159,7 +173,7 @@ See [.env.example](.env.example). Critical variables:
 | Write / approval blocked | Enable Developer Mode + MCP write for your plan/workspace |
 | Task `TIMED_OUT` / “Approve MCP write” in logs | Often ChatGPT still generating or late submit — [docs/timeouts.md](docs/timeouts.md), not always a missing Allow click |
 
-Diagnostic: `npm run check`
+Diagnostic: `gptmcp doctor`
 
 ## Reliability and benchmarks
 
@@ -171,8 +185,8 @@ A/B quality suite is **frozen** at [docs/benchmark/](docs/benchmark/README.md) (
 
 - [Docs index](docs/README.md)
 - [Roadmap](docs/roadmap.md) — versions & exit criteria (SSOT)
-- [Ops dashboard](docs/dashboard.md) — `make dashboard` / `http://127.0.0.1:8787/dashboard/`
-- [Chat rotation](docs/rotation.md) — max-per-chat + `make rotate-worker`
+- [Ops dashboard](docs/dashboard.md) — `gptmcp open` / `http://127.0.0.1:8787/dashboard/`
+- [Chat rotation](docs/rotation.md) — max-per-chat + `gptmcp worker rotate`
 - [Connect ChatGPT](docs/connect-chatgpt.md) — Secure Tunnel, Developer Mode
 - [Timeouts and late submit](docs/timeouts.md) — `TIMED_OUT` vs MCP approve
 - [Architecture](docs/architecture.md)
@@ -193,13 +207,12 @@ A/B quality suite is **frozen** at [docs/benchmark/](docs/benchmark/README.md) (
 
 | Command | Role |
 |---------|------|
-| `npm run setup` / `start` / `check` | Onboarding + stack + preflight |
+| `gptmcp start` / `status` / `doctor` / `recover` | Public ops UX (preferred) |
+| `gptmcp worker …` | Worker registry + rotation |
+| `gptmcp setup` / `npm run setup` | User bootstrap / source-checkout bootstrap + Cursor MCP JSON |
 | `npm run mcp` | Cursor stdio MCP |
-| `npm run worker` | HTTP `:8787` + CDP dispatcher |
-| `make dashboard-up` | Ops UI at `http://127.0.0.1:8787/dashboard/` |
-| `make rotate-worker ARGS='--id=w2'` | Idle-only new worker chat (restart broker after) |
 | `npm run remote-mcp` | ChatGPT HTTP MCP `:8790/mcp` |
-| `npm run e2e:reliability` | Transport canary |
+| `npm run e2e:reliability` | Transport canary (CI/dev) |
 
 ## Contributing
 

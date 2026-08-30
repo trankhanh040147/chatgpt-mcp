@@ -12,7 +12,7 @@
 | 0.3 | CDP optimize + create-worker | SHIPPED |
 | 0.4 | Ops dashboard | SHIPPED |
 | 0.5 | Agent UX + chat rotation | SHIPPED |
-| 0.6 | **Worker Control Plane** (lite ops + dashboard) | **ACTIVE** |
+| 0.6 | **Worker Control Plane** (lite ops + dashboard + `gptmcp` CLI) | **ACTIVE** |
 | 0.7 | **Handoff Resources** | **ACTIVE** (impl on branch) |
 | 0.8 | Claude host | PLANNED |
 | 0.9 | Result artifacts | CANDIDATE |

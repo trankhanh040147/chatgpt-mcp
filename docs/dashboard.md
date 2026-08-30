@@ -7,13 +7,13 @@ ChatGPT still connects via [connect-chatgpt.md](connect-chatgpt.md) on `:8790/mc
 ## Open
 
 ```bash
-make dashboard-up          # A1-S stack: status-api + remote-mcp + broker
-make dashboard             # print URL only (stack already running)
+gptmcp start                 # A1-S stack: status-api + remote-mcp + broker
+gptmcp open                  # open dashboard in browser
 ```
 
 URL: `http://127.0.0.1:8787/dashboard/`
 
-`make dashboard` does not start services. If the page shows API unreachable, start the stack (`make dashboard-up` or `npm run start`) and confirm `make status`.
+If the page shows API unreachable, run `gptmcp start` and confirm `gptmcp status`.
 
 ## What it covers (0.6 worker ops)
 
@@ -25,16 +25,16 @@ URL: `http://127.0.0.1:8787/dashboard/`
 | Conditions | PROCESS / BROKER / BINDING / URL / SESSION / MCP per worker (`GET /workers/health`); `chatAccessDenied` when ChatGPT shows “don't have access to this conversation” |
 | Chat budget | `tasks_on_chat / max` (default 20); warn at N−1; rotation readiness chips |
 | Tasks | Recent list + drawer (timing, indicators, optional redacted content) |
-| Recover / fail-task | Preview → one-click confirm modal (no typed phrase); CSRF + origin allowlist |
+| Recover / fail-task | Preview → one-click confirm modal (no typed phrase); CSRF + origin allowlist — same ops engine as `gptmcp recover` |
 | Usage | Estimated visible-text tokens; optional reference $ vs Cursor scenario (off by default) |
 
 URL and chat changes run through the **worker control plane** (`POST /ops/workers/*` → journal → broker HTTP on `:18788` by default). Normal dashboard flow: `CONSENT_REQUIRED` → probe → `READY` — **not** `RESTART_REQUIRED`.
 
 **Access denied:** If workers point at chats the CDP Chrome account cannot open, health shows `chatAccessDenied` and the UI recommends **Assign URL** with a new chat URL from that Chrome session.
 
-**Broker down:** If broker ops port is unreachable, worker ops show `BROKER:UNKNOWN` and a banner — use `make restart` (broker stack, not legacy `browser-worker`). Default port is **18788** (not 8788) to avoid clashes with other local dashboards. Check: `lsof -i :18788`.
+**Broker down:** If broker ops port is unreachable, worker ops show `BROKER:UNKNOWN` and a banner — use `gptmcp restart`. Default port is **18788** (not 8788) to avoid clashes with other local dashboards. Check: `lsof -i :18788`.
 
-CLI rotation remains available: [rotation.md](rotation.md).
+CLI rotation: [rotation.md](rotation.md) (`gptmcp worker rotate`).
 
 Tests: `npm run test:ops`, `npm run test:worker-ops`, `npm run test:usage`. Backfill snapshots: `npm run usage:backfill`.
 
@@ -56,3 +56,7 @@ Tests: `npm run test:ops`, `npm run test:worker-ops`, `npm run test:usage`. Back
 ## Out of this surface
 
 Hosted SaaS, SSO, history charts, and auto-scaling stay deferred. Mutations never run from a silent GET. Full desired-state `PATCH WorkerSpec` is deferred — v0.6 uses imperative ops only.
+
+## GPTMCP CLI
+
+User-facing ops live under **`gptmcp`** (not `make`). See `gptmcp help` and `gptmcp help --web`.

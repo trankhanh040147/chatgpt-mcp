@@ -29,7 +29,7 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | Single-CDP multi-tab (A1-S) + create-worker CLI | **0.3.0** | Broker + UI mutex; dual/burst canary; `npm run create-worker` |
 | Ops dashboard | **0.4.0** | Dashboard **0.1–0.3** + usage at `/dashboard/` on status-api |
 | Agent UX + chat rotation | **0.5.0** | Light/Standard/Deep; `HANDOFF_MAX_TASKS_PER_CHAT=20`; idle `rotate-worker` |
-| Worker Ops & Dashboard | **0.6.0** | **Active** — [`.planning/active/0.6-worker-ops.md`](../.planning/active/0.6-worker-ops.md) |
+| Worker Ops & Dashboard | **0.6.0** | **Active** — control plane + **`gptmcp` CLI** — [`.planning/active/0.6-worker-ops.md`](../.planning/active/0.6-worker-ops.md) |
 | Handoff Resources (files → snapshot → native attach) | **0.7.0** | **Active** — [`.planning/active/0.7-handoff-resources.md`](../.planning/active/0.7-handoff-resources.md) |
 
 ## Sequencing principles
@@ -50,7 +50,7 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | **0.3.0** | CDP optimize + assisted create-worker | A1-S `browser-broker`; create-worker CLI (New chat → registry → MCP pause → canary); doctor shared-CDP | Tagged; dual/burst E2E on one CDP; operator can add worker without hand-editing only | Unattended cookie/login; elastic cloud pool; auto-scale workers on queue depth |
 | **0.4.0** | Ops dashboard | Local dashboard **0.1** (health, workers, tasks, troubleshoot); status-api serve + `GET /tasks` | Dashboard 0.1 usable on localhost; diagnose stuck/idle/SESSION_LOST without log diving; tag when hardened | Cloud hosting; auth SSO; create-worker GUI; metrics history DB |
 | **0.5.0** | Agent UX + worker chat rotation | Skill/rule handoff policy (Light/Standard/Deep); **self-regulate context** — rotate worker chat over threshold | Scenario set passes; ≤1 handoff/decision; rotation fail-closed | Host-generic “chooser”; unattended login |
-| **0.6.0** | Worker Ops & Dashboard | Health poll; assign/create URL; auto-canary; kill/recreate; SESSION_LOST heal (confirm) | Dashboard ops without sqlite; broker registry SSOT | Claude host; transport abstraction |
+| **0.6.0** | Worker Ops & Dashboard + public CLI | Health poll; assign/create URL; auto-canary; kill/recreate; SESSION_LOST heal (confirm); **`gptmcp` ops surface** | Dashboard ops without sqlite; broker registry SSOT; **`gptmcp status` exit 0** onboarding path | Claude host; transport abstraction |
 | **0.7.0** | Handoff Resources | Agent-selected files → snapshot; native CDP attach; `handoff_read_file` secondary | Multi-file E2E; fail-closed attach | ZIP; MCP resource URI; auto-routing |
 | **0.8.0** | Claude host | Claude skill/hook; E2E by `taskId` | Documented Claude path | Marketplace / Windows |
 | **0.9.0** | Result artifacts | Symmetric ChatGPT → Cursor file artifacts | TBD | Binary artifacts |
@@ -189,11 +189,26 @@ Recovery: [`docs/rotation.md`](rotation.md).
 
 **Spec:** [`.planning/active/0.6-worker-ops.md`](../.planning/active/0.6-worker-ops.md) · **Impl plan:** [`.planning/active/0.6-worker-ops-impl-plan.md`](../.planning/active/0.6-worker-ops-impl-plan.md) · **ADR:** [ADR-008](../.planning/decisions/ADR-008-worker-ops-dashboard.md)
 
-Dashboard health poll; assign/create chat URL; auto-canary clearing `CONSENT_REQUIRED`; kill/recreate binding; SESSION_LOST heal with confirm modal. Registry SSOT via `HANDOFF_WORKERS_FILE`.
+Dashboard health poll; assign/create chat URL; auto-canary clearing `CONSENT_REQUIRED`; kill/recreate binding; SESSION_LOST heal with confirm modal. Registry SSOT via `HANDOFF_WORKERS_FILE` (default `$CHATGPT_MCP_HOME/data/workers.json`).
+
+#### Public ops UX (shipped baseline)
+
+Single public CLI **`gptmcp`** — intent-based commands, strict args, formal exit codes, `--json` where applicable:
+
+| Area | Notes |
+|------|--------|
+| Lifecycle | `gptmcp start` / `stop` / `restart` — PID ownership under `$CHATGPT_MCP_HOME/logs`, no implicit `npm run build` |
+| Observe → diagnose → repair | `gptmcp status` → `doctor` → `recover` |
+| Workers | `gptmcp worker add` / `rotate` / `inspect` (ops layer, not raw scripts) |
+| Onboarding | `./scripts/install.sh` or `gptmcp setup`; user state under `$CHATGPT_MCP_HOME`; source checkout still seeds repo `.env` via `npm run setup` |
+| Packaging | npm-global ships `dist/` + lifecycle shell assets; `npm run package:smoke` |
+| Completion | `gptmcp completion fish\|bash` from CLI metadata |
+
+**Developer surfaces:** `make` / `npm run` remain for CI and maintainers — not primary onboarding.
 
 Portable create semantics (`clientSessionId` optional, `taskId` authoritative) shipped in the 0.5.x baseline — see [`.planning/archive/0.6-portable-core.md`](../.planning/archive/0.6-portable-core.md).
 
-**This PR:** planning + ladder re-version for review — **implementation** follows on same branch after approval.
+**Remaining for 0.6.0 tag:** worker control plane phases A–F (impl plan), `npm run test:worker-ops`, manual M1–M5.
 
 ### 0.7.0 — Handoff Resources
 
@@ -212,7 +227,7 @@ Symmetric ChatGPT → Cursor artifacts on `handoff_submit_result`.
 ## Current milestone
 
 - **Shipped:** **0.1.0** … **0.5.0** (agent UX + chat rotation).
-- **In progress:** **0.6.0** — Worker Ops & Dashboard (plan review → impl phases A–F).
+- **In progress:** **0.6.0** — Worker Ops & Dashboard; **`gptmcp` CLI + installer baseline landed**; control plane impl phases A–F remain.
 - **Then:** **0.7.0** Handoff Resources; **0.8.0** Claude host; **0.9.0** result artifacts (candidate).
 
 ## Near-term queue
@@ -238,6 +253,7 @@ Symmetric ChatGPT → Cursor artifacts on `handoff_submit_result`.
 
 | Date | Decision | Reason | Supersedes |
 |------|----------|--------|------------|
+| 2026-08-30 | **`gptmcp` = sole public ops UX**; `make` / `npm run` = developer/CI only | Reduce onboarding surface; safe lifecycle (PID ownership, no cwd token leaks); user-scoped `$CHATGPT_MCP_HOME` | Scattered `make up` / script onboarding in README |
 | 2026-08-30 | **0.6 = Worker Ops**; **0.7 = Handoff Resources**; Claude → **0.8**; artifacts → **0.9** | Ops pain (CONSENT/URL/SESSION_LOST) blocks file-attach E2E; ship ops dashboard first | 2026-08-29 ladder (0.6 = Handoff Resources) |
 | 2026-08-29 | **0.6 = Handoff Resources**; absorb portable core; Claude → **0.7**; result artifacts → **0.8** candidate | Portable core already in codebase; consolidate file layer + transport | 0.6 portable + 0.7 add files as separate milestones |
 | 2026-08-18 | Add **0.7.0 add files**; shift Claude host → **0.8.0** | Native composer attachments for selected files; no `read_file` MCP; after portable create API, before a new host | Claude as 0.7.0 |

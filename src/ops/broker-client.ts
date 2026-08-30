@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { chatgptMcpHome, resolveUserPath } from "../config/load-config.js";
+import { join } from "node:path";
 import { resolveBrokerOpsPort } from "./broker-ops-config.js";
 import { log } from "../logging/logger.js";
 
@@ -108,7 +109,8 @@ export class BrokerOpsClient {
 export function resolveBrokerOpsToken(): string {
   const fromEnv = process.env.HANDOFF_BROKER_OPS_TOKEN?.trim();
   if (fromEnv) return fromEnv;
-  const tokenPath = resolve(process.cwd(), "logs/broker-ops.token");
+  const logDir = resolveUserPath(process.env.LOG_DIR?.trim() || join(chatgptMcpHome(), "logs"));
+  const tokenPath = join(logDir, "broker-ops.token");
   if (existsSync(tokenPath)) {
     try {
       return readFileSync(tokenPath, "utf-8").trim();

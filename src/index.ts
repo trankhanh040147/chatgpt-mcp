@@ -1,6 +1,6 @@
 import { config as loadEnv } from "dotenv";
-import { mkdirSync, appendFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { configureLogger, log } from "./logging/logger.js";
 import { startMcpServer } from "./mcp/server.js";
@@ -16,7 +16,7 @@ import {
   loadWorkersTopology,
   validateWorkersTopology,
 } from "./config/workers-topology.js";
-import { loadConfig, type AppConfig } from "./config/load-config.js";
+import { loadConfig, remoteMcpTokenFilePath, type AppConfig } from "./config/load-config.js";
 
 export { loadConfig, resolveUserPath, chatgptMcpHome } from "./config/load-config.js";
 export type { AppConfig } from "./config/load-config.js";
@@ -268,12 +268,11 @@ async function main(): Promise<void> {
     let token = config.remoteMcpToken;
     if (!token) {
       token = randomBytes(32).toString("hex");
-      appendFileSync(
-        resolve(".env"),
-        `\nHANDOFF_REMOTE_MCP_TOKEN=${token}\n`
-      );
+      const tokenPath = remoteMcpTokenFilePath();
+      mkdirSync(dirname(tokenPath), { recursive: true });
+      writeFileSync(tokenPath, `${token}\n`, { encoding: "utf8", mode: 0o600 });
       console.error(
-        `Generated a new HANDOFF_REMOTE_MCP_TOKEN and appended it to .env:\n${token}\n` +
+        `Generated HANDOFF_REMOTE_MCP_TOKEN at ${tokenPath}:\n${token}\n` +
           "Use this as the bearer token when connecting ChatGPT's connector."
       );
     }

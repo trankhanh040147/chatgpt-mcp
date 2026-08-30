@@ -9,18 +9,18 @@ Consent model A still applies: no auto-login / auto-approve MCP writes.
 1. **Measure** — `tasks_on_chat` increments once per successful dispatch (message sent), including later FAILED/TIMED_OUT. Bound to `{worker_id, chat_url}`; survives broker restart.
 2. **Threshold** — at `== N` the worker is excluded from claims (`THRESHOLD_REACHED`). Dashboard shows `n/N` (warn at N−1).
 3. **Rotate** — idle-only. Reserve (`ROTATION_PENDING`) → create Chat+Cursor chat → commit new URL then reset counter → `CONSENT_REQUIRED` and/or `RESTART_REQUIRED`.
-4. **Restart** — operator restarts the broker (`make dashboard-up` / `start-broker-stack.sh`). Rotation does **not** self-restart.
+4. **Restart** — operator restarts the broker (`gptmcp restart` or `make dashboard-up`). Rotation does **not** self-restart.
 
 ## Operator recovery
 
 ```bash
 # Manual rotate (refuses if the worker has an in-flight task)
-make rotate-worker ARGS='--id=w2'
-# or: npm run rotate-worker -- --id=w2
+gptmcp worker rotate --id=w2
+# legacy: make rotate-worker ARGS='--id=w2'
 
 # After CONSENT_REQUIRED: approve write tools in the new ChatGPT chat, then:
-make dashboard-up          # restart broker so it binds the new /c/… URL
-make status                # worker READY; budget 0/N
+gptmcp restart               # restart broker so it binds the new /c/… URL
+gptmcp status                # worker READY; budget 0/N
 ```
 
 | Readiness | Meaning | Action |

@@ -236,6 +236,26 @@ export class WorkerController {
     return { taskIds };
   }
 
+  /** Cancel active worker op + fail in-flight handoffs (dashboard Clear stuck). */
+  clearStuck(workerId: string): {
+    operationId: string | null;
+    taskIds: string[];
+  } {
+    void this.broker.cancelUi(workerId).catch(() => undefined);
+    const operationId = this.cancelActiveOperation(workerId, "cleared by operator");
+    const taskIds = this.taskRepo.failInFlightTasksForWorker(
+      workerId,
+      "cleared by operator"
+    );
+    log({
+      event: "INFO",
+      component: "worker-controller",
+      message: `WORKER_CLEAR_STUCK worker=${workerId} op=${operationId ?? "none"} tasks=${taskIds.join(",")}`,
+      data: { workerId, operationId, taskIds },
+    });
+    return { operationId, taskIds };
+  }
+
   listActiveOperations(): WorkerOperation[] {
     return this.opsRepo.listActive();
   }

@@ -242,52 +242,96 @@ function workerOpsBlocked(w) {
   return Boolean(w.activeOperation || w.stuckInFlightTaskId);
 }
 
+/** Which worker action buttons to show — varies by healthState / readiness. */
+function deriveWorkerActionBar(w, opts = {}) {
+  const stuck = workerOpsBlocked(w);
+  const blocked = w.healthState === "BLOCKED";
+  const sessionLost = w.status === "SESSION_LOST";
+  const needsRetry =
+    w.recommendedAction === "RETRY_VERIFY" ||
+    w.readinessReason === "CONSENT_REQUIRED" ||
+    w.readinessReason === "MCP_APPROVAL_REQUIRED";
+
+  if (blocked) {
+    return {
+      clearStuck: stuck,
+      retry: needsRetry && !sessionLost,
+      recreate: sessionLost || w.recommendedAction === "RECREATE_CHAT",
+      assign: true,
+      newChat: false,
+      toggle: false,
+      remove: opts.canRemove,
+    };
+  }
+
+  const mcpDegraded =
+    w.healthState === "DEGRADED" &&
+    w.readinessReason &&
+    String(w.readinessReason).startsWith("MCP_");
+
+  if (mcpDegraded) {
+    return {
+      clearStuck: stuck,
+      retry: true,
+      recreate: w.recommendedAction === "RECREATE_CHAT",
+      assign: workerNeedsUrlAssign(w),
+      newChat: true,
+      toggle: true,
+      remove: opts.canRemove && !stuck,
+    };
+  }
+
+  return {
+    clearStuck: stuck,
+    retry: needsRetry,
+    recreate: sessionLost || w.recommendedAction === "RECREATE_CHAT",
+    assign: true,
+    newChat: true,
+    toggle: true,
+    remove: opts.canRemove && !stuck,
+  };
+}
+
 function renderWorkerActions(w, opts = {}) {
   const id = escapeHtml(w.id);
-  const sessionLost = w.status === "SESSION_LOST";
-  const blocked = workerOpsBlocked(w);
+  const bar = deriveWorkerActionBar(w, opts);
   const parts = [];
-  if (w.activeOperation) {
+
+  if (bar.clearStuck) {
     parts.push(
-      `<button type="button" class="danger" data-worker-action="cancel" data-worker-id="${id}">Cancel stuck op</button>`
+      `<button type="button" class="danger" data-worker-action="clear-stuck" data-worker-id="${id}">Clear stuck</button>`
     );
   }
-  if (w.stuckInFlightTaskId) {
-    parts.push(
-      `<button type="button" class="danger" data-worker-action="fail-stuck" data-worker-id="${id}">Fail stuck handoff</button>`
-    );
-  }
-  if (sessionLost || w.recommendedAction === "RECREATE_CHAT") {
+  if (bar.recreate) {
     parts.push(
       `<button type="button" class="danger" data-worker-action="kill" data-worker-id="${id}">Recreate chat…</button>`
     );
   }
-  if (
-    w.recommendedAction === "RETRY_VERIFY" ||
-    w.readinessReason === "CONSENT_REQUIRED" ||
-    w.readinessReason === "MCP_APPROVAL_REQUIRED"
-  ) {
+  if (bar.retry) {
     parts.push(
       `<button type="button" class="primary" data-worker-action="retry" data-worker-id="${id}">Retry verify</button>`
     );
   }
-  const assignPrimary = workerNeedsUrlAssign(w);
-  parts.push(
-    `<button type="button" data-worker-action="assign" data-worker-id="${id}"${assignPrimary ? " class=\"primary\"" : ""}${blocked ? " disabled title=\"Fail stuck handoff or cancel op first\"" : ""}>Assign URL…</button>`
-  );
-  const createHint = w.stuckInFlightTaskId || w.activeOperation
-    ? " title=\"Clears stuck handoff/op and starts new chat\""
-    : "";
-  parts.push(
-    `<button type="button" data-worker-action="create" data-worker-id="${id}"${createHint}>New chat…</button>`
-  );
-  const enabled = w.errorCode !== "DISABLED";
-  parts.push(
-    `<button type="button" data-worker-action="toggle" data-worker-id="${id}" data-enabled="${enabled ? "0" : "1"}">${enabled ? "Disable…" : "Enable…"}</button>`
-  );
-  if (opts.canRemove) {
+  if (bar.assign) {
+    const assignPrimary = workerNeedsUrlAssign(w);
     parts.push(
-      `<button type="button" class="danger" data-worker-action="remove" data-worker-id="${id}"${blocked ? " disabled title=\"Fail stuck handoff or cancel op first\"" : ""}>Remove…</button>`
+      `<button type="button" data-worker-action="assign" data-worker-id="${id}"${assignPrimary ? " class=\"primary\"" : ""}>Assign URL…</button>`
+    );
+  }
+  if (bar.newChat) {
+    parts.push(
+      `<button type="button" data-worker-action="create" data-worker-id="${id}">New chat…</button>`
+    );
+  }
+  if (bar.toggle) {
+    const enabled = w.errorCode !== "DISABLED";
+    parts.push(
+      `<button type="button" data-worker-action="toggle" data-worker-id="${id}" data-enabled="${enabled ? "0" : "1"}">${enabled ? "Disable…" : "Enable…"}</button>`
+    );
+  }
+  if (bar.remove) {
+    parts.push(
+      `<button type="button" class="danger" data-worker-action="remove" data-worker-id="${id}">Remove…</button>`
     );
   }
   return parts.join("");
@@ -464,6 +508,20 @@ async function runWorkerFailStuck(workerId) {
     const result = await postOps("/ops/workers/release-stuck-task", {
       workerId,
     });
+    showOpsResult(result);
+    await tick();
+  } catch (err) {
+    showOpsResult(err instanceof Error ? err.message : String(err));
+  } finally {
+    opsInFlight = false;
+  }
+}
+
+async function runWorkerClearStuck(workerId) {
+  if (opsInFlight) return;
+  opsInFlight = true;
+  try {
+    const result = await postOps("/ops/workers/clear-stuck", { workerId });
     showOpsResult(result);
     await tick();
   } catch (err) {
@@ -1059,7 +1117,7 @@ function renderWorkers(workers, showReference) {
         </div>
         ${w.healthState ? `<div class="row"><span class="muted">Ops health</span><span class="pill ${healthStateClass(w.healthState)} health-state">${escapeHtml(w.healthState)}</span></div>` : ""}
         ${formatActiveOperation(w.activeOperation)}
-        ${w.stuckInFlightTaskId ? `<div class="worker-op-banner worker-stuck-banner"><strong>Handoff stuck</strong> — <code>${escapeHtml(w.stuckInFlightTaskId)}</code> blocks New chat / Remove. Click <em>Fail stuck handoff</em>.</div>` : ""}
+        ${w.stuckInFlightTaskId ? `<div class="worker-op-banner worker-stuck-banner"><strong>Handoff stuck</strong> — <code>${escapeHtml(w.stuckInFlightTaskId)}</code>${w.activeOperation ? " · worker op in flight" : ""}. Click <em>Clear stuck</em>.</div>` : ""}
         ${w.chatAccessDenied ? `<div class="worker-op-banner" style="border-color:rgba(200,72,48,.45);background:rgba(200,72,48,.08)"><strong>Chat access denied</strong> — use <em>Assign URL…</em> with a chat from CDP Chrome.</div>` : ""}
         ${w.readinessReason === "ROTATION_PENDING" ? `<div class="worker-op-banner" style="border-color:rgba(200,72,48,.45);background:rgba(200,72,48,.08)"><strong>Rotation in progress</strong> — wait for the op banner or <em>Cancel stuck op</em>.</div>` : ""}
         ${w.readinessReason === "ROTATION_FAILED" ? `<div class="worker-op-banner" style="border-color:rgba(200,120,48,.45);background:rgba(200,120,48,.08)"><strong>Rotation failed</strong> — binding or registry step failed; retry <em>Assign URL…</em> or <em>New chat…</em>.</div>` : ""}
@@ -1475,8 +1533,9 @@ workersEl.addEventListener("click", (ev) => {
   if (action === "assign") void beginWorkerAssign(workerId);
   else if (action === "create") void beginWorkerCreate(workerId);
   else if (action === "kill") void beginWorkerKill(workerId);
-  else if (action === "cancel") void runWorkerCancel(workerId);
-  else if (action === "fail-stuck") void runWorkerFailStuck(workerId);
+  else if (action === "clear-stuck") void runWorkerClearStuck(workerId);
+  else if (action === "cancel") void runWorkerClearStuck(workerId);
+  else if (action === "fail-stuck") void runWorkerClearStuck(workerId);
   else if (action === "retry") void runWorkerRetry(workerId);
   else if (action === "toggle") {
     const enable = btn.getAttribute("data-enabled") === "1";

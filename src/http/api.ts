@@ -1223,6 +1223,28 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
 
       if (
         req.method === "POST" &&
+        url.pathname === "/ops/workers/clear-stuck" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        const result = workerController!.clearStuck(workerId);
+        rotateOpsCsrf();
+        sendJson(res, 200, { ok: true, ...result, csrf: opsCsrf });
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
         url.pathname === "/ops/workers/release-stuck-task" &&
         workerController
       ) {
