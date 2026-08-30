@@ -140,6 +140,7 @@ CDP Chrome (debug dir)     ← worker attaches here — login Pro again once
 | Ops dashboard | `src/dashboard/public/` served at `/dashboard/` by status-api (`docs/dashboard.md`) |
 | Chat rotation | `src/ops/rotate-worker.ts`, `src/workers/chat-budget.ts` (`docs/rotation.md`) |
 | Full product spec | `docs/spec.md` |
+| Codex CLI worker (spike, not production) | `docs/codex-cli-worker.md` |
 
 ## Caveats
 
@@ -147,6 +148,7 @@ CDP Chrome (debug dir)     ← worker attaches here — login Pro again once
 - **Fact:** Code comment notes ChatGPT custom connectors may only support OAuth / No Auth (no static Bearer field in UI) — tunnel + auth mode may need adjustment.
 - **Inference:** Free ngrok URLs change when the tunnel restarts; ChatGPT’s connector URL must be updated.
 - **Unknown without checking live ChatGPT settings:** Whether the current account’s Developer Mode allows MCP **write** tools.
+- **Fact (2026-08-24):** Codex CLI is **not** the production worker. Chat + Cursor remains the CDP path above. Parallel spike only: [codex-cli-worker.md](codex-cli-worker.md).
 
 ## Minimal mental example
 

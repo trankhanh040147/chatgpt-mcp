@@ -59,7 +59,7 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 
 **Evidence:** `spike:a1s`, `test:leases`, `test:create-worker`, live `e2e:dual`, live burst `--n=4` on three workers, live create → `w3` READY.
 
-**Worker profile (2026-08-18):** production workers run on **Chat** surface + **Cursor** plugin (not Work/Codex). `create-worker` switches Work→Chat, attaches Cursor from the + menu, then bootstraps. Avoids shared Codex/agentic credit pool exhaustion. Verified: per-worker canaries + broker burst `--n=3` on w1/w2/w3 all **COMPLETED**.
+**Worker profile (2026-08-18):** production workers run on **Chat** surface + **Cursor** plugin (not Work/Codex). `create-worker` switches Work→Chat, attaches Cursor from the + menu, then bootstraps. Avoids shared Codex/agentic credit pool exhaustion. Verified: per-worker canaries + broker burst `--n=3` on w1/w2/w3 all **COMPLETED**. **2026-08-24:** Codex CLI (`codex exec`) is a parallel spike only — not a version, not production. See [codex-cli-worker.md](codex-cli-worker.md).
 
 **Consent model (A):** wizard/CLI guides the human; no auto-login / auto-approve MCP writes.
 
@@ -222,6 +222,7 @@ Formerly 0.7.0 (was 0.6.0). Same `taskId` contract; files field from 0.7 is opti
 - **Ops complete (2026-08-18):** w1/w2/w3 on Chat + Cursor; dispatch false-ack fix; create-worker canary releases instance on exit.
 - **In progress:** **0.6.0** — portable core.
 - **Then:** **0.7.0** add files; **0.8.0** Claude.
+- **Parallel (not a version):** Codex CLI worker spike — keep Chat+Cursor production. [`docs/codex-cli-worker.md`](codex-cli-worker.md). Does not change `.active_plan`.
 
 ## Near-term queue
 
@@ -241,11 +242,13 @@ Formerly 0.7.0 (was 0.6.0). Same `taskId` contract; files field from 0.7 is opti
 | Dashboard history/charts / create-worker UI | Dash **0.3+** later |
 | Native composer file attachments (`Add files`) | **0.7.0** |
 | ChatGPT MCP `read_file` / arbitrary filesystem | Not a default — spec §30 |
+| Codex CLI as production worker | After live credit/concurrency spike (`n=3`); not a `0.N.0` until the shared Work/Codex pool is sustainable — [codex-cli-worker.md](codex-cli-worker.md) |
 
 ## Decision log
 
 | Date | Decision | Reason | Supersedes |
 |------|----------|--------|------------|
+| 2026-08-24 | Production workers stay **Chat + Cursor**; Codex CLI is a **parallel spike** (verdict **D**). No version slot. `.active_plan` unchanged. | Codex/`codex exec` is a cleaner transport (localhost MCP, one-shot, no CDP) but shares the Work/Codex credit pool escaped on 2026-08-18. Ranking D > C > A >>> B. | Hard spec `NO Codex` as an absolute (spike now allowed; production still Chat) |
 | 2026-08-18 | Add **0.7.0 add files**; shift Claude host → **0.8.0** | Native composer attachments for selected files; no `read_file` MCP; after portable create API, before a new host | Claude as 0.7.0 |
 | 2026-08-18 | Mark **0.5.0 shipped**; next is **0.6.0** portable core | Policy + idle rotate-worker + live w3 rotate/burst; `docs/rotation.md`; tag `v0.5.0` | “0.5.0 in progress / not tagged” |
 | 2026-08-18 | Workers on **Chat + Cursor plugin**; `create-worker` ensures Chat surface + attaches Cursor | Work/Codex profile exhausted shared agentic credits; Chat handoffs do not consume that pool; burst `--n=3` PASS on w1/w2/w3 | Work-profile workers + §17-only bootstrap |
