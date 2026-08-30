@@ -43,6 +43,8 @@ interface TaskRow {
   nudge_started_at: string | null;
   nudge_attempt: number | null;
   workspace_root: string | null;
+  task_class: string | null;
+  target_worker_id: string | null;
 }
 
 interface TaskFileRow {
@@ -119,6 +121,8 @@ function rowToTask(row: TaskRow): HandoffTask {
     nudgeStartedAt: row.nudge_started_at ?? undefined,
     nudgeAttempt: row.nudge_attempt ?? 0,
     workspaceRoot: row.workspace_root ?? undefined,
+    taskClass: (row.task_class as HandoffTask["taskClass"]) ?? "USER",
+    targetWorkerId: row.target_worker_id ?? undefined,
   };
 }
 
@@ -180,8 +184,9 @@ export class TaskRepository {
           `INSERT INTO handoff_tasks (
             id, cursor_conversation_id, type, prompt, context_json,
             status, retry_count, created_at,
-            dispatch_attempt, nudge_attempt, workspace_root
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            dispatch_attempt, nudge_attempt, workspace_root,
+            task_class, target_worker_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           task.id,
@@ -194,7 +199,9 @@ export class TaskRepository {
           task.createdAt,
           task.dispatchAttempt ?? 0,
           task.nudgeAttempt ?? 0,
-          task.workspaceRoot ?? null
+          task.workspaceRoot ?? null,
+          task.taskClass ?? "USER",
+          task.targetWorkerId ?? null
         );
 
       const insertFile = this.db.prepare(
@@ -521,6 +528,69 @@ export class TaskRepository {
         return null;
       }
 
+      if (worker.error === "DISABLED") {
+        this.db.exec("COMMIT");
+        return null;
+      }
+
+      const probeRow = this.db
+        .prepare(
+          `SELECT * FROM handoff_tasks
+           WHERE status = 'QUEUED'
+             AND task_class = 'SYSTEM_PROBE'
+             AND target_worker_id = ?
+           ORDER BY created_at ASC
+           LIMIT 1`
+        )
+        .get(workerId) as TaskRow | undefined;
+
+      if (probeRow) {
+        const leaseToken = ulid();
+        const updated = this.db
+          .prepare(
+            `UPDATE handoff_tasks
+             SET status = 'DISPATCHING',
+                 lease_owner = ?,
+                 lease_token = ?,
+                 lease_expires_at = ?,
+                 dispatch_started_at = NULL,
+                 dispatch_attempt = 0,
+                 nudge_started_at = NULL,
+                 nudge_attempt = 0
+             WHERE id = ? AND status = 'QUEUED'`
+          )
+          .run(workerId, leaseToken, expiresIso, probeRow.id);
+
+        if (updated.changes === 0) {
+          this.db.exec("COMMIT");
+          return null;
+        }
+
+        this.db
+          .prepare(
+            `UPDATE worker_state
+             SET current_task_id = ?, last_seen_at = ?
+             WHERE id = ? AND instance_token = ?`
+          )
+          .run(probeRow.id, nowIso, workerId, instanceToken);
+
+        this.db.exec("COMMIT");
+        return {
+          leaseToken,
+          task: rowToTask({
+            ...probeRow,
+            status: "DISPATCHING",
+            lease_owner: workerId,
+            lease_token: leaseToken,
+            lease_expires_at: expiresIso,
+            dispatch_started_at: null,
+            dispatch_attempt: 0,
+            nudge_started_at: null,
+            nudge_attempt: 0,
+          }),
+        };
+      }
+
       if (readinessBlocksClaim(worker.readiness_reason)) {
         this.db.exec("COMMIT");
         return null;
@@ -558,6 +628,7 @@ export class TaskRepository {
         .prepare(
           `SELECT * FROM handoff_tasks
            WHERE status = 'QUEUED'
+             AND (task_class = 'USER' OR task_class IS NULL)
            ORDER BY created_at ASC
            LIMIT 1`
         )
@@ -1414,6 +1485,93 @@ export class TaskRepository {
         /* ignore */
       }
       throw err;
+    }
+  }
+
+  beginWorkerUrlMutation(workerId: string): {
+    previousReason: WorkerReadinessReason | null;
+  } {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const worker = this.db
+        .prepare(`SELECT * FROM worker_state WHERE id = ?`)
+        .get(workerId) as WorkerRow | undefined;
+      if (!worker) {
+        this.db.exec("ROLLBACK");
+        throw new Error(`Worker ${workerId} not found`);
+      }
+      const inFlight = this.db
+        .prepare(
+          `SELECT id FROM handoff_tasks
+           WHERE lease_owner = ?
+             AND status IN ('DISPATCHING','DISPATCHED','PROCESSING','WAITING_APPROVAL')
+           LIMIT 1`
+        )
+        .get(workerId) as { id: string } | undefined;
+      if (inFlight || worker.current_task_id) {
+        this.db.exec("ROLLBACK");
+        throw new Error(
+          `Worker ${workerId} is busy — refuse mutation while a task is in flight`
+        );
+      }
+      const prev = (worker.readiness_reason ?? null) as
+        | WorkerReadinessReason
+        | null;
+      if (
+        prev === "ROTATION_PENDING" ||
+        prev === "ROTATION_FAILED"
+      ) {
+        this.db.exec("ROLLBACK");
+        throw new Error(
+          `Worker ${workerId} already blocked (${prev}) — refuse concurrent mutation`
+        );
+      }
+      this.db
+        .prepare(
+          `UPDATE worker_state
+           SET readiness_reason = 'ROTATION_PENDING',
+               error = ?
+           WHERE id = ?`
+        )
+        .run(
+          prev
+            ? `ROTATION_PENDING:prev=${prev}`
+            : "ROTATION_PENDING: worker-ops mutation",
+          workerId
+        );
+      this.db.exec("COMMIT");
+      return { previousReason: prev };
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+  }
+
+  clearWorkerError(workerId: string): void {
+    this.db
+      .prepare(
+        `UPDATE worker_state SET readiness_reason = NULL, error = NULL WHERE id = ?`
+      )
+      .run(workerId);
+  }
+
+  setWorkerDisabled(workerId: string, disabled: boolean): void {
+    if (disabled) {
+      this.db
+        .prepare(
+          `UPDATE worker_state SET error = 'DISABLED', readiness_reason = NULL WHERE id = ?`
+        )
+        .run(workerId);
+    } else {
+      this.db
+        .prepare(
+          `UPDATE worker_state SET error = NULL WHERE id = ? AND error = 'DISABLED'`
+        )
+        .run(workerId);
     }
   }
 

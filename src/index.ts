@@ -121,21 +121,33 @@ async function startBrokerFromConfig(
       "browser-broker requires HANDOFF_WORKERS_FILE with ≥1 worker sharing one cdpEndpoint"
     );
   }
-  const cdpEndpoint = topology.workers[0]!.cdpEndpoint;
+  const enabled = topology.workers.filter((w) => w.enabled !== false);
+  const cdpEndpoint = enabled[0]?.cdpEndpoint ?? topology.workers[0]!.cdpEndpoint;
+  const brokerOpsToken =
+    process.env.HANDOFF_BROKER_OPS_TOKEN?.trim() ||
+    randomBytes(32).toString("hex");
+  if (!process.env.HANDOFF_BROKER_OPS_TOKEN?.trim()) {
+    log({
+      event: "WARN",
+      component: "browser-broker",
+      message:
+        "HANDOFF_BROKER_OPS_TOKEN not set — generated ephemeral token for this process",
+    });
+  }
   return startBrowserBroker({
     dbPath: config.dbPath,
     cdpEndpoint,
     chatGptUrl: config.chatGptUrl,
-    workers: topology.workers.map((w) => ({
-      id: w.id,
-      workerUrl: w.workerUrl,
-    })),
+    workers: enabled.map((w) => ({ id: w.id, workerUrl: w.workerUrl })),
+    registryWorkerIds: enabled.map((w) => w.id),
     pollIntervalMs: config.pollIntervalMs,
     approvalTimeoutMs: config.approvalTimeoutMs,
     hardTimeoutMs: config.hardTimeoutMs,
     rateLimitBackoffMs: config.rateLimitBackoffMs,
     leaseMs: config.leaseMs,
     workerStaleMs: config.workerStaleMs,
+    brokerOpsPort: Number(process.env.HANDOFF_BROKER_OPS_PORT ?? 8788),
+    brokerOpsToken,
   });
 }
 
@@ -192,6 +204,7 @@ async function main(): Promise<void> {
       runLeaseReaper: true,
       reaperIntervalMs: config.reaperIntervalMs,
       workerId: config.workerId,
+      workersFile: config.workersFile,
     });
     await registerHttpKeepalive();
     return;
@@ -222,6 +235,7 @@ async function main(): Promise<void> {
       runLeaseReaper: true,
       reaperIntervalMs: config.reaperIntervalMs,
       workerId: config.workerId,
+      workersFile: config.workersFile,
     });
     const worker = await startWorkerFromConfig(config);
     registerShutdown(worker);

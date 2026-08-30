@@ -497,6 +497,53 @@ h2 {
   background: var(--panel);
 }
 
+.panel-head .small {
+  font-size: 11px;
+  padding: 0.2rem 0.5rem;
+}
+
+.worker-alert {
+  margin: 0 0 0.65rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid rgba(200, 72, 48, 0.45);
+  background: rgba(200, 72, 48, 0.08);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.worker-alert.hidden {
+  display: none;
+}
+
+.health-state {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.worker-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.65rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--line);
+}
+
+.worker-actions button {
+  font-size: 11px;
+  padding: 0.22rem 0.45rem;
+}
+
+.conditions {
+  margin-top: 0.35rem;
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .card-head {
   display: flex;
   justify-content: space-between;

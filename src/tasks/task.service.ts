@@ -56,6 +56,8 @@ export class TaskService {
       dispatchAttempt: 0,
       nudgeAttempt: 0,
       workspaceRoot,
+      taskClass: input.taskClass ?? "USER",
+      targetWorkerId: input.targetWorkerId,
     };
 
     this.repo.insertTaskWithFiles(task, files ?? []);
@@ -68,6 +70,21 @@ export class TaskService {
     });
 
     return { taskId: id, status: "QUEUED" };
+  }
+
+  createSystemProbe(input: {
+    workerId: string;
+    operationId: string;
+    token: string;
+  }): { taskId: string } {
+    const { taskId } = this.createTask({
+      type: "second_opinion",
+      prompt: `CREATE_WORKER_CANARY=${input.token}`,
+      cursorConversationId: `probe-${input.operationId}`,
+      taskClass: "SYSTEM_PROBE",
+      targetWorkerId: input.workerId,
+    });
+    return { taskId };
   }
 
   /** Frozen single-handle pipeline: open once, hash those bytes, sanitize whole, then range. */

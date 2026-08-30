@@ -32,6 +32,8 @@ const opsModalPreview = document.getElementById("ops-modal-preview");
 const opsConfirmPhrase = document.getElementById("ops-confirm-phrase");
 const opsConfirmInput = document.getElementById("ops-confirm-input");
 const opsConfirmGo = document.getElementById("ops-confirm-go");
+const btnAddWorker = document.getElementById("btn-add-worker");
+const workerAlert = document.getElementById("worker-alert");
 
 const COMMANDS = [
   "curl -s http://127.0.0.1:8787/health | jq",
@@ -44,7 +46,7 @@ let lastOkAt = null;
 let selectedTaskId = null;
 let selectedTaskStatus = null;
 let opsCsrf = null;
-let pendingOps = null; // { kind, phrase, planToken?, taskId? }
+let pendingOps = null; // { kind, phrase, planToken?, taskId?, workerId?, workerUrl?, mode? }
 let opsInFlight = false;
 
 function age(iso) {
@@ -146,6 +148,167 @@ function middleTruncate(id, head = 10, tail = 5) {
   if (!id) return "—";
   if (id.length <= head + tail + 1) return id;
   return `${id.slice(0, head)}…${id.slice(-tail)}`;
+}
+
+function healthStateClass(state) {
+  switch (state) {
+    case "READY":
+      return "ok";
+    case "DEGRADED":
+      return "warn";
+    case "BLOCKED":
+    case "OFFLINE":
+      return "bad";
+    default:
+      return "warn";
+  }
+}
+
+function mergeWorkerRows(baseWorkers, healthWorkers) {
+  const byId = new Map((healthWorkers ?? []).map((w) => [w.id, w]));
+  return (baseWorkers ?? []).map((w) => ({
+    ...w,
+    ...(byId.get(w.id) ?? {}),
+  }));
+}
+
+function formatConditions(conditions) {
+  if (!conditions?.length) return "";
+  return conditions
+    .map((c) => `${c.type}:${c.status} (${c.reason})`)
+    .join(" · ");
+}
+
+function renderWorkerActions(w) {
+  const id = escapeHtml(w.id);
+  const sessionLost = w.status === "SESSION_LOST";
+  const parts = [];
+  if (sessionLost || w.recommendedAction === "RECREATE_CHAT") {
+    parts.push(
+      `<button type="button" class="danger" data-worker-action="kill" data-worker-id="${id}">Recreate chat…</button>`
+    );
+  }
+  if (
+    w.recommendedAction === "RETRY_VERIFY" ||
+    w.readinessReason === "CONSENT_REQUIRED"
+  ) {
+    parts.push(
+      `<button type="button" class="primary" data-worker-action="retry" data-worker-id="${id}">Retry verify</button>`
+    );
+  }
+  if (w.recommendedAction === "ASSIGN_URL" || w.healthState === "DEGRADED") {
+    parts.push(
+      `<button type="button" data-worker-action="assign" data-worker-id="${id}">Assign URL…</button>`
+    );
+  }
+  parts.push(
+    `<button type="button" data-worker-action="create" data-worker-id="${id}">New chat…</button>`
+  );
+  const enabled = w.errorCode !== "DISABLED";
+  parts.push(
+    `<button type="button" data-worker-action="toggle" data-worker-id="${id}" data-enabled="${enabled ? "0" : "1"}">${enabled ? "Disable…" : "Enable…"}</button>`
+  );
+  return parts.join("");
+}
+
+function renderWorkerAlert(workers) {
+  if (!workerAlert) return;
+  const lost = (workers ?? []).filter(
+    (w) => w.id !== "default" && w.status === "SESSION_LOST"
+  );
+  if (lost.length === 0) {
+    workerAlert.classList.add("hidden");
+    workerAlert.hidden = true;
+    workerAlert.textContent = "";
+    return;
+  }
+  const names = lost.map((w) => w.id).join(", ");
+  workerAlert.classList.remove("hidden");
+  workerAlert.hidden = false;
+  workerAlert.innerHTML = `<strong>Session lost</strong> on ${escapeHtml(names)} — log into ChatGPT in the worker CDP window, then use <em>Recreate chat…</em> or <em>Retry verify</em>.`;
+}
+
+async function beginWorkerAssign(workerId) {
+  if (opsInFlight) return;
+  const workerUrl = window.prompt(
+    `Paste ChatGPT worker chat URL for ${workerId}`,
+    "https://chatgpt.com/c/"
+  );
+  if (!workerUrl?.trim()) return;
+  const phrase = `ASSIGN ${workerId}`;
+  openOpsModal({
+    title: `Assign URL · ${workerId}`,
+    preview: `Registry + broker bind → ${workerUrl.trim()}\nThen SYSTEM_PROBE until READY (not RESTART_REQUIRED).`,
+    phrase,
+    pending: {
+      kind: "worker-assign",
+      phrase,
+      workerId,
+      workerUrl: workerUrl.trim(),
+    },
+  });
+}
+
+async function beginWorkerCreate(workerId) {
+  if (opsInFlight) return;
+  const phrase = `CREATE ${workerId}`;
+  openOpsModal({
+    title: `Create chat · ${workerId}`,
+    preview:
+      "Broker opens a new worker chat tab, updates registry, and runs SYSTEM_PROBE.",
+    phrase,
+    pending: { kind: "worker-create", phrase, workerId },
+  });
+}
+
+async function beginWorkerKill(workerId) {
+  if (opsInFlight) return;
+  const phrase = `KILL ${workerId}`;
+  openOpsModal({
+    title: `Kill + recreate · ${workerId}`,
+    preview:
+      "Unbind tab, create a fresh worker chat, update registry, probe until READY.",
+    phrase,
+    pending: { kind: "worker-kill", phrase, workerId, mode: "create" },
+  });
+}
+
+async function beginWorkerToggle(workerId, enable) {
+  if (opsInFlight) return;
+  const phrase = enable ? `ENABLE ${workerId}` : `DISABLE ${workerId}`;
+  openOpsModal({
+    title: enable ? `Enable ${workerId}` : `Disable ${workerId}`,
+    preview: enable
+      ? "Worker returns to dispatch pool after reconcile."
+      : "Worker stops claiming tasks; broker binding unchanged.",
+    phrase,
+    pending: { kind: "worker-toggle", phrase, workerId, enabled: enable },
+  });
+}
+
+async function beginAddWorker() {
+  if (opsInFlight) return;
+  openOpsModal({
+    title: "Add worker",
+    preview:
+      "Append a new worker id to workers.json with placeholder URL; assign real chat URL afterward.",
+    phrase: "ADD WORKER",
+    pending: { kind: "worker-add", phrase: "ADD WORKER" },
+  });
+}
+
+async function runWorkerRetry(workerId) {
+  if (opsInFlight) return;
+  opsInFlight = true;
+  try {
+    const result = await postOps("/ops/workers/retry-verify", { workerId });
+    showOpsResult(result);
+    await tick();
+  } catch (err) {
+    showOpsResult(err instanceof Error ? err.message : String(err));
+  } finally {
+    opsInFlight = false;
+  }
 }
 
 function pillClass(status, healthy) {
@@ -353,6 +516,49 @@ async function executePendingOps() {
       closeOpsModal();
       showOpsResult(result);
       if (selectedTaskId) await showTaskDetail(selectedTaskId);
+      await tick();
+    } else if (pendingOps.kind === "worker-assign") {
+      const result = await postOps("/ops/workers/assign-url", {
+        workerId: pendingOps.workerId,
+        workerUrl: pendingOps.workerUrl,
+        confirm: pendingOps.phrase,
+      });
+      closeOpsModal();
+      showOpsResult(result);
+      await tick();
+    } else if (pendingOps.kind === "worker-create") {
+      const result = await postOps("/ops/workers/create-chat", {
+        workerId: pendingOps.workerId,
+        confirm: pendingOps.phrase,
+      });
+      closeOpsModal();
+      showOpsResult(result);
+      await tick();
+    } else if (pendingOps.kind === "worker-kill") {
+      const result = await postOps("/ops/workers/kill-recreate", {
+        workerId: pendingOps.workerId,
+        mode: pendingOps.mode ?? "create",
+        confirm: pendingOps.phrase,
+      });
+      closeOpsModal();
+      showOpsResult(result);
+      await tick();
+    } else if (pendingOps.kind === "worker-toggle") {
+      const result = await postOps("/ops/workers/set-enabled", {
+        workerId: pendingOps.workerId,
+        enabled: pendingOps.enabled,
+        confirm: pendingOps.phrase,
+      });
+      closeOpsModal();
+      showOpsResult(result);
+      await tick();
+    } else if (pendingOps.kind === "worker-add") {
+      const result = await postOps("/ops/workers/add", {
+        confirm: pendingOps.phrase,
+      });
+      closeOpsModal();
+      showOpsResult(result);
+      await loadTopology();
       await tick();
     }
   } catch (err) {
@@ -573,6 +779,7 @@ function renderWorkers(workers, showReference) {
           <h3>${escapeHtml(w.id)}</h3>
           <span class="pill ${kind}">${escapeHtml(w.status)}</span>
         </div>
+        ${w.healthState ? `<div class="row"><span class="muted">Ops health</span><span class="pill ${healthStateClass(w.healthState)} health-state">${escapeHtml(w.healthState)}</span></div>` : ""}
         <div class="row"><span class="muted">Health</span><span>${w.healthy ? "Healthy" : "Unhealthy"}</span></div>
         <div class="row"><span class="muted">PID</span><span>${w.pidAlive ? `${w.pid ?? "—"} · alive` : "dead"}</span></div>
         <div class="row"><span class="muted">Heartbeat</span><span>${w.heartbeatStale ? "stale" : "fresh"} · ${age(w.lastSeenAt)}</span></div>
@@ -582,8 +789,10 @@ function renderWorkers(workers, showReference) {
         <div class="row"><span class="muted">Failed / TO 24h</span><span>${w.failedLast24h ?? 0} / ${w.timedOutLast24h ?? 0}</span></div>
         ${refRows}
         <div class="row"><span class="muted">Error</span><span>${escapeHtml(w.errorCode ?? "—")}</span></div>
+        ${w.conditions?.length ? `<div class="conditions" title="${escapeHtml(formatConditions(w.conditions))}">${escapeHtml(formatConditions(w.conditions))}</div>` : ""}
         ${inds ? `<div class="indicators">${inds}</div>` : ""}
         ${chat}
+        <div class="worker-actions">${renderWorkerActions(w)}</div>
       </article>`;
     })
     .join("");
@@ -659,6 +868,27 @@ function renderHints(workers, health) {
     hints.push({
       kind: "warn",
       text: "No workers registered — start browser-broker / stack",
+    });
+  }
+
+  const blocked = live.filter(
+    (w) =>
+      w.healthState === "BLOCKED" ||
+      w.readinessReason === "CONSENT_REQUIRED" ||
+      w.status === "SESSION_LOST"
+  );
+  if (blocked.length > 0) {
+    hints.push({
+      kind: "warn",
+      text: `Worker ops: ${blocked.map((w) => w.id).join(", ")} need dashboard action (consent / session / bind)`,
+    });
+  }
+
+  const readyN = live.filter((w) => w.healthState === "READY").length;
+  if (readyN > 0 && readyN === live.length) {
+    hints.push({
+      kind: "ok",
+      text: "All workers READY — URL changes reconcile without RESTART_REQUIRED",
     });
   } else if (healthy.length === 0) {
     hints.push({ kind: "bad", text: "No healthy workers" });
@@ -876,11 +1106,16 @@ async function tick() {
   const now = new Date();
   clock.textContent = formatClock(now);
   try {
-    const [health, workersBody, tasksBody] = await Promise.all([
+    const [health, workersBody, healthBody, tasksBody] = await Promise.all([
       fetchJson("/health"),
       fetchJson("/workers"),
+      fetchJson("/workers/health"),
       fetchJson("/tasks?limit=10"),
     ]);
+    const mergedWorkers = mergeWorkerRows(
+      workersBody.workers ?? [],
+      healthBody.workers ?? []
+    );
     lastOkAt = now.toISOString();
     updatedEl.textContent = `Updated ${now.toLocaleTimeString(undefined, { hour12: false })}`;
     setUnreachable(false);
@@ -893,9 +1128,10 @@ async function tick() {
     const showRef =
       health.referencePricingEnabled === true ||
       health.costConfig?.referencePricingEnabled === true;
-    renderWorkers(workersBody.workers ?? [], showRef);
+    renderWorkerAlert(mergedWorkers);
+    renderWorkers(mergedWorkers, showRef);
     renderTasks(tasksBody.tasks ?? [], showRef);
-    renderHints(workersBody.workers ?? [], health);
+    renderHints(mergedWorkers, health);
   } catch (err) {
     setPill(healthPill, "API DOWN", "bad");
     updatedEl.textContent = lastOkAt
@@ -924,6 +1160,23 @@ onClick(failTaskBtn, () => void beginFailTask());
 onClick(btnRecover, () => void beginRecover(false));
 onClick(btnRecoverQueued, () => void beginRecover(true));
 onClick(btnTopology, () => void loadTopology());
+onClick(btnAddWorker, () => void beginAddWorker());
+
+workersEl.addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-worker-action]");
+  if (!btn) return;
+  const workerId = btn.getAttribute("data-worker-id");
+  const action = btn.getAttribute("data-worker-action");
+  if (!workerId || !action) return;
+  if (action === "assign") void beginWorkerAssign(workerId);
+  else if (action === "create") void beginWorkerCreate(workerId);
+  else if (action === "kill") void beginWorkerKill(workerId);
+  else if (action === "retry") void runWorkerRetry(workerId);
+  else if (action === "toggle") {
+    const enable = btn.getAttribute("data-enabled") === "1";
+    void beginWorkerToggle(workerId, enable);
+  }
+});
 
 if (opsConfirmInput) {
   opsConfirmInput.addEventListener("input", () => {

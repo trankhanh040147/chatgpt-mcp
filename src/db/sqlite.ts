@@ -9,8 +9,8 @@ import { ensureTaskUsageTable } from "../usage/task-usage.repository.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-/** Multi-worker leases / fencing + task_usage + chat rotation + hook followup ack. */
-export const SCHEMA_USER_VERSION = 7;
+/** Multi-worker leases / fencing + task_usage + chat rotation + hook followup ack + worker ops. */
+export const SCHEMA_USER_VERSION = 8;
 
 let dbInstance: DatabaseSync | null = null;
 
@@ -97,6 +97,35 @@ export function migrateDatabase(db: DatabaseSync): void {
       "cursor_wait_notified_at",
       "cursor_wait_notified_at TEXT"
     );
+    addColumnIfMissing(
+      db,
+      "handoff_tasks",
+      "task_class",
+      "task_class TEXT NOT NULL DEFAULT 'USER'"
+    );
+    addColumnIfMissing(
+      db,
+      "handoff_tasks",
+      "target_worker_id",
+      "target_worker_id TEXT"
+    );
+  }
+  if (!tableExists(db, "worker_operations")) {
+    db.exec(`
+CREATE TABLE IF NOT EXISTS worker_operations (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_worker_operations_active
+ON worker_operations(worker_id, state);
+`);
   }
   if (tableExists(db, "worker_state")) {
     addColumnIfMissing(db, "worker_state", "pid", "pid INTEGER");

@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS handoff_tasks (
     nudge_attempt INTEGER NOT NULL DEFAULT 0,
     workspace_root TEXT,
     cursor_followup_at TEXT,
-    cursor_wait_notified_at TEXT
+    cursor_wait_notified_at TEXT,
+    task_class TEXT NOT NULL DEFAULT 'USER',
+    target_worker_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS handoff_task_files (
@@ -116,3 +118,18 @@ CREATE TABLE IF NOT EXISTS task_usage (
 
 CREATE INDEX IF NOT EXISTS idx_task_usage_model_version
 ON task_usage(counterfactual_model, price_table_version);
+
+CREATE TABLE IF NOT EXISTS worker_operations (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_operations_active
+ON worker_operations(worker_id, state);

@@ -36,7 +36,7 @@
     <div class="shell">
       <header class="top">
         <div class="brand">
-          <p class="eyebrow">chatgpt-mcp · dashboard 0.3 · usage est.</p>
+          <p class="eyebrow">chatgpt-mcp · dashboard 0.6 · worker ops</p>
           <h1>Ops</h1>
         </div>
         <div class="top-meta">
@@ -56,7 +56,16 @@
           <div class="panel-head">
             <h2>Workers</h2>
             <span class="mono muted" id="worker-count"></span>
+            <button type="button" id="btn-add-worker" class="ghost small">
+              Add worker…
+            </button>
           </div>
+          <div
+            id="worker-alert"
+            class="worker-alert hidden"
+            hidden
+            role="alert"
+          ></div>
           <div class="cards" id="workers"></div>
         </section>
 
@@ -132,7 +141,7 @@
       </div>
 
       <footer class="foot mono muted">
-        Polling every 2s · 127.0.0.1 only · dash 0.3 guarded mutations
+        Polling every 2s · 127.0.0.1 only · dash 0.6 worker ops
       </footer>
     </div>
 

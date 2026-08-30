@@ -1,5 +1,6 @@
 import type { Browser, BrowserContext, Page } from "playwright";
 import { ChatGptBrowser } from "./chatgpt.js";
+import { createWorkerChatOnContext } from "./create-chat.js";
 import { UiWriteMutex } from "./ui-write-mutex.js";
 import { log } from "../logging/logger.js";
 import { chatIdFromUrl } from "./chat-url.js";
@@ -16,10 +17,30 @@ export interface BrokerWorkerBinding {
   browser: ChatGptBrowser;
 }
 
+export interface BrowserBrokerWorkerSpec {
+  id: string;
+  workerUrl?: string;
+}
+
 export interface BrowserBrokerOptions {
   cdpEndpoint: string;
   chatGptUrl: string;
-  workers: Array<{ id: string; workerUrl: string }>;
+  workers: BrowserBrokerWorkerSpec[];
+  /** All registry ids (for status unbound detection). */
+  registryWorkerIds?: string[];
+}
+
+export interface BrokerStatusSnapshot {
+  healthy: boolean;
+  cdpEndpoint: string;
+  connectionGeneration: number;
+  registryWorkerIds: string[];
+  bindings: Array<{
+    workerId: string;
+    chatId: string;
+    pageUrl: string;
+    generation: number;
+  }>;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -45,23 +66,31 @@ export class BrowserBroker {
 
   constructor(private readonly options: BrowserBrokerOptions) {
     if (options.workers.length < 1) {
-      throw new Error("BrowserBroker requires at least one worker binding");
+      throw new Error("BrowserBroker requires at least one worker entry");
     }
     const ids = new Set(options.workers.map((w) => w.id));
     if (ids.size !== options.workers.length) {
       throw new Error("BrowserBroker worker ids must be unique");
     }
-    const urls = new Set(options.workers.map((w) => w.workerUrl));
-    if (urls.size !== options.workers.length) {
+    const withUrl = options.workers.filter(
+      (w) => w.workerUrl && chatIdFromUrl(w.workerUrl)
+    );
+    const urls = new Set(withUrl.map((w) => w.workerUrl!));
+    if (urls.size !== withUrl.length) {
       throw new Error("BrowserBroker worker URLs must be unique");
     }
-    const chatIds = options.workers.map((w) => chatIdFromUrl(w.workerUrl));
-    if (chatIds.some((c) => !c)) {
-      throw new Error("BrowserBroker workerUrl must include /c/<id>");
-    }
+    const chatIds = withUrl.map((w) => chatIdFromUrl(w.workerUrl!)!);
     if (new Set(chatIds).size !== chatIds.length) {
       throw new Error("BrowserBroker chat ids must be unique");
     }
+  }
+
+  getCdpEndpoint(): string {
+    return this.options.cdpEndpoint;
+  }
+
+  getContext(): BrowserContext | null {
+    return this.context;
   }
 
   getConnectionGeneration(): number {
@@ -100,8 +129,20 @@ export class BrowserBroker {
     this.bindings.clear();
     this.chatOwners.clear();
 
+    let bound = 0;
     for (const w of this.options.workers) {
-      await this.bindWorker(w.id, w.workerUrl);
+      if (!w.workerUrl || !chatIdFromUrl(w.workerUrl)) continue;
+      try {
+        await this.bindWorkerLocked(w.id, w.workerUrl);
+        bound += 1;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log({
+          event: "WARN",
+          component: "browser-broker",
+          message: `Bind failed worker=${w.id}: ${message}`,
+        });
+      }
     }
 
     this.healthy = true;
@@ -112,7 +153,7 @@ export class BrowserBroker {
     log({
       event: "INFO",
       component: "browser-broker",
-      message: `Broker ready cdp=${this.options.cdpEndpoint} gen=${this.connectionGeneration} workers=[${[...this.bindings.keys()].join(",")}]`,
+      message: `Broker ready cdp=${this.options.cdpEndpoint} gen=${this.connectionGeneration} bound=${bound} workers=[${[...this.bindings.keys()].join(",")}]`,
     });
   }
 
@@ -189,19 +230,101 @@ export class BrowserBroker {
     return b;
   }
 
+  hasBinding(workerId: string): boolean {
+    return this.bindings.has(workerId);
+  }
+
   listBindings(): BrokerWorkerBinding[] {
     return [...this.bindings.values()];
   }
 
-  /**
-   * Fail-closed: exact chat id match, unique among bindings.
-   * Serialized — concurrent binds cannot race on the same chat/page.
-   */
+  getStatusSnapshot(): BrokerStatusSnapshot {
+    return {
+      healthy: this.isHealthy(),
+      cdpEndpoint: this.options.cdpEndpoint,
+      connectionGeneration: this.connectionGeneration,
+      registryWorkerIds:
+        this.options.registryWorkerIds ??
+        this.options.workers.map((w) => w.id),
+      bindings: this.listBindings().map((b) => ({
+        workerId: b.workerId,
+        chatId: b.chatId,
+        pageUrl: b.page.url(),
+        generation: b.generation,
+      })),
+    };
+  }
+
   async bindWorker(
     workerId: string,
     workerUrl: string
   ): Promise<BrokerWorkerBinding> {
     return this.withBindLock(() => this.bindWorkerLocked(workerId, workerUrl));
+  }
+
+  async rebindWorker(
+    workerId: string,
+    workerUrl: string
+  ): Promise<BrokerWorkerBinding> {
+    return this.withBindLock(async () => {
+      const prev = this.bindings.get(workerId);
+      const newChat = chatIdFromUrl(workerUrl);
+      if (!newChat) throw new Error(`Invalid workerUrl: ${workerUrl}`);
+      if (prev && chatIdFromUrl(prev.workerUrl) === newChat) {
+        return prev;
+      }
+      if (prev) {
+        this.chatOwners.delete(prev.chatId);
+        this.bindings.delete(workerId);
+        if (!prev.page.isClosed()) {
+          await prev.page.close().catch(() => undefined);
+        }
+      }
+      return this.bindWorkerLocked(workerId, workerUrl);
+    });
+  }
+
+  async unbindWorker(workerId: string): Promise<void> {
+    await this.withBindLock(async () => {
+      const prev = this.bindings.get(workerId);
+      if (!prev) return;
+      this.chatOwners.delete(prev.chatId);
+      this.bindings.delete(workerId);
+      if (!prev.page.isClosed()) {
+        await prev.page.close().catch(() => undefined);
+      }
+      log({
+        event: "INFO",
+        component: "browser-broker",
+        message: `Unbound worker=${workerId}`,
+      });
+    });
+  }
+
+  async createChatForWorker(
+    workerId: string,
+    bootstrapMessage?: string
+  ): Promise<{ workerUrl: string; chatId: string }> {
+    if (!this.context) throw new Error("Broker not connected");
+    return this.uiWriteMutex.run(async () => {
+      const created = await createWorkerChatOnContext(this.context!, {
+        chatGptUrl: this.options.chatGptUrl,
+        bootstrapMessage,
+      });
+      await this.bindWorkerLocked(workerId, created.workerUrl);
+      return { workerUrl: created.workerUrl, chatId: created.chatId };
+    });
+  }
+
+  async probeSession(workerId: string): Promise<{ ready: boolean; reason?: string }> {
+    try {
+      const b = this.getBinding(workerId);
+      const ready = await b.browser.ensureSessionReady();
+      return { ready };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ready: false, reason: message };
+    }
   }
 
   private async bindWorkerLocked(
@@ -223,7 +346,6 @@ export class BrowserBroker {
       );
     }
 
-    // Prefer a page already owned by this worker; else find by chat id unused.
     let page: Page | null = null;
     const prev = this.bindings.get(workerId);
     if (prev && !prev.page.isClosed() && chatIdFromUrl(prev.page.url()) === chatId) {
@@ -262,7 +384,6 @@ export class BrowserBroker {
       );
     }
 
-    // Re-check uniqueness after navigation (another bind may have claimed).
     const ownerAfter = this.chatOwners.get(chatId);
     if (ownerAfter && ownerAfter !== workerId) {
       throw new Error(
@@ -302,9 +423,6 @@ export class BrowserBroker {
     return binding;
   }
 
-  /**
-   * Fail-closed page/chat/generation check immediately before irreversible write.
-   */
   assertBindingFresh(workerId: string): BrokerWorkerBinding {
     if (!this.healthy) {
       throw new Error(`Broker CDP unhealthy — refuse UI write for ${workerId}`);

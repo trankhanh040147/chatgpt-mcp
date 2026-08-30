@@ -12,6 +12,17 @@ fi
 
 export HANDOFF_WORKERS_FILE="${HANDOFF_WORKERS_FILE:-$ROOT/data/workers.a1s.json}"
 
+# Shared broker control token — status-api must match browser-broker (see HANDOFF_BROKER_OPS_TOKEN).
+export HANDOFF_BROKER_OPS_PORT="${HANDOFF_BROKER_OPS_PORT:-8788}"
+if [[ -z "${HANDOFF_BROKER_OPS_TOKEN:-}" ]]; then
+  if [[ -f logs/broker-ops.token ]]; then
+    export HANDOFF_BROKER_OPS_TOKEN="$(cat logs/broker-ops.token)"
+  else
+    export HANDOFF_BROKER_OPS_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+    echo "$HANDOFF_BROKER_OPS_TOKEN" > logs/broker-ops.token
+  fi
+fi
+
 if [[ ! -f "$HANDOFF_WORKERS_FILE" ]]; then
   echo "Missing $HANDOFF_WORKERS_FILE" >&2
   echo "Copy docs/workers.example.a1s.json → data/workers.a1s.json and set two /c/… URLs on the SAME cdpEndpoint." >&2

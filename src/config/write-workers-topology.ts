@@ -85,10 +85,14 @@ function upsertWorkerRegistryEntryUnlocked(opts: {
           : r.http_port !== undefined
             ? Number(r.http_port)
             : undefined;
+      const enabled =
+        r.enabled === undefined
+          ? true
+          : r.enabled === true || r.enabled === "true";
       if (!id || !workerUrl || !cdpEndpoint) {
         throw new Error(`${abs}[${i}] requires id, workerUrl, cdpEndpoint`);
       }
-      return { id, workerUrl, cdpEndpoint, httpPort };
+      return { id, workerUrl, cdpEndpoint, httpPort, enabled };
     });
   }
 

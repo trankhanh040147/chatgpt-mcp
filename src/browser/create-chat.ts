@@ -1,4 +1,4 @@
-import type { Browser, Page } from "playwright";
+import type { BrowserContext, Page } from "playwright";
 import { selectors } from "./selectors.js";
 import { chatIdFromUrl } from "./chat-url.js";
 import { log } from "../logging/logger.js";
@@ -19,7 +19,19 @@ export interface CreatedWorkerChat {
   workerUrl: string;
   chatId: string;
   page: Page;
-  browser: Browser;
+  browser: import("playwright").Browser;
+}
+
+export interface CreateWorkerChatOnContextOptions {
+  chatGptUrl?: string;
+  timeoutMs?: number;
+  bootstrapMessage?: string;
+}
+
+export interface CreatedWorkerChatOnContext {
+  workerUrl: string;
+  chatId: string;
+  page: Page;
 }
 
 /**
@@ -86,43 +98,21 @@ async function sendBootstrap(page: Page, message: string): Promise<void> {
 }
 
 /**
- * Assisted New chat on an already-logged-in CDP Chrome.
- * Does not log in, approve MCP, or write topology.
- * Sends a short bootstrap message so ChatGPT allocates /c/<id>.
+ * Create a new worker chat on an existing broker-owned BrowserContext.
+ * Does not connect CDP — broker must own the context (ADR-009).
  */
-export async function createWorkerChat(
-  options: CreateWorkerChatOptions
-): Promise<CreatedWorkerChat> {
+export async function createWorkerChatOnContext(
+  context: BrowserContext,
+  options: CreateWorkerChatOnContextOptions = {}
+): Promise<CreatedWorkerChatOnContext> {
   const chatGptUrl = options.chatGptUrl ?? "https://chatgpt.com";
   const timeoutMs = options.timeoutMs ?? 90_000;
   const bootstrapMessage =
     options.bootstrapMessage ??
     "chatgpt-mcp worker bootstrap — reply OK and wait for TASK_ID.";
-  const { chromium } = await import("playwright");
-
-  let browser: Browser;
-  try {
-    browser = await chromium.connectOverCDP(options.cdpEndpoint, {
-      noDefaults: true,
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `create-worker: CDP attach failed at ${options.cdpEndpoint}: ${message}`
-    );
-  }
-
-  const context = browser.contexts()[0];
-  if (!context) {
-    await browser.close().catch(() => undefined);
-    throw new Error(
-      "create-worker: no browser context — open at least one tab in the CDP Chrome"
-    );
-  }
 
   const page = await context.newPage();
   try {
-    // Landing "/" is a blank new chat until the first send allocates /c/<id>.
     await page.goto(`${chatGptUrl.replace(/\/$/, "")}/`, {
       waitUntil: "domcontentloaded",
       timeout: 60_000,
@@ -142,7 +132,6 @@ export async function createWorkerChat(
 
     await ensureChatSurface(page);
 
-    // Best-effort New chat click if we landed on an existing conversation.
     if (chatIdFromUrl(page.url())) {
       const newChat = page
         .locator('[data-testid="create-new-chat-button"]')
@@ -176,8 +165,7 @@ export async function createWorkerChat(
     chatId = chatIdFromUrl(page.url());
     if (!chatId) {
       throw new Error(
-        `create-worker: timed out waiting for /c/<id> (url=${page.url()}). ` +
-          "Create a chat manually in the CDP Chrome and pass --worker-url instead."
+        `create-worker: timed out waiting for /c/<id> (url=${page.url()}).`
       );
     }
 
@@ -198,18 +186,55 @@ export async function createWorkerChat(
       message: `create-worker: captured chat=${chatId}`,
     });
 
-    return { workerUrl, chatId, page, browser };
+    return { workerUrl, chatId, page };
   } catch (err) {
     try {
       await page.close();
     } catch {
       // ignore
     }
-    try {
-      await browser.close();
-    } catch {
-      // ignore
-    }
+    throw err;
+  }
+}
+
+/**
+ * Assisted New chat on an already-logged-in CDP Chrome (legacy CLI path).
+ * Opens its own CDP connection — do not use when browser-broker is running.
+ */
+export async function createWorkerChat(
+  options: CreateWorkerChatOptions
+): Promise<CreatedWorkerChat> {
+  const { chromium } = await import("playwright");
+
+  let browser: import("playwright").Browser;
+  try {
+    browser = await chromium.connectOverCDP(options.cdpEndpoint, {
+      noDefaults: true,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `create-worker: CDP attach failed at ${options.cdpEndpoint}: ${message}`
+    );
+  }
+
+  const context = browser.contexts()[0];
+  if (!context) {
+    await browser.close().catch(() => undefined);
+    throw new Error(
+      "create-worker: no browser context — open at least one tab in the CDP Chrome"
+    );
+  }
+
+  try {
+    const created = await createWorkerChatOnContext(context, {
+      chatGptUrl: options.chatGptUrl,
+      timeoutMs: options.timeoutMs,
+      bootstrapMessage: options.bootstrapMessage,
+    });
+    return { ...created, browser };
+  } catch (err) {
+    await browser.close().catch(() => undefined);
     throw err;
   }
 }

@@ -9,6 +9,7 @@ export type LogComponent =
   | "create-worker"
   | "http-api"
   | "ops"
+  | "worker-controller"
   | "cursor-hook"
   | "lease-reaper"
   | "config";

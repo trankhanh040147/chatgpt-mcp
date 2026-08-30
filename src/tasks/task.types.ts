@@ -94,6 +94,8 @@ export interface HandoffTask {
   nudgeAttempt: number;
   workspaceRoot?: string;
   files?: HandoffTaskFile[];
+  taskClass?: "USER" | "SYSTEM_PROBE";
+  targetWorkerId?: string;
 }
 
 export interface ClaimResult {
@@ -138,6 +140,8 @@ export interface CreateTaskInput {
   cursorConversationId: string;
   /** Workspace-relative evidence file paths (max 10). Never absolute paths. */
   files?: string[];
+  taskClass?: "USER" | "SYSTEM_PROBE";
+  targetWorkerId?: string;
 }
 
 /** Sentinel when the host does not supply a session id (manual poll by taskId). */

@@ -6,6 +6,8 @@ export interface WorkerRegistryEntry {
   workerUrl: string;
   cdpEndpoint: string;
   httpPort?: number;
+  /** When false, excluded from broker bind and claim scheduling. Default true. */
+  enabled?: boolean;
 }
 
 export interface ResolvedTopology {
@@ -57,12 +59,16 @@ export function loadWorkersTopology(opts: {
           : r.http_port !== undefined
             ? Number(r.http_port)
             : undefined;
+      const enabled =
+        r.enabled === undefined
+          ? true
+          : r.enabled === true || r.enabled === "true";
       if (!id || !workerUrl || !cdpEndpoint) {
         throw new Error(
           `workers.json[${i}] requires id, workerUrl, cdpEndpoint`
         );
       }
-      return { id, workerUrl, cdpEndpoint, httpPort };
+      return { id, workerUrl, cdpEndpoint, httpPort, enabled };
     });
   }
 

@@ -1,18 +1,22 @@
 import { BrowserWorker, type BrowserWorkerOptions } from "./worker.js";
 import { BrowserBroker } from "./broker.js";
+import { startBrokerControlServer } from "./broker-control.js";
 import { log } from "../logging/logger.js";
 
 export interface StartBrowserBrokerOptions {
   dbPath: string;
   cdpEndpoint: string;
   chatGptUrl: string;
-  workers: Array<{ id: string; workerUrl: string }>;
+  workers: Array<{ id: string; workerUrl?: string }>;
+  registryWorkerIds?: string[];
   pollIntervalMs: number;
   approvalTimeoutMs: number;
   hardTimeoutMs?: number;
   rateLimitBackoffMs: number[];
   leaseMs?: number;
   workerStaleMs?: number;
+  brokerOpsPort?: number;
+  brokerOpsToken?: string;
 }
 
 export interface BrowserBrokerHandle {
@@ -28,22 +32,40 @@ export async function startBrowserBroker(
   options: StartBrowserBrokerOptions
 ): Promise<BrowserBrokerHandle> {
   if (options.workers.length < 1) {
-    throw new Error("startBrowserBroker requires ≥1 worker");
+    throw new Error("startBrowserBroker requires ≥1 worker entry");
   }
 
   const broker = new BrowserBroker({
     cdpEndpoint: options.cdpEndpoint,
     chatGptUrl: options.chatGptUrl,
     workers: options.workers,
+    registryWorkerIds: options.registryWorkerIds,
   });
   await broker.connect();
 
+  if (options.brokerOpsPort && options.brokerOpsToken) {
+    await startBrokerControlServer({
+      port: options.brokerOpsPort,
+      token: options.brokerOpsToken,
+      broker,
+    });
+  }
+
   const actors: BrowserWorker[] = [];
   for (const w of options.workers) {
+    if (!broker.hasBinding(w.id)) {
+      log({
+        event: "WARN",
+        component: "browser-broker",
+        message: `Skipping actor ${w.id} — no binding (unbound/PENDING_URL)`,
+      });
+      continue;
+    }
+    const binding = broker.getBinding(w.id);
     const workerOpts: BrowserWorkerOptions = {
       dbPath: options.dbPath,
       cdpEndpoint: options.cdpEndpoint,
-      workerUrl: w.workerUrl,
+      workerUrl: binding.workerUrl,
       chatGptUrl: options.chatGptUrl,
       pollIntervalMs: options.pollIntervalMs,
       approvalTimeoutMs: options.approvalTimeoutMs,
