@@ -8,6 +8,7 @@ import type { UiWriteMutex } from "./ui-write-mutex.js";
 import { log } from "../logging/logger.js";
 import type { WorkerStatus } from "../tasks/task.types.js";
 import { DEFAULT_WORKER_ID } from "../tasks/task.types.js";
+import { classifyProbeFailure } from "../mcp/probe-failure.js";
 
 export interface BrowserWorkerOptions {
   dbPath: string;
@@ -523,10 +524,67 @@ export class BrowserWorker {
 
     workerState.setStatus("BUSY", { currentTaskId: taskId });
 
+    const taskRow = this.repo?.getTaskById(taskId);
+    const isProbe = taskRow?.taskClass === "SYSTEM_PROBE";
+    let probeToken: string | undefined;
+    if (isProbe && taskRow?.prompt) {
+      const m = taskRow.prompt.match(/canary:\s*([a-f0-9]+)/i);
+      probeToken = m?.[1];
+    }
+
+    if (isProbe && !generating) {
+      const domHint = await browser.detectMcpDomHint(probeToken).catch(() => null);
+      if (domHint === "safety_blocked") {
+        taskService.failProbeClassified(
+          taskId,
+          "MCP_SAFETY_BLOCKED",
+          "OpenAI safety checks blocked MCP write before remote-mcp"
+        );
+        this.clearActiveTask(workerState);
+        log({
+          event: "WARN",
+          component: "browser-worker",
+          taskId,
+          message: "Probe classified MCP_SAFETY_BLOCKED from ChatGPT DOM — skipping nudge",
+        });
+        return;
+      }
+      if (domHint === "approval_required") {
+        taskService.markWaitingApproval(taskId);
+      }
+      if (domHint === "canary_in_chat" && elapsed >= 15_000) {
+        const classified = classifyProbeFailure({
+          taskStatus: status,
+          domHint: "canary_in_chat",
+        });
+        taskService.failProbeClassified(
+          taskId,
+          classified,
+          "Canary appeared in chat without MCP tool invocation"
+        );
+        this.clearActiveTask(workerState);
+        return;
+      }
+    }
+
     if (!this.nudgeSent && elapsed >= NUDGE_AT_MS) {
       if (generating) {
         // Don't fence a nudge we cannot type yet.
-      } else {
+      } else if (isProbe) {
+        const preNudgeHint = await browser
+          .detectMcpDomHint(probeToken)
+          .catch(() => null);
+        if (preNudgeHint === "safety_blocked") {
+          taskService.failProbeClassified(
+            taskId,
+            "MCP_SAFETY_BLOCKED",
+            "OpenAI safety checks blocked MCP write before remote-mcp"
+          );
+          this.clearActiveTask(workerState);
+          return;
+        }
+      }
+      if (!generating) {
         const fenced = taskService.markNudgeStarted(
           taskId,
           this.workerId,
@@ -550,12 +608,15 @@ export class BrowserWorker {
             await browser.waitUntilComposerIdle();
             await this.withUiWrite(async () => {
               this.options.assertBindingFresh?.();
-              await browser.sendSubmitNudge(taskId, { skipIdleWait: true });
+              await browser.sendSubmitNudge(taskId, {
+                skipIdleWait: true,
+                probe: isProbe,
+              });
               log({
                 event: "INFO",
                 component: "browser-worker",
                 taskId,
-                message: `Sent submit nudge (TASK_ID=${taskId})`,
+                message: `Sent submit nudge (TASK_ID=${taskId}${isProbe ? " probe" : ""})`,
               });
             });
           } catch {

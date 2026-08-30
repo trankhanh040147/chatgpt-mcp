@@ -22,7 +22,12 @@ export interface StartBrowserBrokerOptions {
 export interface BrowserBrokerHandle {
   broker: BrowserBroker;
   workers: BrowserWorker[];
+  ensureWorkerActor(workerId: string): void;
   close(): Promise<void>;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
@@ -43,25 +48,20 @@ export async function startBrowserBroker(
   });
   await broker.connect();
 
-  if (options.brokerOpsPort && options.brokerOpsToken) {
-    await startBrokerControlServer({
-      port: options.brokerOpsPort,
-      token: options.brokerOpsToken,
-      broker,
-    });
-  }
-
   const actors: BrowserWorker[] = [];
-  for (const w of options.workers) {
-    if (!broker.hasBinding(w.id)) {
+  const actorIds = new Set<string>();
+
+  function spawnActor(workerId: string): void {
+    if (actorIds.has(workerId)) return;
+    if (!broker.hasBinding(workerId)) {
       log({
         event: "WARN",
         component: "browser-broker",
-        message: `Skipping actor ${w.id} — no binding (unbound/PENDING_URL)`,
+        message: `Cannot spawn actor ${workerId} — no binding`,
       });
-      continue;
+      return;
     }
-    const binding = broker.getBinding(w.id);
+    const binding = broker.getBinding(workerId);
     const workerOpts: BrowserWorkerOptions = {
       dbPath: options.dbPath,
       cdpEndpoint: options.cdpEndpoint,
@@ -71,26 +71,82 @@ export async function startBrowserBroker(
       approvalTimeoutMs: options.approvalTimeoutMs,
       hardTimeoutMs: options.hardTimeoutMs,
       rateLimitBackoffMs: options.rateLimitBackoffMs,
-      workerId: w.id,
+      workerId,
       leaseMs: options.leaseMs,
       workerStaleMs: options.workerStaleMs,
       browserOnly: true,
-      resolveSharedBrowser: () => broker.getBinding(w.id).browser,
+      resolveSharedBrowser: () => broker.getBinding(workerId).browser,
       uiWriteMutex: broker.uiWriteMutex,
       assertBindingFresh: () => {
-        broker.assertBindingFresh(w.id);
+        broker.assertBindingFresh(workerId);
       },
     };
     const worker = new BrowserWorker(workerOpts);
+    actorIds.add(workerId);
+    actors.push(worker);
     void worker.start().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       log({
         event: "ERROR",
         component: "browser-broker",
-        message: `Actor ${w.id} failed fatally: ${message}`,
+        message: `Actor ${workerId} failed fatally: ${message}`,
       });
     });
-    actors.push(worker);
+    log({
+      event: "INFO",
+      component: "browser-broker",
+      message: `Spawned page actor ${workerId}`,
+    });
+  }
+
+  function ensureWorkerActor(workerId: string): void {
+    spawnActor(workerId);
+  }
+
+  // Retry bind + actor spawn when CDP was still settling (common after make restart).
+  for (const w of options.workers) {
+    if (!w.workerUrl) continue;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      if (broker.hasBinding(w.id)) break;
+      try {
+        await broker.bindWorker(w.id, w.workerUrl);
+        break;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (attempt >= 5) {
+          log({
+            event: "ERROR",
+            component: "browser-broker",
+            message: `Bind failed worker=${w.id} after retries: ${message}`,
+          });
+        } else {
+          log({
+            event: "WARN",
+            component: "browser-broker",
+            message: `Bind retry ${attempt} worker=${w.id}: ${message}`,
+          });
+          await sleep(1500 * attempt);
+        }
+      }
+    }
+    if (broker.hasBinding(w.id)) {
+      spawnActor(w.id);
+    } else {
+      log({
+        event: "WARN",
+        component: "browser-broker",
+        message: `Skipping actor ${w.id} — no binding (unbound/PENDING_URL)`,
+      });
+    }
+  }
+
+  if (options.brokerOpsPort && options.brokerOpsToken) {
+    await startBrokerControlServer({
+      port: options.brokerOpsPort,
+      token: options.brokerOpsToken,
+      broker,
+      onWorkerBound: ensureWorkerActor,
+    });
   }
 
   log({
@@ -102,6 +158,7 @@ export async function startBrowserBroker(
   return {
     broker,
     workers: actors,
+    ensureWorkerActor,
     async close() {
       for (const a of actors) {
         try {

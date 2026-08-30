@@ -45,6 +45,7 @@ import {
 import { loadCostConfig } from "../usage/pricing.js";
 import type { TaskUsageSnapshot } from "../usage/usage.types.js";
 import { brokerOpsClientFromEnv } from "../ops/broker-client.js";
+import { resolveBrokerOpsPort } from "../ops/broker-ops-config.js";
 import { WorkerController } from "../ops/worker-controller.js";
 import { buildWorkerHealthRow } from "../ops/worker-health.js";
 import { nextWorkerId, upsertWorkerRegistryEntry } from "../config/write-workers-topology.js";
@@ -839,10 +840,6 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           sendJson(res, 400, { error: unknown });
           return;
         }
-        const confirm =
-          typeof parsed.value.confirm === "string"
-            ? parsed.value.confirm.trim()
-            : "";
         const planToken =
           typeof parsed.value.planToken === "string"
             ? parsed.value.planToken
@@ -857,12 +854,6 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           sendJson(res, 409, {
             error: "plan expired or unknown — preview again",
             code: "plan_stale",
-          });
-          return;
-        }
-        if (confirm !== entry.plan.confirmPhrase) {
-          sendJson(res, 400, {
-            error: `confirm must be exactly "${entry.plan.confirmPhrase}"`,
           });
           return;
         }
@@ -958,17 +949,6 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           sendJson(res, 400, { error: "taskId required" });
           return;
         }
-        const expected = `FAIL ${taskId}`;
-        const confirm =
-          typeof parsed.value.confirm === "string"
-            ? parsed.value.confirm.trim()
-            : "";
-        if (confirm !== expected) {
-          sendJson(res, 400, {
-            error: `confirm must be exactly "${expected}"`,
-          });
-          return;
-        }
         const reason =
           typeof parsed.value.reason === "string"
             ? parsed.value.reason
@@ -1019,25 +999,74 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
             brokerStatus = await brokerClient.status();
           }
         }
-        const workers = repo.listWorkers().map((w) => {
-          const health = buildWorkerHealthRow({
-            worker: w,
-            brokerStatus,
-            brokerReachable,
-            staleMs,
-            now,
-          });
-          return {
-            ...w,
-            healthState: health.healthState,
-            conditions: health.conditions,
-            recommendedAction: health.recommendedAction,
-            indicators: health.indicators,
-          };
-        });
+        const workerRows = repo.listWorkers();
+        const workers = await Promise.all(
+          workerRows.map(async (w) => {
+            const health = buildWorkerHealthRow({
+              worker: w,
+              brokerStatus,
+              brokerReachable,
+              staleMs,
+              now,
+            });
+            const activeOp = workerController
+              ? workerController
+                  .listActiveOperations()
+                  .find((o) => o.workerId === w.id)
+              : undefined;
+            const stuckInFlightTaskId =
+              w.id === "default" ? null : repo.getInFlightTaskId(w.id);
+            let chatAccessDenied = false;
+            let chatProbeReason: string | undefined;
+            if (
+              brokerReachable &&
+              brokerClient &&
+              w.id !== "default" &&
+              (activeOp ||
+                w.readinessReason === "ROTATION_PENDING" ||
+                w.readinessReason === "ROTATION_FAILED" ||
+                health.recommendedAction === "ASSIGN_URL")
+            ) {
+              try {
+                const probe = await brokerClient.probeSession(w.id);
+                if (
+                  !probe.ready &&
+                  probe.reason?.includes("CHAT_ACCESS_DENIED")
+                ) {
+                  chatAccessDenied = true;
+                  chatProbeReason = probe.reason;
+                }
+              } catch {
+                /* unbound worker — skip probe */
+              }
+            }
+            return {
+              ...w,
+              healthState: health.healthState,
+              conditions: health.conditions,
+              recommendedAction: health.recommendedAction,
+              indicators: health.indicators,
+              chatAccessDenied,
+              chatProbeReason,
+              activeOperation: activeOp
+                ? {
+                    id: activeOp.id,
+                    kind: activeOp.kind,
+                    state: activeOp.state,
+                    attempt: activeOp.attempt,
+                    lastError: activeOp.lastError,
+                    updatedAt: activeOp.updatedAt,
+                  }
+                : null,
+              stuckInFlightTaskId,
+            };
+          })
+        );
         sendJson(res, 200, {
           workers,
           brokerReachable,
+          brokerConfigured: Boolean(brokerClient),
+          brokerOpsPort: resolveBrokerOpsPort(),
           serverTime: new Date(now).toISOString(),
         });
         return;
@@ -1090,9 +1119,8 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
         const workerId = String(body.workerId ?? "").trim();
         const workerUrl = String(body.workerUrl ?? "").trim();
-        const confirm = String(body.confirm ?? "").trim();
-        if (confirm !== `ASSIGN ${workerId}`) {
-          sendJson(res, 400, { error: "confirm phrase mismatch" });
+        if (!workerId || !workerUrl) {
+          sendJson(res, 400, { error: "workerId and workerUrl required" });
           return;
         }
         await handleWorkerOpsPost(res, body, () =>
@@ -1113,9 +1141,8 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         }
         const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
         const workerId = String(body.workerId ?? "").trim();
-        const confirm = String(body.confirm ?? "").trim();
-        if (confirm !== `CREATE ${workerId}`) {
-          sendJson(res, 400, { error: "confirm phrase mismatch" });
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
           return;
         }
         const bootstrapMessage =
@@ -1140,9 +1167,8 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         }
         const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
         const workerId = String(body.workerId ?? "").trim();
-        const confirm = String(body.confirm ?? "").trim();
-        if (confirm !== `KILL ${workerId}`) {
-          sendJson(res, 400, { error: "confirm phrase mismatch" });
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
           return;
         }
         const mode =
@@ -1175,6 +1201,50 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
 
       if (
         req.method === "POST" &&
+        url.pathname === "/ops/workers/cancel-operation" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        await handleWorkerOpsPost(res, body, () =>
+          workerController!.cancelOperation(workerId)
+        );
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/release-stuck-task" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        const result = workerController!.releaseStuckTask(workerId);
+        rotateOpsCsrf();
+        sendJson(res, 200, { ok: true, ...result, csrf: opsCsrf });
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
         url.pathname === "/ops/workers/set-enabled" &&
         workerController
       ) {
@@ -1186,15 +1256,45 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
         const workerId = String(body.workerId ?? "").trim();
         const enabled = Boolean(body.enabled);
-        const confirm = String(body.confirm ?? "").trim();
-        const phrase = enabled ? `ENABLE ${workerId}` : `DISABLE ${workerId}`;
-        if (confirm !== phrase) {
-          sendJson(res, 400, { error: "confirm phrase mismatch" });
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
           return;
         }
         workerController.setEnabled(workerId, enabled);
         rotateOpsCsrf();
         sendJson(res, 200, { ok: true, csrf: opsCsrf });
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/remove" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        try {
+          workerController.removeWorker(workerId);
+          rotateOpsCsrf();
+          sendJson(res, 200, {
+            ok: true,
+            workerId,
+            note: "Removed from workers registry. make restart recommended so broker drops page actors.",
+            csrf: opsCsrf,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          sendJson(res, 400, { error: message });
+        }
         return;
       }
 
@@ -1210,11 +1310,6 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           return;
         }
         const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
-        const confirm = String(body.confirm ?? "").trim();
-        if (confirm !== "ADD WORKER") {
-          sendJson(res, 400, { error: "confirm phrase mismatch" });
-          return;
-        }
         const topo = loadWorkersTopology({
           workersFile,
           workerId: DEFAULT_WORKER_ID,

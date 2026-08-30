@@ -22,6 +22,10 @@ export interface WorkerOperationPayload {
   dbEnsured?: boolean;
   brokerEnsured?: boolean;
   unbound?: boolean;
+  /** readiness_reason before worker-ops reservation (for abort on fail/cancel) */
+  reservationPreviousReason?: string | null;
+  /** CREATE_CHAT automation already failed once — do not open another tab */
+  createChatAttempted?: boolean;
 }
 
 export interface WorkerOperation {

@@ -26,6 +26,14 @@ export interface CreateWorkerChatOnContextOptions {
   chatGptUrl?: string;
   timeoutMs?: number;
   bootstrapMessage?: string;
+  /** When aborted (cancel / disable), stop opening tabs and throw. */
+  signal?: AbortSignal;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new Error("worker-op cancelled");
+  }
 }
 
 export interface CreatedWorkerChatOnContext {
@@ -57,20 +65,71 @@ async function ensureChatSurface(page: Page): Promise<void> {
   }
 }
 
-/** Attach the Cursor plugin from the composer + menu (list, not search). */
+/** Best-effort: Cursor connector / MCP already visible — skip + menu attach. */
+async function cursorPluginLikelyAttached(page: Page): Promise<boolean> {
+  const probes = [
+    page.getByText(/cursor-handoff/i),
+    page.getByRole("button", { name: /Cursor/i }),
+    page.locator('[data-testid*="connector"]'),
+    page.locator('[aria-label*="Cursor"]'),
+  ];
+  for (const loc of probes) {
+    if (await loc.first().isVisible({ timeout: 800 }).catch(() => false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Attach the Cursor plugin from the composer + menu (list or search). */
 async function attachCursorPlugin(page: Page): Promise<void> {
+  if (await cursorPluginLikelyAttached(page)) {
+    log({
+      event: "INFO",
+      component: "create-worker",
+      message: "create-worker: Cursor connector already visible — skip + menu",
+    });
+    return;
+  }
+
   const plus = page.locator('[data-testid="composer-plus-btn"]').first();
   await plus.waitFor({ state: "visible", timeout: 15_000 });
   await plus.click({ timeout: 5000 });
-  await page
-    .getByText(/Type to search plugins/i)
-    .waitFor({ state: "visible", timeout: 15_000 });
-  await page.waitForTimeout(1500);
 
-  const cursor = page.getByText("Cursor", { exact: true }).first();
-  await cursor.waitFor({ state: "visible", timeout: 10_000 });
-  await cursor.click({ timeout: 5000 });
-  await page.waitForTimeout(800);
+  const searchVisible = await page
+    .getByText(/Type to search plugins/i)
+    .isVisible({ timeout: 8_000 })
+    .catch(() => false);
+
+  if (searchVisible) {
+    await page.waitForTimeout(800);
+    const searchInput = page
+      .locator('input[type="search"], input[placeholder*="search" i]')
+      .first();
+    if (await searchInput.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await searchInput.fill("Cursor");
+      await page.waitForTimeout(600);
+    }
+  }
+
+  const cursorCandidates = [
+    page.getByRole("menuitem", { name: /^Cursor$/i }),
+    page.getByRole("button", { name: /^Cursor$/i }),
+    page.getByText("Cursor", { exact: true }),
+  ];
+  for (const loc of cursorCandidates) {
+    const target = loc.first();
+    if (await target.isVisible({ timeout: 4_000 }).catch(() => false)) {
+      await target.click({ timeout: 5000 });
+      await page.waitForTimeout(800);
+      return;
+    }
+  }
+
+  throw new Error(
+    "create-worker: could not find Cursor in the + plugins menu. " +
+      "In CDP Chrome: open + → enable Cursor (or Developer Mode MCP), then use Assign URL with that chat instead of New chat."
+  );
 }
 
 async function sendBootstrap(page: Page, message: string): Promise<void> {
@@ -105,6 +164,9 @@ export async function createWorkerChatOnContext(
   context: BrowserContext,
   options: CreateWorkerChatOnContextOptions = {}
 ): Promise<CreatedWorkerChatOnContext> {
+  const signal = options.signal;
+  throwIfAborted(signal);
+
   const chatGptUrl = options.chatGptUrl ?? "https://chatgpt.com";
   const timeoutMs = options.timeoutMs ?? 90_000;
   const bootstrapMessage =
@@ -118,6 +180,7 @@ export async function createWorkerChatOnContext(
       timeout: 60_000,
     });
     await page.waitForTimeout(1500);
+    throwIfAborted(signal);
 
     const loggedOut = await page
       .locator(selectors.loggedOutIndicator)
@@ -151,12 +214,15 @@ export async function createWorkerChatOnContext(
 
     let chatId = chatIdFromUrl(page.url());
     if (!chatId) {
+      throwIfAborted(signal);
       await attachCursorPlugin(page);
+      throwIfAborted(signal);
       await sendBootstrap(page, bootstrapMessage);
     }
 
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      throwIfAborted(signal);
       chatId = chatIdFromUrl(page.url());
       if (chatId) break;
       await page.waitForTimeout(400);

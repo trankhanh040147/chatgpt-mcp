@@ -29,9 +29,13 @@ const opsModal = document.getElementById("ops-modal");
 const opsForm = document.getElementById("ops-form");
 const opsModalTitle = document.getElementById("ops-modal-title");
 const opsModalPreview = document.getElementById("ops-modal-preview");
+const opsModalError = document.getElementById("ops-modal-error");
 const opsConfirmPhrase = document.getElementById("ops-confirm-phrase");
 const opsConfirmInput = document.getElementById("ops-confirm-input");
 const opsConfirmGo = document.getElementById("ops-confirm-go");
+const opsConfirmBlock = document.getElementById("ops-confirm-block");
+const opsUrlBlock = document.getElementById("ops-url-block");
+const opsUrlInput = document.getElementById("ops-url-input");
 const btnAddWorker = document.getElementById("btn-add-worker");
 const workerAlert = document.getElementById("worker-alert");
 
@@ -43,6 +47,7 @@ const COMMANDS = [
 ];
 
 let lastOkAt = null;
+let lastBrokerOpsPort = 18788;
 let selectedTaskId = null;
 let selectedTaskStatus = null;
 let opsCsrf = null;
@@ -179,10 +184,79 @@ function formatConditions(conditions) {
     .join(" · ");
 }
 
-function renderWorkerActions(w) {
+const MCP_PROBE_BANNERS = {
+  MCP_SAFETY_BLOCKED: {
+    title: "MCP safety blocked",
+    body: "Chat binding OK — OpenAI blocked the write tool before remote-mcp.",
+    action: "Try <em>New chat…</em> for a fresh conversation.",
+    border: "rgba(200,120,48,.45)",
+    bg: "rgba(200,120,48,.08)",
+  },
+  MCP_APPROVAL_REQUIRED: {
+    title: "MCP approval required",
+    body: "Approve handoff MCP writes in ChatGPT.",
+    action: "<em>Retry verify</em> after allowing the tool.",
+    border: "rgba(200,120,48,.45)",
+    bg: "rgba(200,120,48,.08)",
+  },
+  MCP_TOOL_NOT_INVOKED: {
+    title: "MCP tool not invoked",
+    body: "ChatGPT replied in chat without calling the MCP write tool.",
+    action: "<em>New chat…</em> or <em>Retry verify</em>.",
+    border: "rgba(200,120,48,.45)",
+    bg: "rgba(200,120,48,.08)",
+  },
+  MCP_SUBMIT_TIMEOUT: {
+    title: "MCP submit timeout",
+    body: "No MCP write reached remote-mcp in the verification window.",
+    action: "Check connector permissions; <em>Retry verify</em> or <em>New chat…</em>.",
+    border: "rgba(200,120,48,.45)",
+    bg: "rgba(200,120,48,.08)",
+  },
+  PROBE_RESULT_MISMATCH: {
+    title: "Probe result mismatch",
+    body: "remote-mcp received a submit but the canary did not match.",
+    action: "<em>Retry verify</em> or <em>New chat…</em>.",
+    border: "rgba(200,120,48,.45)",
+    bg: "rgba(200,120,48,.08)",
+  },
+};
+
+function renderMcpProbeBanner(w) {
+  const spec = MCP_PROBE_BANNERS[w.readinessReason];
+  if (!spec) return "";
+  return `<div class="worker-op-banner" style="border-color:${spec.border};background:${spec.bg}"><strong>${escapeHtml(spec.title)}</strong> — ${escapeHtml(spec.body)} ${spec.action}</div>`;
+}
+
+function workerNeedsUrlAssign(w) {
+  if (w.chatAccessDenied) return true;
+  if (w.recommendedAction === "ASSIGN_URL") return true;
+  for (const c of w.conditions ?? []) {
+    if (c.type === "BINDING" && c.status === "FALSE") return true;
+    if (c.type === "URL" && c.status === "FALSE") return true;
+  }
+  return false;
+}
+
+function workerOpsBlocked(w) {
+  return Boolean(w.activeOperation || w.stuckInFlightTaskId);
+}
+
+function renderWorkerActions(w, opts = {}) {
   const id = escapeHtml(w.id);
   const sessionLost = w.status === "SESSION_LOST";
+  const blocked = workerOpsBlocked(w);
   const parts = [];
+  if (w.activeOperation) {
+    parts.push(
+      `<button type="button" class="danger" data-worker-action="cancel" data-worker-id="${id}">Cancel stuck op</button>`
+    );
+  }
+  if (w.stuckInFlightTaskId) {
+    parts.push(
+      `<button type="button" class="danger" data-worker-action="fail-stuck" data-worker-id="${id}">Fail stuck handoff</button>`
+    );
+  }
   if (sessionLost || w.recommendedAction === "RECREATE_CHAT") {
     parts.push(
       `<button type="button" class="danger" data-worker-action="kill" data-worker-id="${id}">Recreate chat…</button>`
@@ -190,99 +264,185 @@ function renderWorkerActions(w) {
   }
   if (
     w.recommendedAction === "RETRY_VERIFY" ||
-    w.readinessReason === "CONSENT_REQUIRED"
+    w.readinessReason === "CONSENT_REQUIRED" ||
+    w.readinessReason === "MCP_APPROVAL_REQUIRED"
   ) {
     parts.push(
       `<button type="button" class="primary" data-worker-action="retry" data-worker-id="${id}">Retry verify</button>`
     );
   }
-  if (w.recommendedAction === "ASSIGN_URL" || w.healthState === "DEGRADED") {
-    parts.push(
-      `<button type="button" data-worker-action="assign" data-worker-id="${id}">Assign URL…</button>`
-    );
-  }
+  const assignPrimary = workerNeedsUrlAssign(w);
   parts.push(
-    `<button type="button" data-worker-action="create" data-worker-id="${id}">New chat…</button>`
+    `<button type="button" data-worker-action="assign" data-worker-id="${id}"${assignPrimary ? " class=\"primary\"" : ""}${blocked ? " disabled title=\"Fail stuck handoff or cancel op first\"" : ""}>Assign URL…</button>`
+  );
+  const createHint = w.stuckInFlightTaskId || w.activeOperation
+    ? " title=\"Clears stuck handoff/op and starts new chat\""
+    : "";
+  parts.push(
+    `<button type="button" data-worker-action="create" data-worker-id="${id}"${createHint}>New chat…</button>`
   );
   const enabled = w.errorCode !== "DISABLED";
   parts.push(
     `<button type="button" data-worker-action="toggle" data-worker-id="${id}" data-enabled="${enabled ? "0" : "1"}">${enabled ? "Disable…" : "Enable…"}</button>`
   );
+  if (opts.canRemove) {
+    parts.push(
+      `<button type="button" class="danger" data-worker-action="remove" data-worker-id="${id}"${blocked ? " disabled title=\"Fail stuck handoff or cancel op first\"" : ""}>Remove…</button>`
+    );
+  }
   return parts.join("");
 }
 
-function renderWorkerAlert(workers) {
+function formatActiveOperation(op) {
+  if (!op) return "";
+  const err = op.lastError
+    ? `<span class="worker-op-error">${escapeHtml(op.lastError)}</span>`
+    : "";
+  return `<div class="worker-op-banner">
+    <span class="worker-op-label">Worker op</span>
+    <strong>${escapeHtml(op.kind)}</strong>
+    <span class="mono">${escapeHtml(op.state)}</span>
+    <span class="muted">attempt ${op.attempt}</span>
+    ${err}
+  </div>`;
+}
+
+function renderWorkerAlert(workers, healthMeta) {
   if (!workerAlert) return;
+  const messages = [];
+  if (
+    healthMeta?.brokerConfigured &&
+    healthMeta.brokerReachable === false
+  ) {
+    messages.push(
+      `<strong>Browser broker unreachable</strong> (:${healthMeta.brokerOpsPort ?? lastBrokerOpsPort}) — New chat / assign cannot run. Start stack: <code>./scripts/start-broker-stack.sh</code> (Chrome CDP + browser-broker).`
+    );
+  }
   const lost = (workers ?? []).filter(
     (w) => w.id !== "default" && w.status === "SESSION_LOST"
   );
-  if (lost.length === 0) {
+  if (lost.length > 0) {
+    const names = lost.map((w) => w.id).join(", ");
+    messages.push(
+      `<strong>Session lost</strong> on ${escapeHtml(names)} — log into ChatGPT in the CDP window, then <em>Recreate chat…</em> or <em>Retry verify</em>.`
+    );
+  }
+  const stuck = (workers ?? []).filter(
+    (w) => w.id !== "default" && w.activeOperation
+  );
+  const accessDenied = (workers ?? []).filter(
+    (w) => w.id !== "default" && w.chatAccessDenied
+  );
+  if (accessDenied.length > 0) {
+    messages.push(
+      `<strong>Chat access denied</strong> on ${escapeHtml(accessDenied.map((w) => w.id).join(", "))} — CDP Chrome cannot open the saved /c/ URL. Use <em>Assign URL…</em> with a chat you created in CDP (see setup guide above).`
+    );
+  }
+  const urlMismatch = (workers ?? []).filter(
+    (w) => w.id !== "default" && workerNeedsUrlAssign(w) && !w.chatAccessDenied
+  );
+  if (urlMismatch.length > 0 && healthMeta?.brokerReachable === false) {
+    messages.push(
+      `<strong>URL / binding mismatch</strong> on ${escapeHtml(urlMismatch.map((w) => w.id).join(", "))} — start broker first, then <em>Assign URL…</em> with a chat from CDP Chrome.`
+    );
+  }
+  if (stuck.length > 0 && healthMeta?.brokerReachable === false) {
+    messages.push(
+      `Active ops on ${escapeHtml(stuck.map((w) => w.id).join(", "))} will retry every few seconds or use <em>Cancel stuck op</em> on the worker card.`
+    );
+  }
+  if (messages.length === 0) {
     workerAlert.classList.add("hidden");
     workerAlert.hidden = true;
     workerAlert.textContent = "";
     return;
   }
-  const names = lost.map((w) => w.id).join(", ");
   workerAlert.classList.remove("hidden");
   workerAlert.hidden = false;
-  workerAlert.innerHTML = `<strong>Session lost</strong> on ${escapeHtml(names)} — log into ChatGPT in the worker CDP window, then use <em>Recreate chat…</em> or <em>Retry verify</em>.`;
+  workerAlert.innerHTML = messages.join("<br><br>");
 }
 
 async function beginWorkerAssign(workerId) {
   if (opsInFlight) return;
-  const workerUrl = window.prompt(
-    `Paste ChatGPT worker chat URL for ${workerId}`,
-    "https://chatgpt.com/c/"
-  );
-  if (!workerUrl?.trim()) return;
-  const phrase = `ASSIGN ${workerId}`;
+  const state = await fetchJson("/workers/health");
+  const row = (state.workers ?? []).find((w) => w.id === workerId);
+  const currentUrl =
+    row?.chatUrl ?? row?.workerUrl ?? "https://chatgpt.com/c/";
   openOpsModal({
     title: `Assign URL · ${workerId}`,
-    preview: `Registry + broker bind → ${workerUrl.trim()}\nThen SYSTEM_PROBE until READY (not RESTART_REQUIRED).`,
-    phrase,
+    preview:
+      "Updates workers.json, binds the broker tab, and runs SYSTEM_PROBE until READY.",
+    typedConfirm: false,
+    showUrlField: true,
+    initialUrl: currentUrl.startsWith("http") ? currentUrl : "https://chatgpt.com/c/",
     pending: {
       kind: "worker-assign",
-      phrase,
+      typedConfirm: false,
+      showUrlField: true,
       workerId,
-      workerUrl: workerUrl.trim(),
     },
   });
 }
 
 async function beginWorkerCreate(workerId) {
   if (opsInFlight) return;
-  const phrase = `CREATE ${workerId}`;
   openOpsModal({
     title: `Create chat · ${workerId}`,
     preview:
-      "Broker opens a new worker chat tab, updates registry, and runs SYSTEM_PROBE.",
-    phrase,
-    pending: { kind: "worker-create", phrase, workerId },
+      "Broker opens a new tab in CDP Chrome, switches to Chat, attaches Cursor from + menu, sends bootstrap → /c/ URL → probe.\n" +
+      "Any stuck handoff or prior worker op on this card is cleared automatically.\n" +
+      "If + menu does not list Cursor: attach manually in CDP, then use Assign URL instead.",
+    typedConfirm: false,
+    pending: { kind: "worker-create", typedConfirm: false, workerId },
   });
 }
 
 async function beginWorkerKill(workerId) {
   if (opsInFlight) return;
-  const phrase = `KILL ${workerId}`;
   openOpsModal({
     title: `Kill + recreate · ${workerId}`,
     preview:
       "Unbind tab, create a fresh worker chat, update registry, probe until READY.",
-    phrase,
-    pending: { kind: "worker-kill", phrase, workerId, mode: "create" },
+    typedConfirm: false,
+    pending: {
+      kind: "worker-kill",
+      typedConfirm: false,
+      workerId,
+      mode: "create",
+    },
   });
 }
 
 async function beginWorkerToggle(workerId, enable) {
   if (opsInFlight) return;
-  const phrase = enable ? `ENABLE ${workerId}` : `DISABLE ${workerId}`;
   openOpsModal({
     title: enable ? `Enable ${workerId}` : `Disable ${workerId}`,
     preview: enable
       ? "Worker returns to dispatch pool after reconcile."
       : "Worker stops claiming tasks; broker binding unchanged.",
-    phrase,
-    pending: { kind: "worker-toggle", phrase, workerId, enabled: enable },
+    typedConfirm: false,
+    pending: {
+      kind: "worker-toggle",
+      typedConfirm: false,
+      workerId,
+      enabled: enable,
+    },
+  });
+}
+
+async function beginWorkerRemove(workerId) {
+  if (opsInFlight) return;
+  openOpsModal({
+    title: `Remove worker · ${workerId}`,
+    preview:
+      `Delete ${workerId} from workers registry, unbind CDP tab, and clear worker_state.\n` +
+      "Task history is kept. Run make restart so browser-broker drops page actors for removed ids.",
+    typedConfirm: false,
+    pending: {
+      kind: "worker-remove",
+      typedConfirm: false,
+      workerId,
+    },
   });
 }
 
@@ -292,9 +452,39 @@ async function beginAddWorker() {
     title: "Add worker",
     preview:
       "Append a new worker id to workers.json with placeholder URL; assign real chat URL afterward.",
-    phrase: "ADD WORKER",
-    pending: { kind: "worker-add", phrase: "ADD WORKER" },
+    typedConfirm: false,
+    pending: { kind: "worker-add", typedConfirm: false },
   });
+}
+
+async function runWorkerFailStuck(workerId) {
+  if (opsInFlight) return;
+  opsInFlight = true;
+  try {
+    const result = await postOps("/ops/workers/release-stuck-task", {
+      workerId,
+    });
+    showOpsResult(result);
+    await tick();
+  } catch (err) {
+    showOpsResult(err instanceof Error ? err.message : String(err));
+  } finally {
+    opsInFlight = false;
+  }
+}
+
+async function runWorkerCancel(workerId) {
+  if (opsInFlight) return;
+  opsInFlight = true;
+  try {
+    const result = await postOps("/ops/workers/cancel-operation", { workerId });
+    showOpsResult(result);
+    await tick();
+  } catch (err) {
+    showOpsResult(err instanceof Error ? err.message : String(err));
+  } finally {
+    opsInFlight = false;
+  }
 }
 
 async function runWorkerRetry(workerId) {
@@ -381,12 +571,31 @@ async function ensureCsrf() {
   return opsCsrf;
 }
 
+function setOpsModalError(message) {
+  if (!opsModalError) return;
+  if (!message) {
+    opsModalError.textContent = "";
+    opsModalError.hidden = true;
+    opsModalError.classList.add("hidden");
+    return;
+  }
+  opsModalError.textContent = message;
+  opsModalError.hidden = false;
+  opsModalError.classList.remove("hidden");
+}
+
 function showOpsResult(obj) {
   if (!opsResultEl) return;
   opsResultEl.classList.remove("hidden");
   opsResultEl.hidden = false;
-  opsResultEl.textContent =
+  const text =
     typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+  opsResultEl.textContent = text;
+  if (typeof obj === "string" && obj.length > 0) {
+    opsResultEl.classList.add("ops-result--error");
+  } else {
+    opsResultEl.classList.remove("ops-result--error");
+  }
 }
 
 async function postOps(path, body) {
@@ -430,21 +639,74 @@ function formatRecoverPreview(p) {
   return lines.join("\n");
 }
 
-function openOpsModal({ title, preview, phrase, pending }) {
-  pendingOps = pending;
+function isValidWorkerChatUrl(url) {
+  return /^https:\/\/chatgpt\.com\/c\/[a-z0-9-]+/i.test(String(url ?? "").trim());
+}
+
+function syncOpsModalGoState() {
+  if (!opsConfirmGo || !pendingOps) return;
+  if (pendingOps.showUrlField) {
+    opsConfirmGo.disabled = !isValidWorkerChatUrl(opsUrlInput?.value);
+    return;
+  }
+  if (pendingOps.typedConfirm) {
+    opsConfirmGo.disabled =
+      !pendingOps.phrase ||
+      opsConfirmInput?.value.trim() !== pendingOps.phrase;
+    return;
+  }
+  opsConfirmGo.disabled = false;
+}
+
+function openOpsModal({
+  title,
+  preview,
+  phrase,
+  pending,
+  typedConfirm = true,
+  showUrlField = false,
+  initialUrl = "",
+}) {
+  pendingOps = { ...pending, typedConfirm, showUrlField };
+  setOpsModalError("");
   opsModalTitle.textContent = title;
   opsModalPreview.textContent = preview;
-  opsConfirmPhrase.textContent = phrase;
-  opsConfirmInput.value = "";
-  opsConfirmGo.disabled = true;
-  opsConfirmGo.className = pending.kind === "fail" ? "danger" : "primary";
+  const needTyped = typedConfirm && phrase;
+  if (opsConfirmBlock) {
+    opsConfirmBlock.hidden = !needTyped;
+    opsConfirmBlock.classList.toggle("hidden", !needTyped);
+  }
+  if (opsUrlBlock) {
+    opsUrlBlock.hidden = !showUrlField;
+    opsUrlBlock.classList.toggle("hidden", !showUrlField);
+  }
+  if (showUrlField && opsUrlInput) {
+    opsUrlInput.value = initialUrl || "https://chatgpt.com/c/";
+    opsUrlInput.focus();
+  } else if (needTyped) {
+    opsConfirmPhrase.textContent = phrase;
+    opsConfirmInput.value = "";
+    opsConfirmInput.focus();
+  }
+  opsConfirmGo.className =
+    pending.kind === "fail" ? "danger" : typedConfirm ? "danger" : "primary";
+  if (opsConfirmGo) {
+    opsConfirmGo.textContent = showUrlField ? "Assign URL" : typedConfirm ? "Execute" : "Confirm";
+  }
+  syncOpsModalGoState();
   if (typeof opsModal.showModal === "function") opsModal.showModal();
   else opsModal.setAttribute("open", "");
-  opsConfirmInput.focus();
 }
 
 function closeOpsModal() {
   pendingOps = null;
+  setOpsModalError("");
+  if (opsConfirmGo) opsConfirmGo.textContent = "Execute";
+  if (opsUrlBlock) {
+    opsUrlBlock.hidden = true;
+    opsUrlBlock.classList.add("hidden");
+  }
+  if (opsUrlInput) opsUrlInput.value = "";
   if (typeof opsModal.close === "function") opsModal.close();
   else opsModal.removeAttribute("open");
 }
@@ -459,10 +721,10 @@ async function beginRecover(failQueued) {
     openOpsModal({
       title: failQueued ? "Recover + fail queued" : "Recover",
       preview: formatRecoverPreview(preview),
-      phrase: preview.confirmPhrase,
+      typedConfirm: false,
       pending: {
         kind: "recover",
-        phrase: preview.confirmPhrase,
+        typedConfirm: false,
         planToken: preview.planToken,
       },
     });
@@ -486,12 +748,11 @@ async function beginFailTask() {
     showOpsResult(`Task already terminal: ${selectedTaskStatus}`);
     return;
   }
-  const phrase = `FAIL ${selectedTaskId}`;
   openOpsModal({
     title: "Fail task",
     preview: `Mark ${selectedTaskId} (${selectedTaskStatus ?? "?"}) as FAILED.\nClears lease capability fields; preserves lease_owner for attribution.`,
-    phrase,
-    pending: { kind: "fail", phrase, taskId: selectedTaskId },
+    typedConfirm: false,
+    pending: { kind: "fail", typedConfirm: false, taskId: selectedTaskId },
   });
 }
 
@@ -503,14 +764,12 @@ async function executePendingOps() {
     if (pendingOps.kind === "recover") {
       const result = await postOps("/ops/recover", {
         planToken: pendingOps.planToken,
-        confirm: pendingOps.phrase,
       });
       closeOpsModal();
       showOpsResult(result);
       await tick();
     } else if (pendingOps.kind === "fail") {
       const result = await postOps("/ops/tasks/fail", {
-        confirm: pendingOps.phrase,
         taskId: pendingOps.taskId,
       });
       closeOpsModal();
@@ -518,43 +777,59 @@ async function executePendingOps() {
       if (selectedTaskId) await showTaskDetail(selectedTaskId);
       await tick();
     } else if (pendingOps.kind === "worker-assign") {
+      const workerUrl = opsUrlInput?.value?.trim() ?? "";
+      if (!isValidWorkerChatUrl(workerUrl)) {
+        showOpsResult("Invalid URL — need https://chatgpt.com/c/<id>");
+        return;
+      }
       const result = await postOps("/ops/workers/assign-url", {
         workerId: pendingOps.workerId,
-        workerUrl: pendingOps.workerUrl,
-        confirm: pendingOps.phrase,
+        workerUrl,
       });
       closeOpsModal();
-      showOpsResult(result);
+      showOpsResult({
+        ...result,
+        note: `Watch the Worker op banner on the card. Broker must be up (:${lastBrokerOpsPort}).`,
+      });
       await tick();
     } else if (pendingOps.kind === "worker-create") {
       const result = await postOps("/ops/workers/create-chat", {
         workerId: pendingOps.workerId,
-        confirm: pendingOps.phrase,
       });
       closeOpsModal();
-      showOpsResult(result);
+      showOpsResult({
+        ...result,
+        note: `Watch the Worker op banner on the card. Broker must be up (:${lastBrokerOpsPort}).`,
+      });
       await tick();
     } else if (pendingOps.kind === "worker-kill") {
       const result = await postOps("/ops/workers/kill-recreate", {
         workerId: pendingOps.workerId,
         mode: pendingOps.mode ?? "create",
-        confirm: pendingOps.phrase,
       });
       closeOpsModal();
-      showOpsResult(result);
+      showOpsResult({
+        ...result,
+        note: `Watch the Worker op banner on the card. Broker must be up (:${lastBrokerOpsPort}).`,
+      });
       await tick();
     } else if (pendingOps.kind === "worker-toggle") {
       const result = await postOps("/ops/workers/set-enabled", {
         workerId: pendingOps.workerId,
         enabled: pendingOps.enabled,
-        confirm: pendingOps.phrase,
       });
       closeOpsModal();
       showOpsResult(result);
       await tick();
     } else if (pendingOps.kind === "worker-add") {
-      const result = await postOps("/ops/workers/add", {
-        confirm: pendingOps.phrase,
+      const result = await postOps("/ops/workers/add", {});
+      closeOpsModal();
+      showOpsResult(result);
+      await loadTopology();
+      await tick();
+    } else if (pendingOps.kind === "worker-remove") {
+      const result = await postOps("/ops/workers/remove", {
+        workerId: pendingOps.workerId,
       });
       closeOpsModal();
       showOpsResult(result);
@@ -562,10 +837,13 @@ async function executePendingOps() {
       await tick();
     }
   } catch (err) {
-    showOpsResult(err instanceof Error ? err.message : String(err));
+    const msg = err instanceof Error ? err.message : String(err);
+    setOpsModalError(msg);
+    showOpsResult(msg);
     if (err?.code === "plan_stale") closeOpsModal();
   } finally {
     opsInFlight = false;
+    syncOpsModalGoState();
   }
 }
 
@@ -780,6 +1058,12 @@ function renderWorkers(workers, showReference) {
           <span class="pill ${kind}">${escapeHtml(w.status)}</span>
         </div>
         ${w.healthState ? `<div class="row"><span class="muted">Ops health</span><span class="pill ${healthStateClass(w.healthState)} health-state">${escapeHtml(w.healthState)}</span></div>` : ""}
+        ${formatActiveOperation(w.activeOperation)}
+        ${w.stuckInFlightTaskId ? `<div class="worker-op-banner worker-stuck-banner"><strong>Handoff stuck</strong> — <code>${escapeHtml(w.stuckInFlightTaskId)}</code> blocks New chat / Remove. Click <em>Fail stuck handoff</em>.</div>` : ""}
+        ${w.chatAccessDenied ? `<div class="worker-op-banner" style="border-color:rgba(200,72,48,.45);background:rgba(200,72,48,.08)"><strong>Chat access denied</strong> — use <em>Assign URL…</em> with a chat from CDP Chrome.</div>` : ""}
+        ${w.readinessReason === "ROTATION_PENDING" ? `<div class="worker-op-banner" style="border-color:rgba(200,72,48,.45);background:rgba(200,72,48,.08)"><strong>Rotation in progress</strong> — wait for the op banner or <em>Cancel stuck op</em>.</div>` : ""}
+        ${w.readinessReason === "ROTATION_FAILED" ? `<div class="worker-op-banner" style="border-color:rgba(200,120,48,.45);background:rgba(200,120,48,.08)"><strong>Rotation failed</strong> — binding or registry step failed; retry <em>Assign URL…</em> or <em>New chat…</em>.</div>` : ""}
+        ${renderMcpProbeBanner(w)}
         <div class="row"><span class="muted">Health</span><span>${w.healthy ? "Healthy" : "Unhealthy"}</span></div>
         <div class="row"><span class="muted">PID</span><span>${w.pidAlive ? `${w.pid ?? "—"} · alive` : "dead"}</span></div>
         <div class="row"><span class="muted">Heartbeat</span><span>${w.heartbeatStale ? "stale" : "fresh"} · ${age(w.lastSeenAt)}</span></div>
@@ -792,7 +1076,7 @@ function renderWorkers(workers, showReference) {
         ${w.conditions?.length ? `<div class="conditions" title="${escapeHtml(formatConditions(w.conditions))}">${escapeHtml(formatConditions(w.conditions))}</div>` : ""}
         ${inds ? `<div class="indicators">${inds}</div>` : ""}
         ${chat}
-        <div class="worker-actions">${renderWorkerActions(w)}</div>
+        <div class="worker-actions">${renderWorkerActions(w, { canRemove: live.length > 1 })}</div>
       </article>`;
     })
     .join("");
@@ -875,12 +1159,25 @@ function renderHints(workers, health) {
     (w) =>
       w.healthState === "BLOCKED" ||
       w.readinessReason === "CONSENT_REQUIRED" ||
+      w.readinessReason === "MCP_APPROVAL_REQUIRED" ||
       w.status === "SESSION_LOST"
   );
   if (blocked.length > 0) {
     hints.push({
       kind: "warn",
       text: `Worker ops: ${blocked.map((w) => w.id).join(", ")} need dashboard action (consent / session / bind)`,
+    });
+  }
+
+  const mcpDegraded = live.filter((w) =>
+    w.healthState === "DEGRADED" &&
+    w.readinessReason &&
+    String(w.readinessReason).startsWith("MCP_")
+  );
+  if (mcpDegraded.length > 0) {
+    hints.push({
+      kind: "warn",
+      text: `MCP probe degraded (binding may be OK): ${mcpDegraded.map((w) => `${w.id} (${w.readinessReason})`).join(", ")}`,
     });
   }
 
@@ -1128,7 +1425,14 @@ async function tick() {
     const showRef =
       health.referencePricingEnabled === true ||
       health.costConfig?.referencePricingEnabled === true;
-    renderWorkerAlert(mergedWorkers);
+    if (healthBody.brokerOpsPort) {
+      lastBrokerOpsPort = healthBody.brokerOpsPort;
+    }
+    renderWorkerAlert(mergedWorkers, {
+      brokerReachable: healthBody.brokerReachable,
+      brokerConfigured: healthBody.brokerConfigured,
+      brokerOpsPort: healthBody.brokerOpsPort ?? lastBrokerOpsPort,
+    });
     renderWorkers(mergedWorkers, showRef);
     renderTasks(tasksBody.tasks ?? [], showRef);
     renderHints(mergedWorkers, health);
@@ -1171,19 +1475,20 @@ workersEl.addEventListener("click", (ev) => {
   if (action === "assign") void beginWorkerAssign(workerId);
   else if (action === "create") void beginWorkerCreate(workerId);
   else if (action === "kill") void beginWorkerKill(workerId);
+  else if (action === "cancel") void runWorkerCancel(workerId);
+  else if (action === "fail-stuck") void runWorkerFailStuck(workerId);
   else if (action === "retry") void runWorkerRetry(workerId);
   else if (action === "toggle") {
     const enable = btn.getAttribute("data-enabled") === "1";
     void beginWorkerToggle(workerId, enable);
-  }
+  } else if (action === "remove") void beginWorkerRemove(workerId);
 });
 
 if (opsConfirmInput) {
-  opsConfirmInput.addEventListener("input", () => {
-    if (!opsConfirmGo) return;
-    opsConfirmGo.disabled =
-      !pendingOps || opsConfirmInput.value.trim() !== pendingOps.phrase;
-  });
+  opsConfirmInput.addEventListener("input", () => syncOpsModalGoState());
+}
+if (opsUrlInput) {
+  opsUrlInput.addEventListener("input", () => syncOpsModalGoState());
 }
 
 if (opsForm) {
@@ -1195,10 +1500,13 @@ if (opsForm) {
       return;
     }
     ev.preventDefault();
+    if (!pendingOps || opsInFlight) return;
+    if (pendingOps.showUrlField && !isValidWorkerChatUrl(opsUrlInput?.value)) {
+      return;
+    }
     if (
-      !pendingOps ||
-      opsConfirmInput.value.trim() !== pendingOps.phrase ||
-      opsInFlight
+      pendingOps.typedConfirm &&
+      opsConfirmInput.value.trim() !== pendingOps.phrase
     ) {
       return;
     }

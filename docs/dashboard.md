@@ -21,14 +21,18 @@ URL: `http://127.0.0.1:8787/dashboard/`
 |------|--------|
 | Control plane | Health, lease reaper, last tick, requeued / timed out / failed |
 | Workers | id, status, ops health (`READY` / `DEGRADED` / `BLOCKED` / `OFFLINE`), pid, heartbeat, current task |
-| Worker ops | Assign URL, create chat, kill+recreate, retry verify, enable/disable, add worker — typed confirm + CSRF |
-| Conditions | PROCESS / BROKER / BINDING / URL / SESSION / MCP per worker (`GET /workers/health`) |
+| Worker ops | Assign URL (inline in ops modal), create chat, kill+recreate, retry verify, enable/disable, add/remove worker — confirm modal + CSRF; CDP setup guide when binding is missing |
+| Conditions | PROCESS / BROKER / BINDING / URL / SESSION / MCP per worker (`GET /workers/health`); `chatAccessDenied` when ChatGPT shows “don't have access to this conversation” |
 | Chat budget | `tasks_on_chat / max` (default 20); warn at N−1; rotation readiness chips |
 | Tasks | Recent list + drawer (timing, indicators, optional redacted content) |
-| Recover / fail-task | Preview → typed confirm (`RECOVER <n>` / `FAIL <id>`); CSRF + origin allowlist |
+| Recover / fail-task | Preview → one-click confirm modal (no typed phrase); CSRF + origin allowlist |
 | Usage | Estimated visible-text tokens; optional reference $ vs Cursor scenario (off by default) |
 
-URL and chat changes run through the **worker control plane** (`POST /ops/workers/*` → journal → broker HTTP on `:8788`). Normal dashboard flow: `CONSENT_REQUIRED` → probe → `READY` — **not** `RESTART_REQUIRED`.
+URL and chat changes run through the **worker control plane** (`POST /ops/workers/*` → journal → broker HTTP on `:18788` by default). Normal dashboard flow: `CONSENT_REQUIRED` → probe → `READY` — **not** `RESTART_REQUIRED`.
+
+**Access denied:** If workers point at chats the CDP Chrome account cannot open, health shows `chatAccessDenied` and the UI recommends **Assign URL** with a new chat URL from that Chrome session.
+
+**Broker down:** If broker ops port is unreachable, worker ops show `BROKER:UNKNOWN` and a banner — use `make restart` (broker stack, not legacy `browser-worker`). Default port is **18788** (not 8788) to avoid clashes with other local dashboards. Check: `lsof -i :18788`.
 
 CLI rotation remains available: [rotation.md](rotation.md).
 
@@ -45,7 +49,7 @@ Tests: `npm run test:ops`, `npm run test:worker-ops`, `npm run test:usage`. Back
 | `HANDOFF_DASHBOARD_TASK_CONTENT` | off | `redacted` enables on-demand prompt/result in the drawer |
 | `HANDOFF_REFERENCE_PRICING` | `off` | `on` shows comparison $ (not ChatGPT invoices) |
 | `HANDOFF_REFERENCE_SCENARIO` | `claude-sonnet-5` | Cursor-alternative price row |
-| `HANDOFF_BROKER_OPS_PORT` | `8788` | Broker control HTTP (loopback) |
+| `HANDOFF_BROKER_OPS_PORT` | `18788` | Broker control HTTP (loopback) |
 | `HANDOFF_BROKER_OPS_TOKEN` | (generated in stack script) | Auth between status-api and broker |
 | `HANDOFF_RECONCILE_INTERVAL_MS` | `5000` | Worker journal reconcile tick |
 

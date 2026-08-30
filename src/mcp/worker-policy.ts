@@ -54,3 +54,26 @@ export const SUBMIT_NUDGE_MESSAGE = (taskId: string): string =>
   "Submit the full technical answer now from the task payload — " +
   "do not wait on optional live pages (Figma/login). " +
   "Schema/SQL/EXPLAIN from the task is authorized. Use the MCP tool.";
+
+/** Minimal tool description for handoff_complete_probe (SYSTEM_PROBE only). */
+export const PROBE_COMPLETE_TOOL_DESCRIPTION =
+  "Complete a chatgpt-mcp worker connectivity check. " +
+  "Records an opaque verification token for the current probe. " +
+  "No external communication or destructive action occurs.";
+
+/** get_task submitPolicy for SYSTEM_PROBE — no Schema/SQL/exfiltration wording. */
+export const PROBE_GET_TASK_SUBMIT_POLICY = {
+  useTool: "handoff_complete_probe",
+  fields: { taskId: "TASK_ID from chat", canary: "token from task prompt" },
+  note: "Complete the connectivity check via the probe tool. Do not paste the canary in chat.",
+} as const;
+
+/**
+ * SYSTEM_PROBE nudge — neutral wording only (no authorization / exfiltration language).
+ */
+export const PROBE_SUBMIT_NUDGE_MESSAGE = (taskId: string): string =>
+  `Complete the worker connectivity check.\n` +
+  `Call handoff_complete_probe with:\n` +
+  `taskId: ${taskId}\n` +
+  `canary: (from the task prompt)\n` +
+  "Do not reply with the canary in chat.";

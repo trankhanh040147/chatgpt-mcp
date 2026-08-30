@@ -1,3 +1,6 @@
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { resolveBrokerOpsPort } from "./broker-ops-config.js";
 import { log } from "../logging/logger.js";
 
 export interface BrokerBindingSnapshot {
@@ -72,6 +75,10 @@ export class BrokerOpsClient {
     await this.request("POST", "/broker/unbind", { workerId });
   }
 
+  async cancelUi(workerId: string): Promise<void> {
+    await this.request("POST", "/broker/cancel-ui", { workerId });
+  }
+
   async createChat(
     workerId: string,
     bootstrapMessage?: string
@@ -98,9 +105,23 @@ export class BrokerOpsClient {
   }
 }
 
+export function resolveBrokerOpsToken(): string {
+  const fromEnv = process.env.HANDOFF_BROKER_OPS_TOKEN?.trim();
+  if (fromEnv) return fromEnv;
+  const tokenPath = resolve(process.cwd(), "logs/broker-ops.token");
+  if (existsSync(tokenPath)) {
+    try {
+      return readFileSync(tokenPath, "utf-8").trim();
+    } catch {
+      /* ignore */
+    }
+  }
+  return "";
+}
+
 export function brokerOpsClientFromEnv(): BrokerOpsClient | null {
-  const port = Number(process.env.HANDOFF_BROKER_OPS_PORT ?? 8788);
-  const token = process.env.HANDOFF_BROKER_OPS_TOKEN?.trim() ?? "";
+  const port = resolveBrokerOpsPort();
+  const token = resolveBrokerOpsToken();
   if (!token) return null;
   return new BrokerOpsClient(`http://127.0.0.1:${port}`, token);
 }

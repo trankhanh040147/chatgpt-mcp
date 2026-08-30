@@ -191,13 +191,24 @@ export function deriveWorkerIndicators(input: {
       ROTATION_FAILED: "Rotation failed",
       RESTART_REQUIRED: "Restart broker required",
       CONSENT_REQUIRED: "MCP consent required",
+      MCP_SAFETY_BLOCKED: "MCP safety blocked",
+      MCP_APPROVAL_REQUIRED: "MCP approval required",
+      MCP_TOOL_NOT_INVOKED: "MCP tool not invoked",
+      MCP_SUBMIT_TIMEOUT: "MCP submit timeout",
+      PROBE_RESULT_MISMATCH: "Probe mismatch",
     };
     const label = labels[input.readinessReason];
     if (label) {
+      const severity =
+        input.readinessReason === "ROTATION_FAILED" ||
+        input.readinessReason === "MCP_SAFETY_BLOCKED" ||
+        input.readinessReason === "PROBE_RESULT_MISMATCH"
+          ? "bad"
+          : "warn";
       out.push({
         kind: "rotation_blocked",
         label,
-        severity: input.readinessReason === "ROTATION_FAILED" ? "bad" : "warn",
+        severity,
       });
     }
   }

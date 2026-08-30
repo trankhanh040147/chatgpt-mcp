@@ -6,6 +6,11 @@ cd "$ROOT"
 mkdir -p logs
 trap '' HUP
 
+if [[ -f logs/broker-ops.token ]]; then
+  export HANDOFF_BROKER_OPS_TOKEN="${HANDOFF_BROKER_OPS_TOKEN:-$(cat logs/broker-ops.token)}"
+fi
+export HANDOFF_BROKER_OPS_PORT="${HANDOFF_BROKER_OPS_PORT:-18788}"
+
 while true; do
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) starting status-api" >> logs/status-api-supervise.log
   node dist/index.js status-api >> logs/status-api.log 2>&1 &

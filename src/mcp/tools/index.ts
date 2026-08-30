@@ -6,6 +6,8 @@ import {
   UNSCOPED_CLIENT_SESSION_ID,
 } from "../../tasks/task.types.js";
 import {
+  PROBE_COMPLETE_TOOL_DESCRIPTION,
+  PROBE_GET_TASK_SUBMIT_POLICY,
   SUBMIT_POLICY,
   SUBMIT_RESULT_TOOL_DESCRIPTION,
 } from "../worker-policy.js";
@@ -159,10 +161,14 @@ export function registerHandoffTools(
           files.length > 0
             ? "Call handoff_read_file({taskId, fileId}) for each file above before answering."
             : undefined,
-        submitPolicy: {
-          ...SUBMIT_POLICY,
-          lateSubmitAccepted: task.status === "TIMED_OUT" && !task.result,
-        },
+        submitPolicy:
+          task.taskClass === "SYSTEM_PROBE"
+            ? PROBE_GET_TASK_SUBMIT_POLICY
+            : {
+                ...SUBMIT_POLICY,
+                lateSubmitAccepted:
+                  task.status === "TIMED_OUT" && !task.result,
+              },
       });
     }
   );
@@ -198,6 +204,29 @@ export function registerHandoffTools(
         }
         throw new Error("FILE_NOT_ALLOWED");
       }
+    }
+  );
+
+  server.tool(
+    "handoff_complete_probe",
+    PROBE_COMPLETE_TOOL_DESCRIPTION,
+    {
+      taskId: taskIdSchema,
+      canary: z.string().min(1).max(128),
+    },
+    {
+      title: "Complete worker probe",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    async (args) => {
+      const output = taskService.completeProbe({
+        taskId: args.taskId as string,
+        canary: args.canary as string,
+      });
+      return jsonContent(output);
     }
   );
 

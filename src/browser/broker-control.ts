@@ -41,6 +41,8 @@ export interface StartBrokerControlServerOptions {
   port: number;
   token: string;
   broker: BrowserBroker;
+  /** Spawn claim-loop actor after bind/rebind (recovery when startup bind raced CDP). */
+  onWorkerBound?: (workerId: string) => void;
 }
 
 export function startBrokerControlServer(
@@ -91,6 +93,7 @@ export function startBrokerControlServer(
               return;
             }
             await options.broker.rebindWorker(workerId, workerUrl);
+            options.onWorkerBound?.(workerId);
             sendJson(res, 200, { ok: true });
             return;
           }
@@ -100,7 +103,18 @@ export function startBrokerControlServer(
               sendJson(res, 400, { error: "workerId required" });
               return;
             }
+            options.broker.cancelWorkerUi(workerId);
             await options.broker.unbindWorker(workerId);
+            sendJson(res, 200, { ok: true });
+            return;
+          }
+
+          if (url.pathname === "/broker/cancel-ui") {
+            if (!workerId) {
+              sendJson(res, 400, { error: "workerId required" });
+              return;
+            }
+            options.broker.cancelWorkerUi(workerId);
             sendJson(res, 200, { ok: true });
             return;
           }
@@ -118,6 +132,7 @@ export function startBrokerControlServer(
               workerId,
               bootstrapMessage
             );
+            options.onWorkerBound?.(workerId);
             sendJson(res, 200, created);
             return;
           }

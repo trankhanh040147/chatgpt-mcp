@@ -3,8 +3,12 @@ import type { TaskService } from "../tasks/task.service.js";
 import { getDatabase } from "../db/sqlite.js";
 import { log } from "../logging/logger.js";
 import { sanitizeChatUrl } from "../dashboard/observability.js";
+import { setWorkerRegistryEnabled, removeWorkerRegistryEntry } from "../config/write-workers-topology.js";
+import { loadWorkersTopology } from "../config/workers-topology.js";
 import type { BrokerOpsClient } from "./broker-client.js";
 import type { WorkerOperationKind } from "./worker-operation.types.js";
+import type { WorkerOperation } from "./worker-operation.types.js";
+import type { WorkerReadinessReason } from "../workers/chat-budget.js";
 import { WorkerOperationsRepository } from "./worker-operations.repository.js";
 import { WorkerReconciler } from "./worker-reconciler.js";
 
@@ -72,14 +76,11 @@ export class WorkerController {
     kind: WorkerOperationKind,
     payload: Record<string, unknown>
   ): { operationId: string } {
-    this.taskRepo.assertWorkerIdle(workerId);
-    if (this.opsRepo.hasActiveForWorker(workerId)) {
-      throw new Error(
-        `Worker ${workerId} already has an active operation — wait or retry later`
-      );
+    const state = this.taskRepo.getWorkerState(workerId);
+    if (state.error === "DISABLED") {
+      throw new Error(`Worker ${workerId} is disabled — enable before worker ops`);
     }
-    this.taskRepo.beginWorkerUrlMutation(workerId);
-    const op = this.opsRepo.create({
+    const op = this.opsRepo.enqueueWithReservation({
       workerId,
       kind,
       payload,
@@ -90,7 +91,7 @@ export class WorkerController {
       message: `WORKER_OP_ENQUEUED op=${op.id} kind=${kind} worker=${workerId}`,
       data: { operationId: op.id, workerId },
     });
-    void this.reconciler.reconcileOne(op.id);
+    void this.reconcileAll();
     return { operationId: op.id };
   }
 
@@ -105,6 +106,7 @@ export class WorkerController {
   }
 
   createChat(workerId: string, bootstrapMessage?: string): { operationId: string } {
+    this.prepareForNewChat(workerId);
     const state = this.taskRepo.getWorkerState(workerId);
     return this.enqueue(workerId, "CREATE_CHAT", {
       previousWorkerUrl: state.workerUrl ?? "",
@@ -112,11 +114,32 @@ export class WorkerController {
     });
   }
 
+  /** New chat supersedes stuck handoffs and prior worker ops — always allowed. */
+  private prepareForNewChat(workerId: string): void {
+    void this.broker.cancelUi(workerId).catch(() => undefined);
+    this.cancelActiveOperation(workerId, "superseded by new chat");
+    const cleared = this.taskRepo.failInFlightTasksForWorker(
+      workerId,
+      "cleared for new chat"
+    );
+    if (cleared.length > 0) {
+      log({
+        event: "INFO",
+        component: "worker-controller",
+        message: `NEW_CHAT cleared in-flight tasks worker=${workerId} tasks=${cleared.join(",")}`,
+        data: { workerId, taskIds: cleared },
+      });
+    }
+  }
+
   killRecreate(
     workerId: string,
     mode: "create" | "assign",
     workerUrl?: string
   ): { operationId: string } {
+    if (mode === "create") {
+      this.prepareForNewChat(workerId);
+    }
     const state = this.taskRepo.getWorkerState(workerId);
     const payload: Record<string, unknown> = {
       previousWorkerUrl: state.workerUrl ?? "",
@@ -134,9 +157,8 @@ export class WorkerController {
   retryVerify(workerId: string): { operationId: string } {
     const active = this.opsRepo.listActiveForWorker(workerId);
     if (active.length > 0) {
-      const op = active[0]!;
-      void this.reconciler.reconcileOne(op.id);
-      return { operationId: op.id };
+      void this.reconcileAll();
+      return { operationId: active[0]!.id };
     }
     const state = this.taskRepo.getWorkerState(workerId);
     const url = sanitizeChatUrl(state.workerUrl ?? "");
@@ -151,9 +173,101 @@ export class WorkerController {
   }
 
   setEnabled(workerId: string, enabled: boolean): void {
+    setWorkerRegistryEnabled({
+      filePath: this.workersFile,
+      workerId,
+      enabled,
+    });
     this.taskRepo.setWorkerDisabled(workerId, !enabled);
     if (!enabled) {
+      this.cancelActiveOperation(workerId, "disabled by operator");
+      void this.broker.cancelUi(workerId).catch(() => undefined);
       void this.broker.unbind(workerId).catch(() => undefined);
     }
+  }
+
+  removeWorker(workerId: string): void {
+    if (!workerId || workerId === "default") {
+      throw new Error(`Cannot remove worker id: ${workerId || "(empty)"}`);
+    }
+    this.cancelActiveOperation(workerId, "worker removed");
+    this.taskRepo.failInFlightTasksForWorker(workerId, "worker removed");
+    void this.broker.unbind(workerId).catch(() => undefined);
+    void this.broker.cancelUi(workerId).catch(() => undefined);
+
+    const topology = loadWorkersTopology({
+      workersFile: this.workersFile,
+      workerId: workerId,
+      workerUrl: "",
+      cdpEndpoint: "",
+    });
+    const inRegistry = topology.workers.some((w) => w.id === workerId);
+    if (inRegistry) {
+      removeWorkerRegistryEntry({
+        filePath: this.workersFile,
+        workerId,
+      });
+    }
+
+    const deleted = this.taskRepo.deleteWorkerState(workerId);
+    if (!deleted && !inRegistry) {
+      throw new Error(`Worker ${workerId} not found in registry or database`);
+    }
+
+    log({
+      event: "INFO",
+      component: "worker-controller",
+      message: `WORKER_REMOVED id=${workerId} registry=${inRegistry}`,
+      data: { workerId, inRegistry },
+    });
+  }
+
+  releaseStuckTask(workerId: string): { taskIds: string[] } {
+    const taskIds = this.taskRepo.failInFlightTasksForWorker(
+      workerId,
+      "released stuck task from ops dashboard"
+    );
+    log({
+      event: "INFO",
+      component: "worker-controller",
+      message: `WORKER_STUCK_TASK_RELEASED worker=${workerId} tasks=${taskIds.join(",")}`,
+      data: { workerId, taskIds },
+    });
+    return { taskIds };
+  }
+
+  listActiveOperations(): WorkerOperation[] {
+    return this.opsRepo.listActive();
+  }
+
+  cancelOperation(workerId: string): { operationId: string } {
+    const opId = this.cancelActiveOperation(workerId, "cancelled by operator");
+    if (!opId) {
+      throw new Error(`No active worker operation for ${workerId}`);
+    }
+    return { operationId: opId };
+  }
+
+  private cancelActiveOperation(workerId: string, message: string): string | null {
+    const active = this.opsRepo.listActiveForWorker(workerId);
+    if (active.length === 0) return null;
+    const op = active[0]!;
+    void this.broker.cancelUi(workerId).catch(() => undefined);
+    this.opsRepo.update(op.id, {
+      state: "FAILED",
+      lastError: message,
+    });
+    const prev = op.payload.reservationPreviousReason ?? null;
+    this.taskRepo.abortRotationReservation(
+      workerId,
+      prev as WorkerReadinessReason | null
+    );
+    log({
+      event: "INFO",
+      component: "worker-controller",
+      message: `WORKER_OP_CANCELLED op=${op.id} worker=${workerId}`,
+      data: { operationId: op.id, workerId },
+    });
+    return op.id;
   }
 }

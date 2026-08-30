@@ -5,6 +5,11 @@ import { upsertWorkerRegistryEntry } from "../config/write-workers-topology.js";
 import { sanitizeChatUrl } from "../dashboard/observability.js";
 import { chatIdFromUrl } from "../browser/chat-url.js";
 import { log } from "../logging/logger.js";
+import {
+  classifyProbeFailure,
+  probeFailureOperatorMessage,
+  probeFailureToReadiness,
+} from "../mcp/probe-failure.js";
 import type { TaskRepository } from "../tasks/task.repository.js";
 import type { TaskService } from "../tasks/task.service.js";
 import type { BrokerOpsClient } from "./broker-client.js";
@@ -26,7 +31,27 @@ function shortHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 8);
 }
 
+function probeCanaryMatches(result: string, token: string): boolean {
+  const trimmed = result.trim();
+  const expected = `CREATE_WORKER_CANARY=${token}`;
+  if (trimmed === expected) return true;
+  // ChatGPT often wraps the canary in prose; token must still appear verbatim.
+  return new RegExp(`CREATE_WORKER_CANARY=${token}(?:\\b|[^a-zA-Z0-9])`).test(
+    trimmed
+  );
+}
+
+function isTerminalOpState(state: WorkerOperation["state"]): boolean {
+  return state === "SUCCEEDED" || state === "FAILED";
+}
+
+function isCancelledError(message: string): boolean {
+  return message.includes("worker-op cancelled");
+}
+
 export class WorkerReconciler {
+  private readonly inFlight = new Map<string, Promise<void>>();
+
   constructor(
     private readonly opsRepo: WorkerOperationsRepository,
     private readonly taskRepo: TaskRepository,
@@ -37,13 +62,41 @@ export class WorkerReconciler {
 
   async reconcileAll(): Promise<void> {
     for (const op of this.opsRepo.listActive()) {
+      const worker = this.taskRepo.getWorkerState(op.workerId);
+      if (worker.error === "DISABLED") {
+        this.opsRepo.update(op.id, {
+          state: "FAILED",
+          lastError: "worker disabled",
+        });
+        continue;
+      }
       await this.reconcileOne(op.id);
     }
   }
 
   async reconcileOne(operationId: string): Promise<void> {
+    const existing = this.inFlight.get(operationId);
+    if (existing) return existing;
+
+    const run = this.reconcileOneInner(operationId).finally(() => {
+      this.inFlight.delete(operationId);
+    });
+    this.inFlight.set(operationId, run);
+    return run;
+  }
+
+  private async reconcileOneInner(operationId: string): Promise<void> {
     const op = this.opsRepo.getById(operationId);
-    if (!op || op.state === "SUCCEEDED" || op.state === "FAILED") return;
+    if (!op || isTerminalOpState(op.state)) return;
+
+    const workerState = this.taskRepo.getWorkerState(op.workerId);
+    if (workerState.error === "DISABLED") {
+      this.opsRepo.update(operationId, {
+        state: "FAILED",
+        lastError: "worker disabled",
+      });
+      return;
+    }
 
     log({
       event: "INFO",
@@ -57,7 +110,9 @@ export class WorkerReconciler {
         this.opsRepo.update(op.id, { state: "RUNNING" });
       }
 
-      const current = this.opsRepo.getById(op.id)!;
+      const current = this.opsRepo.getById(op.id);
+      if (!current || isTerminalOpState(current.state)) return;
+
       const payload = { ...current.payload };
 
       if (current.kind === "KILL_RECREATE" && !payload.unbound) {
@@ -67,13 +122,24 @@ export class WorkerReconciler {
       }
 
       if (
-        (current.kind === "CREATE_CHAT" || (current.kind === "KILL_RECREATE" && payload.createMode === "create")) &&
+        (current.kind === "CREATE_CHAT" ||
+          (current.kind === "KILL_RECREATE" && payload.createMode === "create")) &&
         !payload.desiredWorkerUrl
       ) {
+        if (payload.createChatAttempted) {
+          throw new Error(
+            current.lastError ??
+              "create-chat already failed — cancel op, use Assign URL with an existing /c/ chat, or attach Cursor manually in CDP Chrome"
+          );
+        }
+        payload.createChatAttempted = true;
+        this.opsRepo.update(current.id, { payload });
         const created = await this.broker.createChat(
           current.workerId,
           payload.bootstrapMessage
         );
+        const afterCreate = this.opsRepo.getById(op.id);
+        if (!afterCreate || isTerminalOpState(afterCreate.state)) return;
         payload.desiredWorkerUrl = created.workerUrl;
         payload.previousWorkerUrl =
           payload.previousWorkerUrl ??
@@ -82,25 +148,38 @@ export class WorkerReconciler {
         this.opsRepo.update(current.id, { payload });
       }
 
-      const refreshed = this.opsRepo.getById(op.id)!;
+      const refreshed = this.opsRepo.getById(op.id);
+      if (!refreshed || isTerminalOpState(refreshed.state)) return;
       await this.ensureRegistry(refreshed);
-      await this.ensureDb(refreshed);
-      await this.ensureBroker(refreshed);
-      await this.ensureVerification(refreshed);
+      const afterRegistry = this.opsRepo.getById(op.id);
+      if (!afterRegistry || isTerminalOpState(afterRegistry.state)) return;
+      await this.ensureDb(afterRegistry);
+      const afterDb = this.opsRepo.getById(op.id);
+      if (!afterDb || isTerminalOpState(afterDb.state)) return;
+      await this.ensureBroker(afterDb);
+      const afterBroker = this.opsRepo.getById(op.id);
+      if (!afterBroker || isTerminalOpState(afterBroker.state)) return;
+      await this.ensureVerification(afterBroker);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const current = this.opsRepo.getById(operationId);
-      if (!current) return;
+      if (!current || isTerminalOpState(current.state)) return;
+      if (isCancelledError(message)) return;
+
       const attempt = current.attempt + 1;
-      const maxAttempts = Number(
-        process.env.HANDOFF_WORKER_OPS_PROBE_ATTEMPTS ?? 12
-      );
+      const isCreateAutomation =
+        current.kind === "CREATE_CHAT" ||
+        (current.kind === "KILL_RECREATE" && current.payload.createMode === "create");
+      const maxAttempts = isCreateAutomation
+        ? 1
+        : Number(process.env.HANDOFF_WORKER_OPS_PROBE_ATTEMPTS ?? 12);
       if (attempt >= maxAttempts) {
         this.opsRepo.update(operationId, {
           state: "FAILED",
           attempt,
           lastError: message,
         });
+        this.releaseWorkerAfterOpFailure(current.workerId, current.payload, message);
         log({
           event: "ERROR",
           component: "worker-controller",
@@ -108,6 +187,8 @@ export class WorkerReconciler {
           data: { operationId },
         });
       } else {
+        const again = this.opsRepo.getById(operationId);
+        if (!again || isTerminalOpState(again.state)) return;
         this.opsRepo.update(operationId, {
           state: "PENDING",
           attempt,
@@ -115,6 +196,44 @@ export class WorkerReconciler {
         });
       }
     }
+  }
+
+  private releaseWorkerAfterOpFailure(
+    workerId: string,
+    payload: WorkerOperationPayload,
+    message: string
+  ): void {
+    const bindingOk =
+      Boolean(payload.brokerEnsured) && Boolean(payload.dbEnsured);
+    if (bindingOk && payload.probeTaskId) {
+      const task = this.taskRepo.getTaskById(payload.probeTaskId);
+      if (task) {
+        const classified = classifyProbeFailure({
+          taskStatus: task.status,
+          taskError: task.error ?? message,
+        });
+        const readiness = probeFailureToReadiness(classified);
+        this.taskRepo.setReadinessReason(
+          workerId,
+          readiness,
+          probeFailureOperatorMessage(classified)
+        );
+        return;
+      }
+    }
+    if (bindingOk && message.includes("probe mismatch")) {
+      this.taskRepo.setReadinessReason(
+        workerId,
+        "PROBE_RESULT_MISMATCH",
+        probeFailureOperatorMessage("PROBE_RESULT_MISMATCH")
+      );
+      return;
+    }
+    this.taskRepo.setReadinessReason(
+      workerId,
+      "ROTATION_FAILED",
+      `worker-op failed: ${message}`
+    );
   }
 
   private getRegistryEntry(workerId: string): WorkerRegistryEntry | null {
@@ -250,11 +369,13 @@ export class WorkerReconciler {
 
     const expected = `CREATE_WORKER_CANARY=${payload.probeToken}`;
     if (task.status === "COMPLETED") {
-      if ((task.result ?? "").trim() !== expected) {
+      if (!probeCanaryMatches(task.result ?? "", payload.probeToken!)) {
         throw new Error(
           `probe mismatch: got ${JSON.stringify(task.result)} want ${expected}`
         );
       }
+      const live = this.opsRepo.getById(op.id);
+      if (!live || isTerminalOpState(live.state)) return;
       this.taskRepo.clearWorkerError(op.workerId);
       this.opsRepo.update(op.id, {
         state: "SUCCEEDED",

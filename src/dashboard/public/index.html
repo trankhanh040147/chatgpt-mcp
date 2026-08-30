@@ -66,6 +66,16 @@
             hidden
             role="alert"
           ></div>
+          <details class="worker-setup panel-inset" id="worker-setup">
+            <summary>CDP + worker chat setup (first time)</summary>
+            <ol class="setup-steps mono muted">
+              <li><code>make chrome</code> — open ChatGPT in the CDP window and log in</li>
+              <li>Switch to <strong>Chat</strong> (not Work) → New chat → send a test line</li>
+              <li>Copy <code>https://chatgpt.com/c/…</code> from the address bar</li>
+              <li>Dashboard → <strong>Assign URL…</strong> on each worker (w1, w2, w3)</li>
+              <li>If stack was down: <code>make restart</code> once (starts broker + status-api)</li>
+            </ol>
+          </details>
           <div class="cards" id="workers"></div>
         </section>
 
@@ -101,7 +111,7 @@
             <div class="ops-actions" aria-label="Guarded ops">
               <h3>Guarded ops</h3>
               <p class="muted ops-note">
-                Preview blast radius, then type the confirm phrase. Purge is
+                Preview blast radius, then confirm. Purge stays CLI-only.
                 CLI-only. Healthy workers are not reset by default.
               </p>
               <div class="ops-btns">
@@ -168,15 +178,34 @@
       <form method="dialog" id="ops-form">
         <h2 id="ops-modal-title">Confirm ops</h2>
         <pre id="ops-modal-preview" class="ops-result"></pre>
-        <label class="ops-confirm-label" for="ops-confirm-input">
-          Type <code id="ops-confirm-phrase">…</code> to confirm
-        </label>
-        <input
-          id="ops-confirm-input"
-          class="ops-confirm-input"
-          autocomplete="off"
-          spellcheck="false"
-        />
+        <p id="ops-modal-error" class="ops-modal-error hidden" hidden role="alert"></p>
+        <div id="ops-url-block" class="ops-url-block hidden" hidden>
+          <label class="ops-url-label" for="ops-url-input">
+            Worker chat URL
+          </label>
+          <input
+            id="ops-url-input"
+            class="ops-url-input"
+            type="url"
+            placeholder="https://chatgpt.com/c/…"
+            spellcheck="false"
+          />
+          <p class="muted ops-url-hint">
+            In the <strong>CDP Chrome</strong> window: Chat → New chat → copy URL
+            from the address bar (not a shared/forbidden chat).
+          </p>
+        </div>
+        <div id="ops-confirm-block">
+          <label class="ops-confirm-label" for="ops-confirm-input">
+            Type <code id="ops-confirm-phrase">…</code> to confirm
+          </label>
+          <input
+            id="ops-confirm-input"
+            class="ops-confirm-input"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
         <div class="ops-modal-actions">
           <button type="submit" value="cancel" class="ghost">Cancel</button>
           <button

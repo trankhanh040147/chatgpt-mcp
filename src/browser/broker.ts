@@ -63,6 +63,8 @@ export class BrowserBroker {
   private reconnecting = false;
   private closed = false;
   readonly uiWriteMutex = new UiWriteMutex();
+  /** In-flight create-chat automation per worker — abort on cancel/disable. */
+  private readonly uiAbortByWorker = new Map<string, AbortController>();
 
   constructor(private readonly options: BrowserBrokerOptions) {
     if (options.workers.length < 1) {
@@ -132,16 +134,28 @@ export class BrowserBroker {
     let bound = 0;
     for (const w of this.options.workers) {
       if (!w.workerUrl || !chatIdFromUrl(w.workerUrl)) continue;
-      try {
-        await this.bindWorkerLocked(w.id, w.workerUrl);
-        bound += 1;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log({
-          event: "WARN",
-          component: "browser-broker",
-          message: `Bind failed worker=${w.id}: ${message}`,
-        });
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await this.bindWorkerLocked(w.id, w.workerUrl);
+          bound += 1;
+          break;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (attempt >= 3) {
+            log({
+              event: "WARN",
+              component: "browser-broker",
+              message: `Bind failed worker=${w.id}: ${message}`,
+            });
+          } else {
+            log({
+              event: "WARN",
+              component: "browser-broker",
+              message: `Bind retry ${attempt} worker=${w.id}: ${message}`,
+            });
+            await sleep(1500 * attempt);
+          }
+        }
       }
     }
 
@@ -301,24 +315,55 @@ export class BrowserBroker {
     });
   }
 
+  cancelWorkerUi(workerId: string): void {
+    const ctrl = this.uiAbortByWorker.get(workerId);
+    if (ctrl) {
+      ctrl.abort();
+      this.uiAbortByWorker.delete(workerId);
+      log({
+        event: "INFO",
+        component: "browser-broker",
+        message: `Cancelled in-flight UI work worker=${workerId}`,
+      });
+    }
+  }
+
   async createChatForWorker(
     workerId: string,
     bootstrapMessage?: string
   ): Promise<{ workerUrl: string; chatId: string }> {
     if (!this.context) throw new Error("Broker not connected");
-    return this.uiWriteMutex.run(async () => {
-      const created = await createWorkerChatOnContext(this.context!, {
-        chatGptUrl: this.options.chatGptUrl,
-        bootstrapMessage,
+    this.cancelWorkerUi(workerId);
+    const ctrl = new AbortController();
+    this.uiAbortByWorker.set(workerId, ctrl);
+    try {
+      const created = await this.uiWriteMutex.run(async () => {
+        return await createWorkerChatOnContext(this.context!, {
+          chatGptUrl: this.options.chatGptUrl,
+          bootstrapMessage,
+          signal: ctrl.signal,
+        });
       });
-      await this.bindWorkerLocked(workerId, created.workerUrl);
+      await this.withBindLock(async () => {
+        await this.bindWorkerLocked(workerId, created.workerUrl);
+      });
       return { workerUrl: created.workerUrl, chatId: created.chatId };
-    });
+    } finally {
+      if (this.uiAbortByWorker.get(workerId) === ctrl) {
+        this.uiAbortByWorker.delete(workerId);
+      }
+    }
   }
 
   async probeSession(workerId: string): Promise<{ ready: boolean; reason?: string }> {
     try {
       const b = this.getBinding(workerId);
+      if (await b.browser.detectChatAccessDenied()) {
+        return {
+          ready: false,
+          reason: "CHAT_ACCESS_DENIED: use Assign URL with a chat from CDP Chrome",
+        };
+      }
       const ready = await b.browser.ensureSessionReady();
       return { ready };
     } catch (err) {

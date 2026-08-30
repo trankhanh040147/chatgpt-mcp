@@ -13,7 +13,7 @@ fi
 export HANDOFF_WORKERS_FILE="${HANDOFF_WORKERS_FILE:-$ROOT/data/workers.a1s.json}"
 
 # Shared broker control token — status-api must match browser-broker (see HANDOFF_BROKER_OPS_TOKEN).
-export HANDOFF_BROKER_OPS_PORT="${HANDOFF_BROKER_OPS_PORT:-8788}"
+export HANDOFF_BROKER_OPS_PORT="${HANDOFF_BROKER_OPS_PORT:-18788}"
 if [[ -z "${HANDOFF_BROKER_OPS_TOKEN:-}" ]]; then
   if [[ -f logs/broker-ops.token ]]; then
     export HANDOFF_BROKER_OPS_TOKEN="$(cat logs/broker-ops.token)"
@@ -36,6 +36,41 @@ pkill -f 'node dist/index.js browser-broker' 2>/dev/null || true
 pkill -f 'node dist/index.js status-api' 2>/dev/null || true
 pkill -f 'node dist/index.js remote-mcp' 2>/dev/null || true
 sleep 1
+
+preflight_broker_port() {
+  local port="${HANDOFF_BROKER_OPS_PORT}"
+  local listener
+  listener="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+  if [[ -z "$listener" ]]; then
+    return 0
+  fi
+  local cmd
+  cmd="$(ps -p "$listener" -o command= 2>/dev/null || true)"
+  if [[ "$cmd" == *"browser-broker"* ]]; then
+    kill "$listener" 2>/dev/null || true
+    sleep 1
+    return 0
+  fi
+  echo "ERROR: HANDOFF_BROKER_OPS_PORT=$port already in use (pid $listener)" >&2
+  echo "  $cmd" >&2
+  echo "Stop that process or set HANDOFF_BROKER_OPS_PORT to a free port (status-api + browser-broker must match)." >&2
+  exit 1
+}
+
+preflight_broker_port
+
+wait_for_cdp() {
+  local i
+  for i in $(seq 1 30); do
+    if curl -sf "http://127.0.0.1:9222/json/version" >/dev/null 2>&1; then
+      sleep 2
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: CDP :9222 not ready — run: npm run chrome-cdp  (or make chrome)" >&2
+  exit 1
+}
 
 start_named() {
   local mode="$1"
@@ -101,10 +136,33 @@ PY
 echo "$status_sup_pid" > logs/status-api-supervise.pid
 echo "status-api supervise → pid $status_sup_pid"
 
+wait_for_cdp
+
 start_named browser-broker browser-broker \
   HANDOFF_WORKERS_FILE="$HANDOFF_WORKERS_FILE"
 
-sleep 4
+sleep 2
 curl -sf "http://127.0.0.1:8787/health" && echo || echo "status-api not healthy yet"
-curl -sf "http://127.0.0.1:8787/workers" && echo || echo "workers not ready yet"
+if grep -q EADDRINUSE logs/browser-broker.log 2>/dev/null; then
+  echo "browser-broker failed to bind :${HANDOFF_BROKER_OPS_PORT} — see logs/browser-broker.log" >&2
+fi
+broker_ok=0
+for _ in $(seq 1 15); do
+  if curl -sf "http://127.0.0.1:8787/broker/status" >/dev/null 2>&1; then
+    broker_ok=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$broker_ok" -eq 1 ]]; then
+  curl -sf "http://127.0.0.1:8787/broker/status" && echo
+  bindings="$(curl -sf "http://127.0.0.1:8787/broker/status" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d.get("bindings",[])))' 2>/dev/null || echo 0)"
+  if [[ "${bindings:-0}" -eq 0 ]]; then
+    echo "WARN: broker up but bindings=0 — CDP may have raced restart. Retry: make restart  or dashboard Assign URL…" >&2
+  fi
+else
+  echo "broker ops not reachable (:${HANDOFF_BROKER_OPS_PORT}) — check logs/browser-broker.log and port conflict (lsof -i :${HANDOFF_BROKER_OPS_PORT})"
+fi
+curl -sf "http://127.0.0.1:8787/workers" | head -c 300 && echo "…" || echo "workers not ready yet"
 echo "Done. HANDOFF_WORKERS_FILE=$HANDOFF_WORKERS_FILE (A1-S broker)"
+echo "Broker token: logs/broker-ops.token (status-api reads this automatically)"

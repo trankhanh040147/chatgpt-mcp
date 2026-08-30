@@ -502,6 +502,32 @@ h2 {
   padding: 0.2rem 0.5rem;
 }
 
+.worker-op-banner {
+  margin: 0.45rem 0 0.35rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid rgba(200, 140, 40, 0.45);
+  background: rgba(200, 140, 40, 0.1);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.worker-op-banner .worker-op-label {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.15rem;
+}
+
+.worker-op-error {
+  display: block;
+  margin-top: 0.25rem;
+  color: #c04830;
+}
+
 .worker-alert {
   margin: 0 0 0.65rem;
   padding: 0.55rem 0.75rem;
@@ -930,6 +956,40 @@ button.danger:focus-visible {
   gap: 0.45rem;
 }
 
+.ops-modal-error {
+  margin: 0.5rem 0 0;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  font-weight: 500;
+  color: #6b1a0f;
+  background: #fde8e4;
+  border: 1px solid #c94830;
+}
+
+.worker-stuck-banner {
+  border-color: rgba(200, 72, 48, 0.55);
+  background: rgba(200, 72, 48, 0.1);
+  color: var(--ink);
+}
+
+.worker-stuck-banner code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #8b1a0f;
+}
+
+.ops-modal-error.hidden {
+  display: none;
+}
+
+.ops-result--error {
+  border: 1px solid #c94830;
+  background: #fde8e4;
+  color: #6b1a0f;
+}
+
 .ops-result {
   margin: 0.65rem 0 0;
   padding: 0.55rem 0.65rem;
@@ -941,6 +1001,58 @@ button.danger:focus-visible {
   white-space: pre-wrap;
   max-height: 12rem;
   overflow: auto;
+}
+
+.ops-url-block {
+  margin: 0.5rem 0 0.65rem;
+}
+
+.ops-url-block.hidden {
+  display: none;
+}
+
+.ops-url-label {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 0.35rem;
+}
+
+.ops-url-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.ops-url-hint {
+  font-size: 11px;
+  margin: 0.4rem 0 0;
+  line-height: 1.45;
+}
+
+.worker-setup {
+  margin-bottom: 0.65rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(8, 127, 120, 0.04);
+}
+
+.worker-setup summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.setup-steps {
+  margin: 0.55rem 0 0;
+  padding-left: 1.2rem;
+  font-size: 11px;
+  line-height: 1.55;
 }
 
 .ops-modal {

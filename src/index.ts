@@ -2,7 +2,7 @@ import { config as loadEnv } from "dotenv";
 import { mkdirSync, appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import { configureLogger } from "./logging/logger.js";
+import { configureLogger, log } from "./logging/logger.js";
 import { startMcpServer } from "./mcp/server.js";
 import { startRemoteMcpServer } from "./mcp/remote-server.js";
 import { startHttpApi } from "./http/api.js";
@@ -11,7 +11,7 @@ import {
   startBrowserBroker,
   type BrowserBrokerHandle,
 } from "./browser/start-broker.js";
-import { log } from "./logging/logger.js";
+import { resolveBrokerOpsPort } from "./ops/broker-ops-config.js";
 import {
   loadWorkersTopology,
   validateWorkersTopology,
@@ -122,6 +122,12 @@ async function startBrokerFromConfig(
     );
   }
   const enabled = topology.workers.filter((w) => w.enabled !== false);
+  if (enabled.length < 1) {
+    throw new Error(
+      "No enabled workers in HANDOFF_WORKERS_FILE — browser-broker cannot start. " +
+        "Set enabled: true for at least one worker (dashboard Enable… or edit workers file)."
+    );
+  }
   const cdpEndpoint = enabled[0]?.cdpEndpoint ?? topology.workers[0]!.cdpEndpoint;
   const brokerOpsToken =
     process.env.HANDOFF_BROKER_OPS_TOKEN?.trim() ||
@@ -146,7 +152,7 @@ async function startBrokerFromConfig(
     rateLimitBackoffMs: config.rateLimitBackoffMs,
     leaseMs: config.leaseMs,
     workerStaleMs: config.workerStaleMs,
-    brokerOpsPort: Number(process.env.HANDOFF_BROKER_OPS_PORT ?? 8788),
+    brokerOpsPort: resolveBrokerOpsPort(),
     brokerOpsToken,
   });
 }

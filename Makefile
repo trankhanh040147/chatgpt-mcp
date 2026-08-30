@@ -12,6 +12,8 @@ HTTP_PORT   ?= $(shell grep -E '^HANDOFF_HTTP_PORT=' .env 2>/dev/null | cut -d= 
 HTTP_PORT   ?= 8787
 REMOTE_PORT ?= $(shell grep -E '^HANDOFF_REMOTE_MCP_PORT=' .env 2>/dev/null | cut -d= -f2)
 REMOTE_PORT ?= 8790
+BROKER_OPS_PORT ?= $(shell grep -E '^HANDOFF_BROKER_OPS_PORT=' .env 2>/dev/null | cut -d= -f2)
+BROKER_OPS_PORT ?= 18788
 HEALTH_URL  ?= http://127.0.0.1:$(HTTP_PORT)
 
 HANDOFF_PATHS := \
@@ -36,7 +38,7 @@ HANDOFF_PATHS := \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install build setup chrome chrome-if-needed up up-bg down restart status wait-ready \
+.PHONY: help install build setup chrome chrome-if-needed up up-bg up-bg-legacy down restart status wait-ready \
 	check doctor recover recover-clean recover-all clear-tasks clear-task \
 	logs worker-bg remote-bg status-api-bg test-leases e2e-1 e2e-20 e2e-dual \
 	create-worker rotate-worker dashboard dashboard-up handoff-zip
@@ -54,6 +56,7 @@ help: ## Show targets
 	@echo ""
 	@echo "Background:"
 	@echo "  make dashboard-up           # A1-S: status-api + remote-mcp + broker + URL"
+	@echo "  make restart                # same as dashboard-up after down (preferred)"
 	@echo "  make up-bg && make wait-ready && make check"
 	@echo "  make clear-tasks            # wipe SQLite queue (ID=ho_… for one)"
 	@echo "  make create-worker          # assisted New chat → workers.json (A1-S)"
@@ -79,7 +82,9 @@ chrome-if-needed: ## Start CDP Chrome only when :9222 is down (idempotent)
 up: build chrome-if-needed ## Foreground stack: CDP + remote-mcp + worker (Ctrl+C stops services)
 	npm run start
 
-up-bg: build chrome-if-needed ## Background: status-api + browser-worker + remote-mcp
+up-bg: dashboard-up ## Alias for A1-S broker stack (status-api + broker + remote-mcp)
+
+up-bg-legacy: build chrome-if-needed ## Legacy multi-process browser-worker (not v0.6 dashboard ops)
 	@mkdir -p $(LOG_DIR)
 	@if lsof -nP -iTCP:$(REMOTE_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 		echo "remote-mcp already on :$(REMOTE_PORT)"; \
@@ -110,24 +115,25 @@ up-bg: build chrome-if-needed ## Background: status-api + browser-worker + remot
 	fi
 	@echo "Run: make status && make wait-ready && make check"
 
-down: ## Stop status-api + browser-worker + remote-mcp (Chrome CDP stays up)
+down: ## Stop status-api + browser-worker/broker + remote-mcp (Chrome CDP stays up)
 	-pkill -f 'supervise-browser-worker.sh' 2>/dev/null || true
 	-pkill -f 'supervise-status-api.sh' 2>/dev/null || true
 	-pkill -f 'node dist/index.js worker' 2>/dev/null || true
 	-pkill -f 'node dist/index.js browser-worker' 2>/dev/null || true
+	-pkill -f 'node dist/index.js browser-broker' 2>/dev/null || true
 	-pkill -f 'node dist/index.js status-api' 2>/dev/null || true
 	-pkill -f 'node dist/index.js remote-mcp' 2>/dev/null || true
-	-rm -f $(LOG_DIR)/worker.pid $(LOG_DIR)/remote-mcp.pid $(LOG_DIR)/status-api.pid $(LOG_DIR)/status-api-supervise.pid $(LOG_DIR)/browser-worker.pid $(LOG_DIR)/browser-worker-supervise.pid
-	@echo "Stopped status-api (:$(HTTP_PORT)), browser-worker, remote-mcp (:$(REMOTE_PORT))."
+	-rm -f $(LOG_DIR)/worker.pid $(LOG_DIR)/remote-mcp.pid $(LOG_DIR)/status-api.pid $(LOG_DIR)/status-api-supervise.pid $(LOG_DIR)/browser-worker.pid $(LOG_DIR)/browser-worker-supervise.pid $(LOG_DIR)/browser-broker.pid
+	@echo "Stopped status-api (:$(HTTP_PORT)), browser-worker/broker, remote-mcp (:$(REMOTE_PORT))."
 
-restart: down up-bg ## Restart background stack (split status-api + browser-worker)
+restart: down dashboard-up ## Restart A1-S broker stack (v0.6 — not legacy browser-worker)
 
-status: ## Health + /workers + listening ports
+status: ## Health + /workers + broker ops + listening ports
 	@curl -sf $(HEALTH_URL)/health 2>/dev/null && echo "  ← /health" || echo "status-api: DOWN (:$(HTTP_PORT))"
-	@curl -sf $(HEALTH_URL)/worker 2>/dev/null || echo "GET /worker failed"
-	@curl -sf $(HEALTH_URL)/workers 2>/dev/null || echo "GET /workers failed"
+	@curl -sf $(HEALTH_URL)/broker/status 2>/dev/null && echo "  ← /broker/status" || echo "broker ops: DOWN (need make dashboard-up + Chrome CDP)"
+	@curl -sf $(HEALTH_URL)/workers 2>/dev/null | head -c 200 && echo "…" || echo "GET /workers failed"
 	@echo ""
-	@lsof -nP -iTCP:$(HTTP_PORT),$(REMOTE_PORT),9222 -sTCP:LISTEN 2>/dev/null || echo "(no listeners on :$(HTTP_PORT) :$(REMOTE_PORT) :9222)"
+	@lsof -nP -iTCP:$(HTTP_PORT),$(REMOTE_PORT),$(BROKER_OPS_PORT),9222 -sTCP:LISTEN 2>/dev/null || echo "(no listeners on :$(HTTP_PORT) :$(REMOTE_PORT) :$(BROKER_OPS_PORT) :9222)"
 
 doctor: build ## Topology + schema + status-api health
 	npm run doctor

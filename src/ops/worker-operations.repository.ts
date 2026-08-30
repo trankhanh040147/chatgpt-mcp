@@ -19,11 +19,11 @@ interface Row {
   updated_at: string;
 }
 
-const ACTIVE_STATES: WorkerOperationState[] = [
-  "PENDING",
-  "RUNNING",
-  "VERIFYING",
-];
+interface WorkerStateRow {
+  id: string;
+  current_task_id: string | null;
+  readiness_reason: string | null;
+}
 
 function rowToOp(row: Row): WorkerOperation {
   return {
@@ -41,6 +41,112 @@ function rowToOp(row: Row): WorkerOperation {
 
 export class WorkerOperationsRepository {
   constructor(private readonly db: DatabaseSync) {}
+
+  /**
+   * Atomically reserve worker (ROTATION_PENDING) and insert durable operation.
+   * Crash before COMMIT leaves neither reservation nor operation.
+   */
+  enqueueWithReservation(input: {
+    workerId: string;
+    kind: WorkerOperationKind;
+    payload: WorkerOperationPayload;
+  }): WorkerOperation {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const worker = this.db
+        .prepare(`SELECT * FROM worker_state WHERE id = ?`)
+        .get(input.workerId) as WorkerStateRow | undefined;
+      if (!worker) {
+        this.db.exec("ROLLBACK");
+        throw new Error(`Worker ${input.workerId} not found`);
+      }
+
+      const inFlight = this.db
+        .prepare(
+          `SELECT id FROM handoff_tasks
+           WHERE lease_owner = ?
+             AND status IN ('DISPATCHING','DISPATCHED','PROCESSING','WAITING_APPROVAL')
+           LIMIT 1`
+        )
+        .get(input.workerId) as { id: string } | undefined;
+      if (inFlight || worker.current_task_id) {
+        this.db.exec("ROLLBACK");
+        throw new Error(
+          `Worker ${input.workerId} is busy — refuse mutation while a task is in flight`
+        );
+      }
+
+      const activeOp = this.db
+        .prepare(
+          `SELECT id FROM worker_operations
+           WHERE worker_id = ?
+             AND state IN ('PENDING', 'RUNNING', 'VERIFYING')
+           LIMIT 1`
+        )
+        .get(input.workerId) as { id: string } | undefined;
+      if (activeOp) {
+        this.db.exec("ROLLBACK");
+        throw new Error(
+          `Worker ${input.workerId} already has an active operation — wait or retry later`
+        );
+      }
+
+      const prev = worker.readiness_reason ?? null;
+
+      const payload: WorkerOperationPayload = {
+        ...input.payload,
+        reservationPreviousReason: prev,
+      };
+
+      if (prev === "ROTATION_PENDING") {
+        this.db.exec("ROLLBACK");
+        throw new Error(
+          `Worker ${input.workerId} already blocked (${prev}) — wait for current rotation or cancel stuck op`
+        );
+      }
+
+      this.db
+        .prepare(
+          `UPDATE worker_state
+           SET readiness_reason = 'ROTATION_PENDING',
+               error = ?
+           WHERE id = ?`
+        )
+        .run(
+          prev
+            ? `ROTATION_PENDING:prev=${prev}`
+            : "ROTATION_PENDING: worker-ops mutation",
+          input.workerId
+        );
+
+      const now = new Date().toISOString();
+      const id = `wop_${ulid()}`;
+      this.db
+        .prepare(
+          `INSERT INTO worker_operations (
+            id, worker_id, kind, state, payload_json, attempt, last_error, created_at, updated_at
+          ) VALUES (?, ?, ?, 'PENDING', ?, 0, NULL, ?, ?)`
+        )
+        .run(
+          id,
+          input.workerId,
+          input.kind,
+          JSON.stringify(payload),
+          now,
+          now
+        );
+
+      this.db.exec("COMMIT");
+      return this.getById(id)!;
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+  }
 
   create(input: {
     workerId: string;
@@ -111,21 +217,15 @@ export class WorkerOperationsRepository {
     const payload = patch.payload ?? existing.payload;
     const state = patch.state ?? existing.state;
     const attempt = patch.attempt ?? existing.attempt;
-    const lastError = patch.lastError !== undefined ? patch.lastError : existing.lastError;
+    const lastError =
+      patch.lastError !== undefined ? patch.lastError : existing.lastError;
     this.db
       .prepare(
         `UPDATE worker_operations
          SET state = ?, payload_json = ?, attempt = ?, last_error = ?, updated_at = ?
          WHERE id = ?`
       )
-      .run(
-        state,
-        JSON.stringify(payload),
-        attempt,
-        lastError,
-        now,
-        id
-      );
+      .run(state, JSON.stringify(payload), attempt, lastError, now, id);
     return this.getById(id)!;
   }
 

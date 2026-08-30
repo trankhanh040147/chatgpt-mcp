@@ -39,7 +39,22 @@ function main(): void {
         cdpEndpoint: "http://127.0.0.1:9222",
       },
     ]) === "w2",
-    "nextWorkerId skips w1"
+    "nextWorkerId after w1 → w2"
+  );
+  assert(
+    nextWorkerId([
+      {
+        id: "w1",
+        workerUrl: "https://chatgpt.com/c/a",
+        cdpEndpoint: "http://127.0.0.1:9222",
+      },
+      {
+        id: "w3",
+        workerUrl: "https://chatgpt.com/c/c",
+        cdpEndpoint: "http://127.0.0.1:9222",
+      },
+    ]) === "w4",
+    "nextWorkerId monotonic (gap w2 → w4)"
   );
 
   const a = upsertWorkerRegistryEntry({

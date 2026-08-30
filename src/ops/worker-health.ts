@@ -5,6 +5,7 @@ import {
   sanitizeChatUrl,
   type WorkerIndicator,
 } from "../dashboard/observability.js";
+import { isProbeMcpFailureReason } from "../mcp/probe-failure.js";
 import type { TaskRepository } from "../tasks/task.repository.js";
 
 export type WorkerConditionType =
@@ -111,24 +112,37 @@ export function buildWorkerHealthRow(input: {
     type: "SESSION",
     status: sessionReady ? "TRUE" : "FALSE",
     reason: sessionReady ? "session_ok" : "session_lost",
+    message: sessionReady
+      ? "runtime has not reported SESSION_LOST (not an active browser probe)"
+      : "SESSION_LOST reported by worker runtime",
     observedAt: nowIso,
   });
 
-  const mcpReady = !w.readinessReason || w.readinessReason === "THRESHOLD_REACHED";
+  const mcpProbeFailure = isProbeMcpFailureReason(w.readinessReason);
+  const mcpReady =
+    !w.readinessReason || w.readinessReason === "THRESHOLD_REACHED";
   conditions.push({
     type: "MCP",
     status: mcpReady ? "TRUE" : "FALSE",
     reason: w.readinessReason ?? "ready",
-    message: w.readinessReason ?? undefined,
+    message: w.readinessReason
+      ? w.error ?? w.readinessReason
+      : "MCP write path verified",
     observedAt: nowIso,
   });
 
   let healthState: WorkerHealthState = "UNKNOWN";
   if (!pidAlive || w.status === "ERROR") {
     healthState = "OFFLINE";
-  } else if (w.readinessReason === "CONSENT_REQUIRED" || w.status === "SESSION_LOST") {
+  } else if (
+    w.readinessReason === "CONSENT_REQUIRED" ||
+    w.readinessReason === "MCP_APPROVAL_REQUIRED" ||
+    w.status === "SESSION_LOST"
+  ) {
     healthState = "BLOCKED";
   } else if (!brokerOk || !binding || !urlMatch) {
+    healthState = "DEGRADED";
+  } else if (mcpProbeFailure) {
     healthState = "DEGRADED";
   } else if (mcpReady && sessionReady) {
     healthState = "READY";
@@ -139,8 +153,16 @@ export function buildWorkerHealthRow(input: {
   let recommendedAction: RecommendedAction = "NONE";
   if (!brokerOk) recommendedAction = "START_BROKER";
   else if (w.status === "SESSION_LOST") recommendedAction = "RECREATE_CHAT";
-  else if (w.readinessReason === "CONSENT_REQUIRED") recommendedAction = "RETRY_VERIFY";
-  else if (!binding || !urlMatch) recommendedAction = "ASSIGN_URL";
+  else if (
+    w.readinessReason === "CONSENT_REQUIRED" ||
+    w.readinessReason === "MCP_APPROVAL_REQUIRED"
+  ) {
+    recommendedAction = "RETRY_VERIFY";
+  } else if (w.readinessReason === "MCP_SAFETY_BLOCKED") {
+    recommendedAction = "RECREATE_CHAT";
+  } else if (mcpProbeFailure) {
+    recommendedAction = "RETRY_VERIFY";
+  } else if (!binding || !urlMatch) recommendedAction = "ASSIGN_URL";
 
   const lastSeenMs = w.lastSeenAt ? Date.parse(w.lastSeenAt) : Number.NaN;
   const heartbeatStale =

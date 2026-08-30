@@ -79,12 +79,76 @@ export class TaskService {
   }): { taskId: string } {
     const { taskId } = this.createTask({
       type: "second_opinion",
-      prompt: `CREATE_WORKER_CANARY=${input.token}`,
+      prompt:
+        `Worker connectivity check.\n` +
+        `Call handoff_complete_probe with:\n` +
+        `taskId: (the TASK_ID dispatched in this chat)\n` +
+        `canary: ${input.token}\n` +
+        "Do not reply with the canary in chat.",
       cursorConversationId: `probe-${input.operationId}`,
       taskClass: "SYSTEM_PROBE",
       targetWorkerId: input.workerId,
     });
     return { taskId };
+  }
+
+  /** SYSTEM_PROBE completion via minimal MCP tool (maps to canary submit). */
+  completeProbe(input: { taskId: string; canary: string }): {
+    success: boolean;
+    status: "COMPLETED";
+    idempotent?: boolean;
+    lateSubmit?: boolean;
+  } {
+    const task = this.repo.getTaskById(input.taskId);
+    if (!task) {
+      throw new Error(`Task not found: ${input.taskId}`);
+    }
+    if (task.taskClass !== "SYSTEM_PROBE") {
+      throw new Error(
+        `handoff_complete_probe is only for SYSTEM_PROBE tasks (got ${task.taskClass ?? "USER"})`
+      );
+    }
+    const canary = input.canary.trim();
+    if (!canary || canary.length > 128) {
+      throw new Error("canary must be a non-empty verification token");
+    }
+    return this.submitResult({
+      taskId: input.taskId,
+      result: `CREATE_WORKER_CANARY=${canary}`,
+    });
+  }
+
+  /** Fail a probe with a classified MCP failure (binding may still be OK). */
+  failProbeClassified(
+    taskId: string,
+    reason:
+      | "MCP_SAFETY_BLOCKED"
+      | "MCP_APPROVAL_REQUIRED"
+      | "MCP_TOOL_NOT_INVOKED"
+      | "MCP_SUBMIT_TIMEOUT"
+      | "PROBE_RESULT_MISMATCH",
+    detail?: string
+  ): void {
+    const task = this.repo.getTaskById(taskId);
+    if (!task || task.taskClass !== "SYSTEM_PROBE") return;
+    if (
+      task.status === "COMPLETED" ||
+      task.status === "FAILED" ||
+      task.status === "CANCELLED"
+    ) {
+      return;
+    }
+    const message = `${reason}: ${detail ?? reason}`.slice(0, 500);
+    this.repo.updateTaskStatus(taskId, "FAILED", {
+      error: message,
+      clearLease: true,
+    });
+    log({
+      event: "TASK_FAILED",
+      component: "task-service",
+      taskId,
+      message,
+    });
   }
 
   /** Frozen single-handle pipeline: open once, hash those bytes, sanitize whole, then range. */

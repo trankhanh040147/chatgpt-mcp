@@ -1169,6 +1169,14 @@ export class TaskRepository {
     return rows.map(rowToWorker);
   }
 
+  /** Remove runtime row after registry entry deleted (v0.6 fleet ops). */
+  deleteWorkerState(workerId: string): boolean {
+    const info = this.db
+      .prepare(`DELETE FROM worker_state WHERE id = ?`)
+      .run(workerId);
+    return Number(info.changes ?? 0) > 0;
+  }
+
   /**
    * Register / take over worker incarnation.
    * Fails only if another live PID still holds the id within heartbeat window.
@@ -1372,7 +1380,16 @@ export class TaskRepository {
                previous_worker_url = ?,
                chat_rotated_at = ?,
                readiness_reason = CASE
-                 WHEN readiness_reason IN ('RESTART_REQUIRED', 'CONSENT_REQUIRED', 'ROTATION_FAILED')
+                 WHEN readiness_reason IN (
+                   'RESTART_REQUIRED',
+                   'CONSENT_REQUIRED',
+                   'ROTATION_FAILED',
+                   'MCP_SAFETY_BLOCKED',
+                   'MCP_APPROVAL_REQUIRED',
+                   'MCP_TOOL_NOT_INVOKED',
+                   'MCP_SUBMIT_TIMEOUT',
+                   'PROBE_RESULT_MISMATCH'
+                 )
                    THEN readiness_reason
                  ELSE 'CONSENT_REQUIRED'
                END
@@ -1397,6 +1414,11 @@ export class TaskRepository {
 
   /** True if this worker currently owns a leased/in-flight task. */
   workerHasInFlight(workerId: string): boolean {
+    return this.getInFlightTaskId(workerId) !== null;
+  }
+
+  /** First in-flight handoff task id blocking worker ops (lease or current_task_id). */
+  getInFlightTaskId(workerId: string): string | null {
     const row = this.db
       .prepare(
         `SELECT id FROM handoff_tasks
@@ -1405,10 +1427,75 @@ export class TaskRepository {
          LIMIT 1`
       )
       .get(workerId) as { id: string } | undefined;
+    if (row) return row.id;
     const state = this.db
       .prepare(`SELECT current_task_id FROM worker_state WHERE id = ?`)
       .get(workerId) as { current_task_id: string | null } | undefined;
-    return Boolean(row || state?.current_task_id);
+    return state?.current_task_id ?? null;
+  }
+
+  /**
+   * Fail all in-flight tasks holding this worker busy (ops recovery).
+   * Returns task ids transitioned to FAILED.
+   */
+  failInFlightTasksForWorker(
+    workerId: string,
+    reason = "released from ops dashboard"
+  ): string[] {
+    const msg = reason.trim().slice(0, 500) || "released from ops dashboard";
+    const now = new Date().toISOString();
+    const ids = new Set<string>();
+    const leased = this.db
+      .prepare(
+        `SELECT id FROM handoff_tasks
+         WHERE lease_owner = ?
+           AND status IN ('DISPATCHING','DISPATCHED','PROCESSING','WAITING_APPROVAL')`
+      )
+      .all(workerId) as { id: string }[];
+    for (const r of leased) ids.add(r.id);
+    const state = this.db
+      .prepare(`SELECT current_task_id FROM worker_state WHERE id = ?`)
+      .get(workerId) as { current_task_id: string | null } | undefined;
+    if (state?.current_task_id) ids.add(state.current_task_id);
+
+    const failed: string[] = [];
+    for (const taskId of ids) {
+      const row = this.db
+        .prepare(`SELECT status FROM handoff_tasks WHERE id = ?`)
+        .get(taskId) as { status: string } | undefined;
+      if (!row) continue;
+      if (
+        row.status === "COMPLETED" ||
+        row.status === "FAILED" ||
+        row.status === "CANCELLED" ||
+        row.status === "TIMED_OUT"
+      ) {
+        continue;
+      }
+      const info = this.db
+        .prepare(
+          `UPDATE handoff_tasks
+           SET status = 'FAILED',
+               error = ?,
+               completed_at = COALESCE(completed_at, ?),
+               lease_token = NULL,
+               lease_expires_at = NULL,
+               lease_owner = NULL
+           WHERE id = ? AND status = ?`
+        )
+        .run(msg, now, taskId, row.status);
+      if (Number(info.changes ?? 0) === 1) {
+        failed.push(taskId);
+      }
+    }
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET current_task_id = NULL, last_seen_at = ?
+         WHERE id = ?`
+      )
+      .run(now, workerId);
+    return failed;
   }
 
   assertWorkerIdle(workerId: string): void {

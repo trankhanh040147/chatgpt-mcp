@@ -1,6 +1,10 @@
 import type { Browser, BrowserContext, Page } from "playwright";
 import { selectors, DISPATCH_MESSAGE } from "./selectors.js";
-import { SUBMIT_NUDGE_MESSAGE } from "../mcp/worker-policy.js";
+import type { McpDomHint } from "../mcp/probe-failure.js";
+import {
+  PROBE_SUBMIT_NUDGE_MESSAGE,
+  SUBMIT_NUDGE_MESSAGE,
+} from "../mcp/worker-policy.js";
 import { log } from "../logging/logger.js";
 import { sameWorkerChat } from "./chat-url.js";
 
@@ -106,6 +110,15 @@ export class ChatGptBrowser {
     return this.page;
   }
 
+  async detectChatAccessDenied(): Promise<boolean> {
+    const page = this.getPage();
+    return await page
+      .locator(selectors.chatAccessDenied)
+      .first()
+      .isVisible({ timeout: 2000 })
+      .catch(() => false);
+  }
+
   /**
    * Verifies an authenticated ChatGPT session is already present.
    * Never attempts login — returns false / SESSION_NOT_READY instead.
@@ -122,6 +135,17 @@ export class ChatGptBrowser {
       await page
         .waitForLoadState("networkidle", { timeout: 15000 })
         .catch(() => {});
+
+      if (await this.detectChatAccessDenied()) {
+        log({
+          event: "WORKER_SESSION_LOST",
+          component: "browser-worker",
+          message:
+            "CHAT_ACCESS_DENIED: logged-in account cannot open this /c/ URL. " +
+            "Create a new chat in CDP Chrome and Assign URL on the dashboard.",
+        });
+        return false;
+      }
 
       const loggedOut = await page
         .locator(selectors.loggedOutIndicator)
@@ -178,6 +202,13 @@ export class ChatGptBrowser {
       await page.waitForTimeout(1500);
     }
 
+    if (await this.detectChatAccessDenied()) {
+      throw new Error(
+        "CHAT_ACCESS_DENIED: this account cannot open the worker chat URL. " +
+          "In CDP Chrome: New chat → send a test message → Assign URL on the dashboard."
+      );
+    }
+
     const current = page.url();
     if (!/\/c\/[a-z0-9-]+/i.test(current)) {
       await this.screenshotOnFailure("worker-url-redirected");
@@ -204,6 +235,42 @@ export class ChatGptBrowser {
     const page = this.getPage();
     const stop = page.locator(selectors.stopButton).first();
     return stop.isVisible({ timeout: 400 }).catch(() => false);
+  }
+
+  /**
+   * Best-effort DOM classification for MCP write failures (probe instrumentation).
+   * Does not prove remote-mcp ingress — pairs with server access logs.
+   */
+  async detectMcpDomHint(probeToken?: string): Promise<McpDomHint> {
+    const page = this.getPage();
+
+    const allowVisible = await page
+      .locator(
+        'button:has-text("Allow"), button:has-text("Always allow"), button:has-text("Approve")'
+      )
+      .first()
+      .isVisible({ timeout: 400 })
+      .catch(() => false);
+    if (allowVisible) return "approval_required";
+
+    const assistantTexts = await page
+      .locator('[data-message-author-role="assistant"]')
+      .allTextContents()
+      .catch(() => [] as string[]);
+    const combined = assistantTexts.join("\n");
+
+    if (/blocked by openai.?s safety checks/i.test(combined)) {
+      return "safety_blocked";
+    }
+
+    if (probeToken) {
+      const canaryRe = new RegExp(`CREATE_WORKER_CANARY=${probeToken}(?:\\b|[^a-zA-Z0-9])`);
+      if (canaryRe.test(combined)) {
+        return "canary_in_chat";
+      }
+    }
+
+    return null;
   }
 
   /** Public idle wait — must run outside the UI-write mutex. */
@@ -261,10 +328,12 @@ export class ChatGptBrowser {
   /** Short reminder to call handoff_submit_result (best-effort, idempotent per nudge stage). */
   async sendSubmitNudge(
     taskId: string,
-    opts?: { skipIdleWait?: boolean }
+    opts?: { skipIdleWait?: boolean; probe?: boolean }
   ): Promise<void> {
     const page = this.getPage();
-    const message = SUBMIT_NUDGE_MESSAGE(taskId);
+    const message = opts?.probe
+      ? PROBE_SUBMIT_NUDGE_MESSAGE(taskId)
+      : SUBMIT_NUDGE_MESSAGE(taskId);
     const marker = `TASK_ID=${taskId}`;
 
     const composer = page.locator(selectors.composer).first();
