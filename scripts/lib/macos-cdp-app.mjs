@@ -2,6 +2,7 @@
  * macOS Chrome CDP.app manager — clone installed Chrome into a dedicated bundle
  * with distinct Dock icon and bundle identifier.
  */
+import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import {
   accessSync,
@@ -125,12 +126,18 @@ export function writeMetadata(home, metadata) {
   writeFileSync(metadataPath(home), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
 }
 
+export function iconDigest(iconSourcePath, readFile = readFileSync) {
+  return createHash("sha256").update(readFile(iconSourcePath)).digest("hex");
+}
+
 export function shouldRebuildManagedApp({
   sourceChromeApp,
   managedApp,
   metadata,
+  iconSourcePath,
   getVersion = getBundleVersion,
   exists = existsSync,
+  readFile = readFileSync,
 }) {
   if (!exists(managedApp)) return true;
   const sourceVersion = getVersion(sourceChromeApp);
@@ -138,6 +145,13 @@ export function shouldRebuildManagedApp({
   if (!metadata) return true;
   if (metadata.sourceAppPath !== sourceChromeApp) return true;
   if (metadata.sourceVersion !== sourceVersion) return true;
+  if (
+    iconSourcePath &&
+    metadata.iconDigest &&
+    metadata.iconDigest !== iconDigest(iconSourcePath, readFile)
+  ) {
+    return true;
+  }
 
   const plist = join(managedApp, "Contents/Info.plist");
   if (!exists(plist)) return true;
@@ -149,6 +163,8 @@ export function shouldRebuildManagedApp({
   }
   const iconPath = join(managedApp, "Contents/Resources", MANAGED_ICON_FILE);
   if (!exists(iconPath)) return true;
+  const appIconPath = join(managedApp, "Contents/Resources/app.icns");
+  if (!exists(appIconPath)) return true;
   return false;
 }
 
@@ -164,20 +180,30 @@ export async function patchManagedBundle(managedApp, iconSourcePath, exec = exec
   const plistPath = join(managedApp, "Contents/Info.plist");
   const resourcesDir = join(managedApp, "Contents/Resources");
   mkdirSync(resourcesDir, { recursive: true });
-  copyFileSync(iconSourcePath, join(resourcesDir, MANAGED_ICON_FILE));
+  const iconBase = MANAGED_ICON_FILE.replace(/\.icns$/, "");
+  const managedIconPath = join(resourcesDir, MANAGED_ICON_FILE);
+  copyFileSync(iconSourcePath, managedIconPath);
+  // Chrome also resolves AppIcon via app.icns — overwrite so Dock cannot fall back.
+  copyFileSync(iconSourcePath, join(resourcesDir, "app.icns"));
 
   const replacements = [
     ["CFBundleDisplayName", MANAGED_DISPLAY_NAME],
     ["CFBundleName", MANAGED_DISPLAY_NAME],
     ["CFBundleIdentifier", MANAGED_BUNDLE_ID],
-    ["CFBundleIconFile", MANAGED_ICON_FILE.replace(/\.icns$/, "")],
+    ["CFBundleIconFile", iconBase],
+    ["CFBundleIconName", iconBase],
   ];
   for (const [key, value] of replacements) {
     await exec("plutil", ["-replace", key, "-string", value, plistPath]);
   }
 }
 
+export async function stripCodesignDetritus(managedApp, exec = execFileAsync) {
+  await exec("xattr", ["-cr", managedApp]);
+}
+
 export async function codesignManagedApp(managedApp, exec = execFileAsync) {
+  await stripCodesignDetritus(managedApp, exec);
   await exec("codesign", ["--force", "--deep", "--sign", "-", managedApp]);
 }
 
@@ -200,8 +226,10 @@ export async function ensureCdpChromeApp({
       sourceChromeApp,
       managedApp,
       metadata,
+      iconSourcePath,
       getVersion: deps.getVersion ?? getBundleVersion,
       exists,
+      readFile: deps.readFile ?? readFileSync,
     })
   ) {
     return getBundleExecutablePath(managedApp);
@@ -226,6 +254,7 @@ export async function ensureCdpChromeApp({
   writeMetadata(home, {
     sourceAppPath: sourceChromeApp,
     sourceVersion: getBundleVersion(sourceChromeApp),
+    iconDigest: iconDigest(iconSourcePath, deps.readFile ?? readFileSync),
     managedAppPath: managedApp,
     updatedAt: new Date().toISOString(),
   });

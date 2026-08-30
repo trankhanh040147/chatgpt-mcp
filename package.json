@@ -56,7 +56,8 @@
     "status-api": "node dist/index.js status-api",
     "browser-worker": "node dist/index.js browser-worker",
     "browser-broker": "node dist/index.js browser-broker",
-    "chrome-cdp": "node scripts/start-chrome-cdp.mjs"
+    "chrome-cdp": "node scripts/start-chrome-cdp.mjs",
+    "chrome:cdp": "node scripts/start-chrome-cdp.mjs"
   },
   "engines": {
     "node": ">=22.14"

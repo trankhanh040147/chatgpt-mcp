@@ -86,6 +86,7 @@ function makeManagedApp(root, { version = "131.0.0.0", executable = "Google Chro
     "utf8"
   );
   writeFileSync(join(resources, MANAGED_ICON_FILE), "icns", "utf8");
+  writeFileSync(join(resources, "app.icns"), "icns", "utf8");
   return app;
 }
 
@@ -228,6 +229,12 @@ async function main() {
         );
         writeFileSync(join(dest, "Contents/MacOS/Google Chrome"), "#!/bin/sh\n", "utf8");
       }
+      if (cmd === "codesign") {
+        // no-op
+      }
+      if (cmd === "xattr") {
+        // no-op
+      }
       if (cmd === "plutil") {
         const plistPath = args[args.length - 1];
         const key = args[2];
@@ -255,6 +262,7 @@ async function main() {
         );
         writeFileSync(join(dest, "Contents/MacOS/Google Chrome"), "#!/bin/sh\n", "utf8");
         writeFileSync(join(dest, "Contents/Resources", MANAGED_ICON_FILE), "icns", "utf8");
+        writeFileSync(join(dest, "Contents/Resources", "app.icns"), "icns", "utf8");
       }
     };
 
@@ -270,6 +278,7 @@ async function main() {
     );
     assert(commands.some((c) => c[0] === "cp"), "ensureCdpChromeApp clones source app");
     assert(commands.some((c) => c[0] === "codesign"), "ensureCdpChromeApp ad-hoc codesigns");
+    assert(commands.some((c) => c[0] === "xattr"), "ensureCdpChromeApp strips xattrs before codesign");
     const meta = readMetadata(home);
     assert(meta?.sourceAppPath === source, "ensureCdpChromeApp writes metadata source path");
     assert(meta?.sourceVersion === "131.0.0.0", "ensureCdpChromeApp writes metadata version");
@@ -289,10 +298,12 @@ async function main() {
       "utf8"
     );
     let copied = false;
+    const icon = join(root, "icon.icns");
+    writeFileSync(icon, "icns", "utf8");
     const binary = await ensureCdpChromeApp({
       sourceChromeApp: source,
       home,
-      iconSourcePath: join(root, "icon.icns"),
+      iconSourcePath: icon,
       deps: {
         exec: async () => {
           copied = true;
