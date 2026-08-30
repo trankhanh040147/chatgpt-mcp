@@ -13,9 +13,10 @@ Rotation CLI (`rotate-worker`) and `create-worker` exist but are terminal-only a
 
 1. **Single operator surface:** dashboard mutations on loopback `:8787` (same CSRF/origin model as recover/fail-task).
 2. **Broker-primary config:** `HANDOFF_WORKERS_FILE` is authoritative; dashboard writes registry atomically (`upsertWorkerRegistryEntry`).
-3. **URL change pipeline:** assign or create chat → commit topology + `commitChatRotation` semantics → broker rebind tab → **auto-canary** until `handoff_submit_result` succeeds → clear `readiness_reason`.
-4. **SESSION_LOST heal:** dashboard detects → operator confirms modal → runs kill+recreate (not silent).
-5. **Dynamic N workers:** registry length drives broker bind attempts; unbound workers show `UNBOUND` not perpetual ERROR.
+3. **Lite control plane (frozen 2026-08-30):** imperative `POST /ops/workers/*` → `enqueueOperation` → `worker_operations` journal → idempotent `reconcile()` → broker HTTP ([ADR-009](./ADR-009-runtime-cdp-ownership.md)). Not full desired-state PATCH in v0.6.0.
+4. **URL change pipeline:** assign or create chat → ensure registry + DB + broker bind → **SYSTEM_PROBE** → clear `readiness_reason`. Normal dashboard flow must **not** set `RESTART_REQUIRED`.
+5. **SESSION_LOST heal:** dashboard detects → operator confirms modal → kill+recreate (not silent).
+6. **Dynamic N workers:** registry length drives bind attempts; unbound workers show BLOCKED/UNBOUND; fleet continues (G3).
 
 ## Consequences
 
