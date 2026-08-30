@@ -36,7 +36,7 @@ HANDOFF_PATHS := \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install build setup chrome up up-bg down restart status wait-ready \
+.PHONY: help install build setup chrome chrome-if-needed up up-bg down restart status wait-ready \
 	check doctor recover recover-clean recover-all clear-tasks clear-task \
 	logs worker-bg remote-bg status-api-bg test-leases e2e-1 e2e-20 e2e-dual \
 	create-worker rotate-worker dashboard dashboard-up handoff-zip
@@ -71,10 +71,15 @@ setup: ## ~/.chatgpt-mcp + print Cursor MCP JSON
 chrome: ## Start dedicated CDP Chrome (idempotent)
 	npm run chrome-cdp
 
-up: build ## Foreground stack: CDP + remote-mcp + worker (Ctrl+C stops services)
+chrome-if-needed: ## Start CDP Chrome only when :9222 is down (idempotent)
+	@curl -sf http://127.0.0.1:9222/json/version >/dev/null 2>&1 \
+		&& echo "CDP already listening on :9222" \
+		|| npm run chrome-cdp
+
+up: build chrome-if-needed ## Foreground stack: CDP + remote-mcp + worker (Ctrl+C stops services)
 	npm run start
 
-up-bg: build ## Background: status-api + browser-worker + remote-mcp
+up-bg: build chrome-if-needed ## Background: status-api + browser-worker + remote-mcp
 	@mkdir -p $(LOG_DIR)
 	@if lsof -nP -iTCP:$(REMOTE_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 		echo "remote-mcp already on :$(REMOTE_PORT)"; \
@@ -131,7 +136,7 @@ dashboard: ## Print ops dashboard URL (does not start services)
 	@echo "Open http://127.0.0.1:$(HTTP_PORT)/dashboard/"
 	@echo "(start stack: make dashboard-up)"
 
-dashboard-up: build ## Start A1-S stack for dashboard (supervised status-api + remote-mcp + broker)
+dashboard-up: build chrome-if-needed ## Start A1-S stack for dashboard (supervised status-api + remote-mcp + broker)
 	@chmod +x scripts/start-broker-stack.sh
 	HANDOFF_WORKERS_FILE=$${HANDOFF_WORKERS_FILE:-$(CURDIR)/data/workers.a1s.json} \
 		./scripts/start-broker-stack.sh
