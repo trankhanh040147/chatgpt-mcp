@@ -6,38 +6,28 @@
  * Always uses a dedicated profile under CHATGPT_MCP_HOME (or legacy override).
  *
  * Env:
- *   CHROME_BIN / CHATGPT_MCP_CHROME_PATH — explicit binary
+ *   CHROME_BIN / CHATGPT_MCP_CHROME_PATH — explicit binary (wins over managed app)
  *   CHATGPT_MCP_HOME — default ~/.chatgpt-mcp
  *   CHATGPT_CDP_USER_DATA_DIR — override profile dir (legacy: ~/chrome-chatgpt-debug)
  *   CHATGPT_CDP_PORT — default 9222
  */
-import { spawn, execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  discoverChromeApp,
+  discoverChromeExecutableDarwinFallback,
+  discoverChromeExecutableLinux,
+  ensureCdpChromeApp,
+  hasExplicitChromeOverride,
+  resolveUserPath,
+  which,
+} from "./lib/macos-cdp-app.mjs";
 
-function resolveUserPath(raw) {
-  const trimmed = String(raw).trim();
-  if (trimmed === "~") return homedir();
-  if (trimmed.startsWith("~/")) return resolve(join(homedir(), trimmed.slice(2)));
-  return resolve(trimmed);
-}
-
-function which(cmd) {
-  try {
-    const out = execFileSync(
-      process.platform === "win32" ? "where" : "which",
-      [cmd],
-      { encoding: "utf8" }
-    )
-      .split(/\r?\n/)
-      .map((s) => s.trim())
-      .find(Boolean);
-    return out && existsSync(out) ? out : null;
-  } catch {
-    return null;
-  }
-}
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const CDP_ICON_PATH = join(__dirname, "..", "assets", "chrome-cdp.icns");
 
 function isExecutable(path) {
   try {
@@ -48,54 +38,46 @@ function isExecutable(path) {
   }
 }
 
-function discoverChrome() {
+function resolveExplicitChrome() {
   const override =
     process.env.CHATGPT_MCP_CHROME_PATH?.trim() ||
     process.env.CHROME_BIN?.trim();
-  if (override) {
-    const p = resolveUserPath(override);
-    if (!isExecutable(p)) {
-      console.error(`CHROME_BIN not executable: ${p}`);
-      process.exit(1);
-    }
-    return p;
+  const p = resolveUserPath(override);
+  if (!isExecutable(p)) {
+    console.error(`CHROME_BIN not executable: ${p}`);
+    process.exit(1);
+  }
+  return p;
+}
+
+async function discoverChrome(home) {
+  if (hasExplicitChromeOverride()) {
+    return resolveExplicitChrome();
   }
 
   if (process.platform === "darwin") {
-    const candidates = [
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      join(
-        homedir(),
-        "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-      ),
-      "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    ];
-    for (const c of candidates) {
-      if (isExecutable(c)) return c;
+    const sourceApp = discoverChromeApp();
+    if (sourceApp) {
+      try {
+        return await ensureCdpChromeApp({
+          sourceChromeApp: sourceApp,
+          home,
+          iconSourcePath: CDP_ICON_PATH,
+          log: (msg) => console.log(msg),
+        });
+      } catch (err) {
+        console.warn(
+          `WARN: Could not prepare Chrome CDP.app; falling back to Google Chrome.app. Dock icon will not be isolated. (${err.message})`
+        );
+      }
     }
+    const fallback = discoverChromeExecutableDarwinFallback(isExecutable);
+    if (fallback) return fallback;
   }
 
   if (process.platform === "linux") {
-    const names = [
-      "google-chrome-stable",
-      "google-chrome",
-      "chromium",
-      "chromium-browser",
-    ];
-    for (const name of names) {
-      const found = which(name);
-      if (found) return found;
-    }
-    const paths = [
-      "/usr/bin/google-chrome-stable",
-      "/usr/bin/google-chrome",
-      "/usr/bin/chromium",
-      "/usr/bin/chromium-browser",
-      "/snap/bin/chromium",
-    ];
-    for (const p of paths) {
-      if (isExecutable(p)) return p;
-    }
+    const found = discoverChromeExecutableLinux(which, isExecutable);
+    if (found) return found;
   }
 
   console.error(
@@ -137,7 +119,7 @@ function resolveProfileDir() {
 }
 
 const { dir: userDataDir, source: profileSource } = resolveProfileDir();
-const chrome = discoverChrome();
+const chrome = await discoverChrome(home);
 
 if (await cdpUp(port)) {
   console.log(`CDP already listening on :${port} — not starting another Chrome.`);
