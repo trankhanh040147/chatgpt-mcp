@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "test": "npm run test:unit",
-    "test:unit": "npm run test:leases && npm run test:ops && npm run test:hook-ack && npm run test:usage && npm run test:create-worker && npm run test:agent-policy && npm run test:files && npm run test:rotation",
+    "test:unit": "npm run test:leases && npm run test:ops && npm run test:hook-ack && npm run test:usage && npm run test:create-worker && npm run test:agent-policy && npm run test:files && npm run test:rotation && npm run test:chrome-cdp",
     "check:unit": "npm run typecheck && npm run test:unit",
     "verify": "npm run check:unit && npm run build",
     "prepack": "npm run build",
@@ -52,10 +52,12 @@
     "test:agent-policy": "tsx scripts/test-agent-policy.ts",
     "test:files": "tsx scripts/test-files.ts",
     "test:rotation": "tsx scripts/test-rotation.ts",
+    "test:chrome-cdp": "node scripts/test-chrome-cdp.mjs",
     "status-api": "node dist/index.js status-api",
     "browser-worker": "node dist/index.js browser-worker",
     "browser-broker": "node dist/index.js browser-broker",
-    "chrome-cdp": "node scripts/start-chrome-cdp.mjs"
+    "chrome-cdp": "node scripts/start-chrome-cdp.mjs",
+    "chrome:cdp": "node scripts/start-chrome-cdp.mjs"
   },
   "engines": {
     "node": ">=22.14"
