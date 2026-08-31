@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "handoff": {
-      "type": "http",
-      "url": "https://REPLACE_WITH_PUBLIC_MCP_HOST/mcp"
-    }
-  }
-}
