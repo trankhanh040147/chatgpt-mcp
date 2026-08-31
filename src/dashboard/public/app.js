@@ -896,8 +896,11 @@ function renderWorkers(workers, showReference, systemState = {}) {
           ${visibleLines}
         </div>
         ${primaryActionHtml}
+        <div class="worker-secondary-actions">
+          ${secondaryActionsHtml}
+        </div>
         <details class="worker-debug"${isDebugOpen ? " open" : ""}>
-          <summary class="worker-debug-summary">Debug details</summary>
+          <summary class="worker-debug-summary">Diagnostics</summary>
           <div class="worker-debug-body">
             <div class="card-line">
               <span class="card-line__label">PID</span>
@@ -917,9 +920,6 @@ function renderWorkers(workers, showReference, systemState = {}) {
             </div>
             ${w.errorCode ? `<div class="card-line"><span class="card-line__label">Error code</span><span class="card-line__val">${escapeHtml(w.errorCode)}</span></div>` : ""}
             ${w.conditions?.length ? `<div class="conditions" title="${escapeHtml(formatConditions(w.conditions))}">${escapeHtml(formatConditions(w.conditions))}</div>` : ""}
-            <div class="worker-secondary-actions">
-              ${secondaryActionsHtml}
-            </div>
           </div>
         </details>
       </article>`;
@@ -1927,8 +1927,6 @@ export async function tick() {
     });
     renderTasks(tasksBody.tasks ?? [], showRef);
     renderHints(mergedWorkers, health);
-
-    isFirstLoad = false;
   } catch (err) {
     setPill(healthPill, "DOWN", "bad");
     if (updatedEl) {
