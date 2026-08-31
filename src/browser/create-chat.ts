@@ -65,6 +65,175 @@ async function ensureChatSurface(page: Page): Promise<void> {
   }
 }
 
+/** Plain composer text — chips may render without "@Cursor" literals. */
+async function readComposerText(page: Page): Promise<string> {
+  const composer = page.locator(selectors.composer).first();
+  const text =
+    (await composer.innerText().catch(() => null)) ??
+    (await composer.textContent().catch(() => null)) ??
+    "";
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function countPlainCursorMentions(text: string): number {
+  return (text.match(/@Cursor/gi) ?? []).length;
+}
+
+/** @mention autocomplete row for the Cursor connector (below composer, not sidebar). */
+async function findCursorMentionSuggestion(
+  page: Page
+): Promise<{ x: number; y: number; text: string } | null> {
+  const composer = page.locator(selectors.composer).first();
+  const box = await composer.boundingBox();
+  if (!box) return null;
+
+  return page.evaluate(
+    (a) => {
+      const minX = Math.max(180, a.cx - 24);
+      const maxX = a.cx + a.cw + 24;
+      // Strictly below composer — never match typed "@Cursor" inside the editor.
+      const minY = a.cy + a.ch + 4;
+      const maxY = a.cy + a.ch + 360;
+
+      const composerRoot =
+        document.querySelector(
+          '#prompt-textarea[contenteditable="true"], div#prompt-textarea[role="textbox"], [contenteditable="true"].ProseMirror'
+        ) ?? null;
+
+      function normalize(text: string): string {
+        return text.replace(/\s+/g, " ").trim();
+      }
+
+      function score(text: string): number {
+        if (!text) return -1;
+        if (/^@Cursor$/i.test(text)) return -1;
+        if (/request|handoff|trading|analysis of stocks/i.test(text)) return -1;
+        if (text === "Cursor") return 100;
+        if (/^Cursor Cursor$/i.test(text)) return 95;
+        if (/^Cursor\b/i.test(text) && text.length <= 32) return 60;
+        return -1;
+      }
+
+      let best: { el: Element; s: number; text: string } | null = null;
+      for (const el of document.querySelectorAll(
+        "div, span, button, li, p, [role='option']"
+      )) {
+        if (composerRoot?.contains(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        if (r.x < minX || r.x > maxX || r.y < minY || r.y > maxY) continue;
+        const text = normalize(el.textContent ?? "");
+        const s = score(text);
+        if (s < 0) continue;
+        if (!best || s > best.s) {
+          best = { el, s, text };
+        }
+      }
+
+      if (!best) return null;
+      const r = best.el.getBoundingClientRect();
+      return {
+        x: r.x + r.width / 2,
+        y: r.y + r.height / 2,
+        text: best.text,
+      };
+    },
+    { cx: box.x, cy: box.y, cw: box.width, ch: box.height }
+  );
+}
+
+async function waitForCursorMentionSuggestion(
+  page: Page,
+  timeoutMs = 15_000
+): Promise<{ x: number; y: number; text: string }> {
+  const deadline = Date.now() + timeoutMs;
+  let loggedWait = false;
+  while (Date.now() < deadline) {
+    const hit = await findCursorMentionSuggestion(page);
+    if (hit) {
+      if (!loggedWait) {
+        loggedWait = true;
+        log({
+          event: "INFO",
+          component: "create-worker",
+          message: `create-worker: @mention suggestion visible (${hit.text})`,
+        });
+      }
+      // Let ChatGPT finish highlighting the row before we confirm.
+      await page.waitForTimeout(220);
+      return hit;
+    }
+    if (!loggedWait) {
+      loggedWait = true;
+      log({
+        event: "INFO",
+        component: "create-worker",
+        message:
+          "create-worker: waiting for @Cursor mention suggestion below composer",
+      });
+    }
+    await page.waitForTimeout(120);
+  }
+  throw new Error(
+    "create-worker: @Cursor mention list did not appear — type @Cursor manually, pick Cursor, then Assign URL"
+  );
+}
+
+async function mentionMenuVisible(page: Page): Promise<boolean> {
+  return page
+    .locator('[role="listbox"], [role="menu"]')
+    .first()
+    .isVisible({ timeout: 200 })
+    .catch(() => false);
+}
+
+async function confirmCursorMentionSuggestion(
+  page: Page,
+  suggestion: { x: number; y: number; text: string }
+): Promise<void> {
+  const beforeText = await readComposerText(page);
+
+  // One confirm path — keyboard first (matches manual flow). Avoid click+Enter double-confirm.
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(350);
+  if (await cursorConnectorOnComposer(page)) return;
+
+  const afterEnter = await readComposerText(page);
+  if (countPlainCursorMentions(afterEnter) > countPlainCursorMentions(beforeText)) {
+    // Enter committed plain text instead of the chip — undo and click the row once.
+    await page.keyboard.press("Meta+z");
+    await page.waitForTimeout(200);
+  }
+
+  try {
+    await page.mouse.click(suggestion.x, suggestion.y);
+    await page.waitForTimeout(350);
+    if (await cursorConnectorOnComposer(page)) return;
+  } catch {
+    /* optional click failed */
+  }
+
+  if (await mentionMenuVisible(page)) {
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(200);
+  }
+}
+
+/** Remove accidental duplicate plain "@Cursor" literals left in the composer. */
+async function dedupePlainCursorMentions(page: Page): Promise<void> {
+  const text = await readComposerText(page);
+  if (countPlainCursorMentions(text) < 2) return;
+
+  const composer = page.locator(selectors.composer).first();
+  await composer.click({ timeout: 3000 }).catch(() => undefined);
+  for (let i = 0; i < countPlainCursorMentions(text) - 1; i += 1) {
+    await page.keyboard.press("Meta+ArrowLeft");
+    await page.keyboard.press("Shift+Meta+ArrowRight");
+    await page.keyboard.press("Backspace");
+    await page.waitForTimeout(80);
+  }
+}
+
 /** Cursor MCP chip attached to the composer (not sidebar "Cursor" plugin link). */
 async function cursorConnectorOnComposer(page: Page): Promise<boolean> {
   const composer = page.locator(selectors.composer).first();
@@ -158,11 +327,19 @@ async function attachCursorPlugin(page: Page): Promise<void> {
   });
   await page.waitForTimeout(100);
 
-  await page.keyboard.type("@Cursor", { delay: 25 });
-  await page.waitForTimeout(250);
+  await dedupePlainCursorMentions(page);
 
-  await page.keyboard.press("Enter");
-  await page.waitForTimeout(150);
+  const existingText = await readComposerText(page);
+  if (
+    countPlainCursorMentions(existingText) === 0 &&
+    !(await cursorConnectorOnComposer(page))
+  ) {
+    await page.keyboard.type("@Cursor", { delay: 45 });
+  }
+
+  const suggestion = await waitForCursorMentionSuggestion(page);
+  await confirmCursorMentionSuggestion(page, suggestion);
+  await dedupePlainCursorMentions(page);
   await waitForCursorConnector(page);
 }
 

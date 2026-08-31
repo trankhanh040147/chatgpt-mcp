@@ -269,7 +269,7 @@
             copy the URL from the address bar. Use a chat you own, not a shared or blocked one.
           </p>
         </div>
-        <div id="ops-confirm-block">
+        <div id="ops-confirm-block" class="hidden" hidden>
           <label class="ops-confirm-label" for="ops-confirm-input">
             Type <code id="ops-confirm-phrase">…</code> to confirm
           </label>
@@ -281,7 +281,7 @@
           />
         </div>
         <div class="ops-modal-actions">
-          <button type="submit" value="cancel" class="ghost">Cancel</button>
+          <button type="button" id="ops-cancel" class="ghost">Cancel</button>
           <button
             type="submit"
             value="ok"

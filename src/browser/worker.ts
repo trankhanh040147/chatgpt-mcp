@@ -216,7 +216,14 @@ export class BrowserWorker {
         });
         this.activeTaskId = null;
         this.activeLeaseToken = null;
-        await sleep(5_000);
+        const backoffMs =
+          message.includes("CHAT_ACCESS_DENIED") ||
+          message.includes("redirected away from chat") ||
+          message.includes("Failed to bind") ||
+          message.includes("Worker conversation not ready")
+            ? 120_000
+            : 5_000;
+        await sleep(backoffMs);
         if (ownsCdp) {
           try {
             await this.browser?.close();

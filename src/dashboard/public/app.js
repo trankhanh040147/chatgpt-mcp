@@ -35,6 +35,7 @@ const opsModalError = $("ops-modal-error");
 const opsConfirmPhrase = $("ops-confirm-phrase");
 const opsConfirmInput = $("ops-confirm-input");
 const opsConfirmGo = $("ops-confirm-go");
+const opsCancel = $("ops-cancel");
 const opsConfirmBlock = $("ops-confirm-block");
 const opsUrlBlock = $("ops-url-block");
 const opsUrlInput = $("ops-url-input");
@@ -65,6 +66,11 @@ let selectedTaskStatus = null;
 let opsCsrf = null;
 let pendingOps = null; // { kind, phrase, planToken?, taskId?, workerId?, workerUrl?, mode? }
 let opsInFlight = false;
+
+function opsBusyNotice() {
+  showOpsResult("Another operation is still running — wait a few seconds and try again.");
+  if (opsResultEl) opsResultEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
 let lastTaxonomy = null;
 const optimisticBusyWorkers = new Set();
 export const openDebugWorkers = new Set();
@@ -1087,7 +1093,10 @@ function renderWorkerAlert(workers, healthMeta) {
 // Worker Actions Handlers (with optimistic busy state)
 // ==========================================================================
 async function beginWorkerAssign(workerId) {
-  if (opsInFlight) return;
+  if (opsInFlight) {
+    opsBusyNotice();
+    return;
+  }
   const state = await fetchJson("/workers/health");
   const row = (state.workers ?? []).find((w) => w.id === workerId);
   const currentUrl =
@@ -1115,7 +1124,10 @@ async function beginWorkerAssign(workerId) {
 }
 
 async function beginWorkerCreate(workerId) {
-  if (opsInFlight) return;
+  if (opsInFlight) {
+    opsBusyNotice();
+    return;
+  }
   openOpsModal({
     title: `Create chat · ${workerId}`,
     preview:
@@ -1184,7 +1196,10 @@ async function beginWorkerRemove(workerId) {
 }
 
 async function beginAddWorker() {
-  if (opsInFlight) return;
+  if (opsInFlight) {
+    opsBusyNotice();
+    return;
+  }
   openOpsModal({
     title: "Add worker",
     preview:
@@ -1342,6 +1357,7 @@ function showOpsResult(obj) {
   } else {
     opsResultEl.classList.remove("ops-result--error");
   }
+  opsResultEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 async function postOps(path, body) {
@@ -1464,6 +1480,9 @@ function openOpsModal({
   if (opsModal) {
     if (typeof opsModal.showModal === "function") opsModal.showModal();
     else opsModal.setAttribute("open", "");
+  }
+  if (!showUrlField && !needTyped && opsConfirmGo) {
+    opsConfirmGo.focus();
   }
 }
 
@@ -2062,15 +2081,13 @@ if (opsUrlInput) {
 
 if (opsForm) {
   opsForm.addEventListener("submit", (ev) => {
-    const submitter = ev.submitter;
-    const value = submitter?.value ?? "cancel";
-    if (value !== "ok") {
-      pendingOps = null;
+    ev.preventDefault();
+    if (!pendingOps || opsInFlight) {
+      if (opsInFlight) opsBusyNotice();
       return;
     }
-    ev.preventDefault();
-    if (!pendingOps || opsInFlight) return;
     if (pendingOps.showUrlField && !isValidWorkerChatUrl(opsUrlInput?.value)) {
+      setOpsModalError("Enter a valid https://chatgpt.com/c/… URL");
       return;
     }
     if (
@@ -2080,6 +2097,18 @@ if (opsForm) {
       return;
     }
     void executePendingOps();
+  });
+}
+
+onClick(opsCancel, () => closeOpsModal());
+
+if (opsModal) {
+  opsModal.addEventListener("cancel", () => {
+    pendingOps = null;
+    setOpsModalError("");
+  });
+  opsModal.addEventListener("close", () => {
+    if (pendingOps) pendingOps = null;
   });
 }
 
