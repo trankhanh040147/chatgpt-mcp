@@ -4,6 +4,7 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,11 +16,13 @@ import { DEFAULT_WORKER_ID, type HandoffTask } from "../tasks/task.types.js";
 import {
   dashboardContentMode,
   deriveWorkerIndicators,
+  isHandoffTaskStuck,
   redactPreview,
   sanitizeChatUrl,
   taskTiming,
 } from "../dashboard/observability.js";
-import { loadWorkersTopology } from "../config/workers-topology.js";
+import { loadWorkersTopology, workersTopologySource } from "../config/workers-topology.js";
+import { resolveWorkersFilePath } from "../config/load-config.js";
 import {
   isChatBudgetExhausted,
   parseMaxTasksPerChat,
@@ -43,6 +46,24 @@ import {
 } from "../usage/task-usage.repository.js";
 import { loadCostConfig } from "../usage/pricing.js";
 import type { TaskUsageSnapshot } from "../usage/usage.types.js";
+import { brokerOpsClientFromEnv } from "../ops/broker-client.js";
+import { resolveBrokerOpsPort } from "../ops/broker-ops-config.js";
+import { WorkerController } from "../ops/worker-controller.js";
+import { buildWorkerHealthRow } from "../ops/worker-health.js";
+import { nextWorkerId, upsertWorkerRegistryEntry } from "../config/write-workers-topology.js";
+
+const HTTP_API_BUILD_VERSION = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkgPath = join(here, "../../package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
+    return String(pkg.version ?? "unknown");
+  } catch {
+    return "unknown";
+  }
+})();
+
+const HTTP_API_GENERATION = `${process.pid}-${Date.now()}`;
 
 const OPS_BODY_MAX = 8_192;
 const PLAN_TTL_MS = 90_000;
@@ -102,6 +123,7 @@ export interface HttpApiOptions {
   reaperIntervalMs?: number;
   /** Optional default worker id for GET /worker single-view (compat). */
   workerId?: string;
+  workersFile?: string;
 }
 
 /** Retain the listen handle so V8 cannot GC the server after startHttpApi() returns. */
@@ -216,9 +238,43 @@ function sleep(ms: number): Promise<void> {
 
 export function startHttpApi(options: HttpApiOptions): Promise<void> {
   initDatabase(options.dbPath);
+  log({
+    event: "INFO",
+    component: "http-api",
+    message: `HANDOFF_DB_PATH=${options.dbPath}`,
+    data: {
+      dbPath: options.dbPath,
+      port: options.port,
+      generation: HTTP_API_GENERATION,
+      buildVersion: HTTP_API_BUILD_VERSION,
+    },
+  });
   const repo = new TaskRepository(getDatabase());
   const taskService = new TaskService(repo);
   const viewWorkerId = options.workerId?.trim() || DEFAULT_WORKER_ID;
+
+  const workersFile =
+    options.workersFile?.trim() ||
+    process.env.HANDOFF_WORKERS_FILE?.trim() ||
+    "";
+  const brokerClient = brokerOpsClientFromEnv();
+  const workerOpsReady =
+    brokerClient &&
+    (workersFile || workersTopologySource() === "db");
+  const workerController = workerOpsReady
+    ? WorkerController.create({
+          taskRepo: repo,
+          taskService,
+          broker: brokerClient!,
+          workersFile: workersFile || options.dbPath,
+        })
+      : null;
+
+  if (workerController) {
+    const reconcileMs = Number(process.env.HANDOFF_RECONCILE_INTERVAL_MS ?? 5000);
+    workerController.startPeriodicReconcile(reconcileMs);
+    void workerController.reconcileAll();
+  }
 
   let lastReapAt: string | null = null;
   let lastReapStats: {
@@ -368,11 +424,15 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           usageTotals: usageBundleTotal(getDatabase(), since24h),
           costConfig: costMeta,
           referencePricingEnabled: costMeta?.referencePricingEnabled ?? false,
+          generation: HTTP_API_GENERATION,
+          buildVersion: HTTP_API_BUILD_VERSION,
+          dbPath: options.dbPath,
         });
         return;
       }
 
       if (req.method === "GET" && url.pathname === "/workers") {
+        repo.sweepStaleConsentRequired();
         const now = Date.now();
         const nowIso = new Date(now).toISOString();
         const staleMs = Number(process.env.HANDOFF_WORKER_STALE_MS ?? 120_000);
@@ -812,10 +872,6 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           sendJson(res, 400, { error: unknown });
           return;
         }
-        const confirm =
-          typeof parsed.value.confirm === "string"
-            ? parsed.value.confirm.trim()
-            : "";
         const planToken =
           typeof parsed.value.planToken === "string"
             ? parsed.value.planToken
@@ -830,12 +886,6 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           sendJson(res, 409, {
             error: "plan expired or unknown — preview again",
             code: "plan_stale",
-          });
-          return;
-        }
-        if (confirm !== entry.plan.confirmPhrase) {
-          sendJson(res, 400, {
-            error: `confirm must be exactly "${entry.plan.confirmPhrase}"`,
           });
           return;
         }
@@ -931,17 +981,6 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           sendJson(res, 400, { error: "taskId required" });
           return;
         }
-        const expected = `FAIL ${taskId}`;
-        const confirm =
-          typeof parsed.value.confirm === "string"
-            ? parsed.value.confirm.trim()
-            : "";
-        if (confirm !== expected) {
-          sendJson(res, 400, {
-            error: `confirm must be exactly "${expected}"`,
-          });
-          return;
-        }
         const reason =
           typeof parsed.value.reason === "string"
             ? parsed.value.reason
@@ -981,10 +1020,478 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         return;
       }
 
+      if (req.method === "GET" && url.pathname === "/workers/health") {
+        repo.sweepStaleConsentRequired();
+        const now = Date.now();
+        const nowIso = new Date(now).toISOString();
+        const staleMs = Number(process.env.HANDOFF_WORKER_STALE_MS ?? 120_000);
+        let brokerStatus = null;
+        let brokerReachable = false;
+        if (brokerClient) {
+          brokerReachable = await brokerClient.ping();
+          if (brokerReachable) {
+            brokerStatus = await brokerClient.status();
+          }
+        }
+        const workerRows = repo.listWorkers();
+        let registryIds = new Set<string>();
+        try {
+          const topo = loadWorkersTopology({
+            dbPath: options.dbPath,
+            workersFile: workersFile || undefined,
+            workerId: viewWorkerId,
+            workerUrl: "",
+            cdpEndpoint: "",
+          });
+          registryIds = new Set(topo.workers.map((r) => r.id));
+        } catch {
+          registryIds = new Set();
+        }
+        const workers = await Promise.all(
+          workerRows.map(async (w) => {
+            const activeOp = workerController
+              ? workerController
+                  .listActiveOperations()
+                  .find((o) => o.workerId === w.id)
+              : undefined;
+            const health = buildWorkerHealthRow({
+              worker: w,
+              brokerStatus,
+              brokerReachable,
+              staleMs,
+              now,
+              activeOperation: activeOp
+                ? { state: activeOp.state, kind: activeOp.kind }
+                : null,
+            });
+            const inFlightTaskId =
+              w.id === "default" ? null : repo.getInFlightTaskId(w.id);
+            let stuckInFlightTaskId: string | null = null;
+            if (inFlightTaskId) {
+              const inFlightTask = repo.getTaskById(inFlightTaskId);
+              if (
+                inFlightTask &&
+                isHandoffTaskStuck(inFlightTask, nowIso)
+              ) {
+                stuckInFlightTaskId = inFlightTaskId;
+              }
+            }
+            let chatAccessDenied = false;
+            let chatProbeReason: string | undefined;
+            if (
+              brokerReachable &&
+              brokerClient &&
+              w.id !== "default" &&
+              (activeOp ||
+                w.readinessReason === "ROTATION_PENDING" ||
+                w.readinessReason === "ROTATION_FAILED" ||
+                health.recommendedAction === "ASSIGN_URL")
+            ) {
+              try {
+                const probe = await brokerClient.probeSession(w.id);
+                if (
+                  !probe.ready &&
+                  probe.reason?.includes("CHAT_ACCESS_DENIED")
+                ) {
+                  chatAccessDenied = true;
+                  chatProbeReason = probe.reason;
+                }
+              } catch {
+                /* unbound worker — skip probe */
+              }
+            }
+            return {
+              ...w,
+              inRegistry: w.id === "default" || registryIds.has(w.id),
+              mcpReadVerifiedAt: w.mcpReadVerifiedAt,
+              mcpWriteVerifiedAt: w.mcpWriteVerifiedAt,
+              mcpWriteStatus: w.mcpWriteStatus,
+              mcpWriteStatusReason: w.mcpWriteStatusReason,
+              healthState: health.healthState,
+              operatorState: health.operatorState,
+              operatorAction: health.operatorAction,
+              operatorDetail: health.operatorDetail,
+              conditions: health.conditions,
+              recommendedAction: health.recommendedAction,
+              indicators: health.indicators,
+              chatAccessDenied,
+              chatProbeReason,
+              activeOperation: activeOp
+                ? {
+                    id: activeOp.id,
+                    kind: activeOp.kind,
+                    state: activeOp.state,
+                    attempt: activeOp.attempt,
+                    lastError: activeOp.lastError,
+                    updatedAt: activeOp.updatedAt,
+                  }
+                : null,
+              inFlightTaskId,
+              stuckInFlightTaskId,
+            };
+          })
+        );
+        sendJson(res, 200, {
+          workers,
+          brokerReachable,
+          brokerConfigured: Boolean(brokerClient),
+          brokerOpsPort: resolveBrokerOpsPort(),
+          serverTime: new Date(now).toISOString(),
+        });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/broker/status") {
+        if (!brokerClient) {
+          sendJson(res, 503, { error: "broker control not configured" });
+          return;
+        }
+        try {
+          const status = await brokerClient.status();
+          sendJson(res, 200, status);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          sendJson(res, 503, { error: message });
+        }
+        return;
+      }
+
+      async function handleWorkerOpsPost(
+        res: ServerResponse,
+        body: Record<string, unknown>,
+        handler: () => { operationId: string }
+      ): Promise<void> {
+        if (!workerController) {
+          sendJson(res, 503, { error: "worker ops not configured" });
+          return;
+        }
+        try {
+          const result = handler();
+          rotateOpsCsrf();
+          sendJson(res, 200, { ok: true, ...result, csrf: opsCsrf });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          sendJson(res, 400, { error: message });
+        }
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/assign-url" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        const workerUrl = String(body.workerUrl ?? "").trim();
+        if (!workerId || !workerUrl) {
+          sendJson(res, 400, { error: "workerId and workerUrl required" });
+          return;
+        }
+        await handleWorkerOpsPost(res, body, () =>
+          workerController!.assignUrl(workerId, workerUrl)
+        );
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/create-chat" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        const bootstrapMessage =
+          typeof body.bootstrapMessage === "string"
+            ? body.bootstrapMessage
+            : undefined;
+        await handleWorkerOpsPost(res, body, () =>
+          workerController!.createChat(workerId, bootstrapMessage)
+        );
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/kill-recreate" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        const mode =
+          body.mode === "assign" ? "assign" : ("create" as "create" | "assign");
+        const workerUrl =
+          typeof body.workerUrl === "string" ? body.workerUrl : undefined;
+        await handleWorkerOpsPost(res, body, () =>
+          workerController!.killRecreate(workerId, mode, workerUrl)
+        );
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/retry-verify" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        await handleWorkerOpsPost(res, body, () =>
+          workerController!.continueConnection(workerId)
+        );
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/continue-connection" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        await handleWorkerOpsPost(res, body, () =>
+          workerController!.continueConnection(workerId)
+        );
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/cancel-operation" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        await handleWorkerOpsPost(res, body, () =>
+          workerController!.cancelOperation(workerId)
+        );
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/clear-stuck" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        const result = workerController!.clearStuck(workerId);
+        rotateOpsCsrf();
+        sendJson(res, 200, { ok: true, ...result, csrf: opsCsrf });
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/release-stuck-task" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        const result = workerController!.releaseStuckTask(workerId);
+        rotateOpsCsrf();
+        sendJson(res, 200, { ok: true, ...result, csrf: opsCsrf });
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/set-enabled" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        const enabled = Boolean(body.enabled);
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        workerController.setEnabled(workerId, enabled);
+        rotateOpsCsrf();
+        sendJson(res, 200, { ok: true, csrf: opsCsrf });
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/remove" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        try {
+          await workerController.removeWorker(workerId);
+          rotateOpsCsrf();
+          sendJson(res, 200, {
+            ok: true,
+            workerId,
+            note: "Removed from workers registry. make restart recommended so broker drops page actors.",
+            csrf: opsCsrf,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          sendJson(res, 400, { error: message });
+        }
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/add" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const topo = loadWorkersTopology({
+          dbPath: options.dbPath,
+          workersFile: workersFile || undefined,
+          workerId: DEFAULT_WORKER_ID,
+          workerUrl: "",
+          cdpEndpoint: process.env.CHATGPT_CDP_ENDPOINT?.trim() || "",
+        });
+        const newId = nextWorkerId(topo.workers);
+        const cdp =
+          topo.workers[0]?.cdpEndpoint ??
+          process.env.CHATGPT_CDP_ENDPOINT?.trim() ??
+          "http://127.0.0.1:9222";
+        const placeholderUrl = `https://chatgpt.com/c/${randomUUID()}`;
+        if (workersTopologySource() === "file" && workersFile) {
+          upsertWorkerRegistryEntry({
+            filePath: workersFile,
+            entry: {
+              id: newId,
+              workerUrl: placeholderUrl,
+              cdpEndpoint: cdp,
+              enabled: true,
+            },
+          });
+        }
+        if (!repo.findWorkerRegistryRow(newId)) {
+          repo.registerWorkerInstance({
+            workerId: newId,
+            workerUrl: placeholderUrl,
+            cdpEndpoint: cdp,
+            instanceToken: randomUUID(),
+            staleMs: Number(process.env.HANDOFF_WORKER_STALE_MS ?? 120_000),
+            pid: 0,
+          });
+          repo.updateWorkerState(newId, "STARTING", {
+            error: "PENDING_SETUP: New chat required",
+          });
+        }
+        let operationId: string | undefined;
+        let autoCreateChatError: string | undefined;
+        if (workerController && brokerClient) {
+          try {
+            const reachable = await brokerClient.ping();
+            if (reachable) {
+              const op = workerController.createChat(newId);
+              operationId = op.operationId;
+            } else {
+              autoCreateChatError = "broker unreachable — start stack then New chat…";
+            }
+          } catch (err) {
+            autoCreateChatError =
+              err instanceof Error ? err.message : String(err);
+          }
+        }
+        rotateOpsCsrf();
+        sendJson(res, 200, {
+          ok: true,
+          workerId: newId,
+          operationId,
+          autoCreateChat: Boolean(operationId),
+          autoCreateChatError,
+          csrf: opsCsrf,
+        });
+        return;
+      }
+
       if (req.method === "GET" && url.pathname === "/ops/topology") {
         try {
           const topology = loadWorkersTopology({
-            workersFile: process.env.HANDOFF_WORKERS_FILE,
+            dbPath: options.dbPath,
+            workersFile: resolveWorkersFilePath(workersFile),
             workerId:
               process.env.HANDOFF_WORKER_ID?.trim() || DEFAULT_WORKER_ID,
             workerUrl: process.env.HANDOFF_WORKER_URL?.trim() || "",
@@ -1002,6 +1509,7 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
             {
               source: topology.source,
               filePath: topology.filePath ?? null,
+              dbPath: topology.dbPath ?? null,
               workers: topology.workers.map((w) => {
                 const state = live.get(w.id);
                 return {

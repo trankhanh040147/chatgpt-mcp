@@ -11,14 +11,127 @@ export function topologyAllowsSharedCdp(topology: ResolvedTopology): boolean {
   return topology.workers.length >= 2 && cdps.size === 1;
 }
 
-/** Suggest next worker id: w1, w2, … skipping used ids. */
+/** Suggest next worker id: w1, w2, … monotonic (never reuse deleted ids). */
 export function nextWorkerId(existing: WorkerRegistryEntry[]): string {
-  const used = new Set(existing.map((w) => w.id));
-  for (let i = 1; i < 10_000; i++) {
-    const id = `w${i}`;
-    if (!used.has(id)) return id;
+  let max = 0;
+  for (const w of existing) {
+    const m = /^w(\d+)$/i.exec(w.id);
+    if (m) max = Math.max(max, Number(m[1]));
   }
-  throw new Error("Could not allocate worker id");
+  return `w${max + 1}`;
+}
+
+export function setWorkerRegistryEnabled(opts: {
+  filePath: string;
+  workerId: string;
+  enabled: boolean;
+}): { workers: WorkerRegistryEntry[]; filePath: string } {
+  return withWorkersFileLock(opts.filePath, () => {
+    const abs = resolve(opts.filePath);
+    if (!existsSync(abs)) {
+      throw new Error(`Workers file not found: ${abs}`);
+    }
+    const raw = JSON.parse(readFileSync(abs, "utf-8")) as unknown;
+    if (!Array.isArray(raw)) {
+      throw new Error(`${abs} must be a JSON array`);
+    }
+    const workers = raw.map((row, i) => {
+      const r = row as Record<string, unknown>;
+      const id = String(r.id ?? "").trim();
+      const workerUrl = String(r.workerUrl ?? r.worker_url ?? "").trim();
+      const cdpEndpoint = String(r.cdpEndpoint ?? r.cdp_endpoint ?? "").trim();
+      const httpPort =
+        r.httpPort !== undefined
+          ? Number(r.httpPort)
+          : r.http_port !== undefined
+            ? Number(r.http_port)
+            : undefined;
+      const enabled =
+        r.enabled === undefined
+          ? true
+          : r.enabled === true || r.enabled === "true";
+      if (!id || !workerUrl || !cdpEndpoint) {
+        throw new Error(`${abs}[${i}] requires id, workerUrl, cdpEndpoint`);
+      }
+      return { id, workerUrl, cdpEndpoint, httpPort, enabled };
+    });
+    const idx = workers.findIndex((w) => w.id === opts.workerId);
+    if (idx < 0) {
+      throw new Error(`Worker ${opts.workerId} not in registry`);
+    }
+    workers[idx] = { ...workers[idx]!, enabled: opts.enabled };
+    const topology: ResolvedTopology = {
+      source: "file",
+      filePath: abs,
+      workers,
+    };
+    validateWorkersTopology(topology, {
+      allowSharedCdp: topologyAllowsSharedCdp(topology),
+    });
+    const tmp = `${abs}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(workers, null, 2)}\n`, "utf-8");
+    renameSync(tmp, abs);
+    return { workers, filePath: abs };
+  });
+}
+
+export function removeWorkerRegistryEntry(opts: {
+  filePath: string;
+  workerId: string;
+}): { workers: WorkerRegistryEntry[]; filePath: string } {
+  return withWorkersFileLock(opts.filePath, () => {
+    const abs = resolve(opts.filePath);
+    if (!existsSync(abs)) {
+      throw new Error(`Workers file not found: ${abs}`);
+    }
+    const raw = JSON.parse(readFileSync(abs, "utf-8")) as unknown;
+    if (!Array.isArray(raw)) {
+      throw new Error(`${abs} must be a JSON array`);
+    }
+    const workers = raw.map((row, i) => {
+      const r = row as Record<string, unknown>;
+      const id = String(r.id ?? "").trim();
+      const workerUrl = String(r.workerUrl ?? r.worker_url ?? "").trim();
+      const cdpEndpoint = String(r.cdpEndpoint ?? r.cdp_endpoint ?? "").trim();
+      const httpPort =
+        r.httpPort !== undefined
+          ? Number(r.httpPort)
+          : r.http_port !== undefined
+            ? Number(r.http_port)
+            : undefined;
+      const enabled =
+        r.enabled === undefined
+          ? true
+          : r.enabled === true || r.enabled === "true";
+      if (!id || !workerUrl || !cdpEndpoint) {
+        throw new Error(`${abs}[${i}] requires id, workerUrl, cdpEndpoint`);
+      }
+      return { id, workerUrl, cdpEndpoint, httpPort, enabled };
+    });
+    if (workers.length <= 1) {
+      const idx = workers.findIndex((w) => w.id === opts.workerId);
+      if (idx >= 0) {
+        throw new Error("Cannot remove the only worker in registry");
+      }
+    }
+    const idx = workers.findIndex((w) => w.id === opts.workerId);
+    if (idx < 0) {
+      throw new Error(`Worker ${opts.workerId} not in registry`);
+    }
+    workers.splice(idx, 1);
+    const topology: ResolvedTopology = {
+      source: "file",
+      filePath: abs,
+      workers,
+    };
+    validateWorkersTopology(topology, {
+      allowSharedCdp: topologyAllowsSharedCdp(topology),
+    });
+    const tmp = `${abs}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(workers, null, 2)}\n`, "utf-8");
+    renameSync(tmp, abs);
+    return { workers, filePath: abs };
+  });
 }
 
 export function withWorkersFileLock<T>(filePath: string, fn: () => T): T {
@@ -85,10 +198,14 @@ function upsertWorkerRegistryEntryUnlocked(opts: {
           : r.http_port !== undefined
             ? Number(r.http_port)
             : undefined;
+      const enabled =
+        r.enabled === undefined
+          ? true
+          : r.enabled === true || r.enabled === "true";
       if (!id || !workerUrl || !cdpEndpoint) {
         throw new Error(`${abs}[${i}] requires id, workerUrl, cdpEndpoint`);
       }
-      return { id, workerUrl, cdpEndpoint, httpPort };
+      return { id, workerUrl, cdpEndpoint, httpPort, enabled };
     });
   }
 

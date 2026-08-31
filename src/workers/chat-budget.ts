@@ -1,17 +1,21 @@
-/** Why a worker cannot claim (rotation / consent / restart). */
+/** Why a worker cannot claim (rotation / consent / restart / MCP probe). */
 export type WorkerReadinessReason =
   | "THRESHOLD_REACHED"
   | "ROTATION_PENDING"
   | "ROTATION_FAILED"
   | "RESTART_REQUIRED"
-  | "CONSENT_REQUIRED";
+  | "CONSENT_REQUIRED"
+  | "MCP_SAFETY_BLOCKED"
+  | "MCP_APPROVAL_REQUIRED"
+  | "MCP_TOOL_NOT_INVOKED"
+  | "MCP_SUBMIT_TIMEOUT"
+  | "PROBE_RESULT_MISMATCH";
 
 const BLOCKING = new Set<WorkerReadinessReason>([
   "THRESHOLD_REACHED",
   "ROTATION_PENDING",
   "ROTATION_FAILED",
   "RESTART_REQUIRED",
-  "CONSENT_REQUIRED",
 ]);
 
 export function parseMaxTasksPerChat(raw: string | undefined): number {
@@ -58,6 +62,16 @@ export function readinessLabel(reason: string | null | undefined): string | null
       return "Restart broker required";
     case "CONSENT_REQUIRED":
       return "MCP consent required";
+    case "MCP_SAFETY_BLOCKED":
+      return "MCP safety blocked";
+    case "MCP_APPROVAL_REQUIRED":
+      return "MCP approval required";
+    case "MCP_TOOL_NOT_INVOKED":
+      return "MCP tool not invoked";
+    case "MCP_SUBMIT_TIMEOUT":
+      return "MCP submit timeout";
+    case "PROBE_RESULT_MISMATCH":
+      return "Probe result mismatch";
     default:
       return null;
   }

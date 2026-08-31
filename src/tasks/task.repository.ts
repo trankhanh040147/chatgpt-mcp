@@ -43,6 +43,8 @@ interface TaskRow {
   nudge_started_at: string | null;
   nudge_attempt: number | null;
   workspace_root: string | null;
+  task_class: string | null;
+  target_worker_id: string | null;
 }
 
 interface TaskFileRow {
@@ -87,6 +89,10 @@ interface WorkerRow {
   previous_worker_url: string | null;
   chat_rotated_at: string | null;
   readiness_reason: string | null;
+  mcp_read_verified_at: string | null;
+  mcp_write_verified_at: string | null;
+  mcp_write_status: string | null;
+  mcp_write_status_reason: string | null;
 }
 
 const MAX_DISPATCH_RETRIES = 3;
@@ -119,6 +125,8 @@ function rowToTask(row: TaskRow): HandoffTask {
     nudgeStartedAt: row.nudge_started_at ?? undefined,
     nudgeAttempt: row.nudge_attempt ?? 0,
     workspaceRoot: row.workspace_root ?? undefined,
+    taskClass: (row.task_class as HandoffTask["taskClass"]) ?? "USER",
+    targetWorkerId: row.target_worker_id ?? undefined,
   };
 }
 
@@ -141,6 +149,11 @@ function rowToWorker(row: WorkerRow): WorkerStateRow {
     chatRotatedAt: row.chat_rotated_at ?? undefined,
     readinessReason: (row.readiness_reason as WorkerStateRow["readinessReason"]) ??
       undefined,
+    mcpReadVerifiedAt: row.mcp_read_verified_at ?? undefined,
+    mcpWriteVerifiedAt: row.mcp_write_verified_at ?? undefined,
+    mcpWriteStatus: (row.mcp_write_status as WorkerStateRow["mcpWriteStatus"]) ??
+      undefined,
+    mcpWriteStatusReason: row.mcp_write_status_reason ?? undefined,
   };
 }
 
@@ -180,8 +193,9 @@ export class TaskRepository {
           `INSERT INTO handoff_tasks (
             id, cursor_conversation_id, type, prompt, context_json,
             status, retry_count, created_at,
-            dispatch_attempt, nudge_attempt, workspace_root
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            dispatch_attempt, nudge_attempt, workspace_root,
+            task_class, target_worker_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           task.id,
@@ -194,7 +208,9 @@ export class TaskRepository {
           task.createdAt,
           task.dispatchAttempt ?? 0,
           task.nudgeAttempt ?? 0,
-          task.workspaceRoot ?? null
+          task.workspaceRoot ?? null,
+          task.taskClass ?? "USER",
+          task.targetWorkerId ?? null
         );
 
       const insertFile = this.db.prepare(
@@ -234,6 +250,45 @@ export class TaskRepository {
       .all(id) as unknown as TaskFileRow[];
     task.files = fileRows.map(rowToTaskFile);
     return task;
+  }
+
+  /** Server-side probe token (never sent to ChatGPT in get_task). */
+  setProbeToken(taskId: string, token: string): void {
+    const row = this.db
+      .prepare(`SELECT context_json FROM handoff_tasks WHERE id = ?`)
+      .get(taskId) as { context_json: string | null } | undefined;
+    if (!row) return;
+    const ctx = row.context_json
+      ? (JSON.parse(row.context_json) as Record<string, unknown>)
+      : {};
+    ctx._probeToken = token;
+    this.db
+      .prepare(`UPDATE handoff_tasks SET context_json = ? WHERE id = ?`)
+      .run(JSON.stringify(ctx), taskId);
+  }
+
+  getProbeToken(taskId: string): string | null {
+    const row = this.db
+      .prepare(`SELECT context_json FROM handoff_tasks WHERE id = ?`)
+      .get(taskId) as { context_json: string | null } | undefined;
+    if (!row?.context_json) return null;
+    const ctx = JSON.parse(row.context_json) as { _probeToken?: string };
+    return ctx._probeToken ?? null;
+  }
+
+  findPendingConnectorHandshake(workerId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT id FROM handoff_tasks
+         WHERE target_worker_id = ?
+           AND status IN (
+             'QUEUED', 'DISPATCHING', 'DISPATCHED', 'PROCESSING', 'WAITING_APPROVAL'
+           )
+           AND prompt LIKE 'Connector handshake%'
+         LIMIT 1`
+      )
+      .get(workerId) as { id: string } | undefined;
+    return row?.id ?? null;
   }
 
   /** Frozen lookup: always keyed by (task_id, file_id) together — never a global file_id lookup. */
@@ -521,6 +576,69 @@ export class TaskRepository {
         return null;
       }
 
+      if (worker.error === "DISABLED") {
+        this.db.exec("COMMIT");
+        return null;
+      }
+
+      const probeRow = this.db
+        .prepare(
+          `SELECT * FROM handoff_tasks
+           WHERE status = 'QUEUED'
+             AND task_class = 'SYSTEM_PROBE'
+             AND target_worker_id = ?
+           ORDER BY created_at ASC
+           LIMIT 1`
+        )
+        .get(workerId) as TaskRow | undefined;
+
+      if (probeRow) {
+        const leaseToken = ulid();
+        const updated = this.db
+          .prepare(
+            `UPDATE handoff_tasks
+             SET status = 'DISPATCHING',
+                 lease_owner = ?,
+                 lease_token = ?,
+                 lease_expires_at = ?,
+                 dispatch_started_at = NULL,
+                 dispatch_attempt = 0,
+                 nudge_started_at = NULL,
+                 nudge_attempt = 0
+             WHERE id = ? AND status = 'QUEUED'`
+          )
+          .run(workerId, leaseToken, expiresIso, probeRow.id);
+
+        if (updated.changes === 0) {
+          this.db.exec("COMMIT");
+          return null;
+        }
+
+        this.db
+          .prepare(
+            `UPDATE worker_state
+             SET current_task_id = ?, last_seen_at = ?
+             WHERE id = ? AND instance_token = ?`
+          )
+          .run(probeRow.id, nowIso, workerId, instanceToken);
+
+        this.db.exec("COMMIT");
+        return {
+          leaseToken,
+          task: rowToTask({
+            ...probeRow,
+            status: "DISPATCHING",
+            lease_owner: workerId,
+            lease_token: leaseToken,
+            lease_expires_at: expiresIso,
+            dispatch_started_at: null,
+            dispatch_attempt: 0,
+            nudge_started_at: null,
+            nudge_attempt: 0,
+          }),
+        };
+      }
+
       if (readinessBlocksClaim(worker.readiness_reason)) {
         this.db.exec("COMMIT");
         return null;
@@ -558,6 +676,7 @@ export class TaskRepository {
         .prepare(
           `SELECT * FROM handoff_tasks
            WHERE status = 'QUEUED'
+             AND (task_class = 'USER' OR task_class IS NULL)
            ORDER BY created_at ASC
            LIMIT 1`
         )
@@ -1098,6 +1217,58 @@ export class TaskRepository {
     return rows.map(rowToWorker);
   }
 
+  /** Read worker row without auto-insert (fleet registry from DB). */
+  findWorkerRegistryRow(workerId: string): WorkerStateRow | null {
+    const row = this.db
+      .prepare(`SELECT * FROM worker_state WHERE id = ?`)
+      .get(workerId) as WorkerRow | undefined;
+    return row ? rowToWorker(row) : null;
+  }
+
+  setWorkerChatUrl(workerId: string, workerUrl: string): void {
+    const row = this.findWorkerRegistryRow(workerId);
+    const prev = row?.workerUrl?.trim();
+    const next = workerUrl.trim();
+    if (prev && prev !== next) {
+      this.db
+        .prepare(
+          `UPDATE worker_state
+           SET worker_url = ?,
+               mcp_write_verified_at = NULL,
+               mcp_write_status = NULL,
+               mcp_write_status_reason = NULL,
+               readiness_reason = CASE
+                 WHEN readiness_reason IN (
+                   'RESTART_REQUIRED',
+                   'ROTATION_FAILED',
+                   'MCP_SAFETY_BLOCKED',
+                   'MCP_TOOL_NOT_INVOKED',
+                   'MCP_SUBMIT_TIMEOUT',
+                   'PROBE_RESULT_MISMATCH'
+                 ) THEN readiness_reason
+                 ELSE 'MCP_APPROVAL_REQUIRED'
+               END
+           WHERE id = ?`
+        )
+        .run(next, workerId);
+      return;
+    }
+    this.db
+      .prepare(`UPDATE worker_state SET worker_url = ? WHERE id = ?`)
+      .run(next, workerId);
+  }
+
+  /** Remove runtime row after registry entry deleted (v0.6 fleet ops). */
+  deleteWorkerState(workerId: string): boolean {
+    this.db
+      .prepare(`DELETE FROM worker_operations WHERE worker_id = ?`)
+      .run(workerId);
+    const info = this.db
+      .prepare(`DELETE FROM worker_state WHERE id = ?`)
+      .run(workerId);
+    return Number(info.changes ?? 0) > 0;
+  }
+
   /**
    * Register / take over worker incarnation.
    * Fails only if another live PID still holds the id within heartbeat window.
@@ -1301,7 +1472,16 @@ export class TaskRepository {
                previous_worker_url = ?,
                chat_rotated_at = ?,
                readiness_reason = CASE
-                 WHEN readiness_reason IN ('RESTART_REQUIRED', 'CONSENT_REQUIRED', 'ROTATION_FAILED')
+                 WHEN readiness_reason IN (
+                   'RESTART_REQUIRED',
+                   'CONSENT_REQUIRED',
+                   'ROTATION_FAILED',
+                   'MCP_SAFETY_BLOCKED',
+                   'MCP_APPROVAL_REQUIRED',
+                   'MCP_TOOL_NOT_INVOKED',
+                   'MCP_SUBMIT_TIMEOUT',
+                   'PROBE_RESULT_MISMATCH'
+                 )
                    THEN readiness_reason
                  ELSE 'CONSENT_REQUIRED'
                END
@@ -1326,6 +1506,11 @@ export class TaskRepository {
 
   /** True if this worker currently owns a leased/in-flight task. */
   workerHasInFlight(workerId: string): boolean {
+    return this.getInFlightTaskId(workerId) !== null;
+  }
+
+  /** First in-flight handoff task id blocking worker ops (lease or current_task_id). */
+  getInFlightTaskId(workerId: string): string | null {
     const row = this.db
       .prepare(
         `SELECT id FROM handoff_tasks
@@ -1334,10 +1519,75 @@ export class TaskRepository {
          LIMIT 1`
       )
       .get(workerId) as { id: string } | undefined;
+    if (row) return row.id;
     const state = this.db
       .prepare(`SELECT current_task_id FROM worker_state WHERE id = ?`)
       .get(workerId) as { current_task_id: string | null } | undefined;
-    return Boolean(row || state?.current_task_id);
+    return state?.current_task_id ?? null;
+  }
+
+  /**
+   * Fail all in-flight tasks holding this worker busy (ops recovery).
+   * Returns task ids transitioned to FAILED.
+   */
+  failInFlightTasksForWorker(
+    workerId: string,
+    reason = "released from ops dashboard"
+  ): string[] {
+    const msg = reason.trim().slice(0, 500) || "released from ops dashboard";
+    const now = new Date().toISOString();
+    const ids = new Set<string>();
+    const leased = this.db
+      .prepare(
+        `SELECT id FROM handoff_tasks
+         WHERE lease_owner = ?
+           AND status IN ('DISPATCHING','DISPATCHED','PROCESSING','WAITING_APPROVAL')`
+      )
+      .all(workerId) as { id: string }[];
+    for (const r of leased) ids.add(r.id);
+    const state = this.db
+      .prepare(`SELECT current_task_id FROM worker_state WHERE id = ?`)
+      .get(workerId) as { current_task_id: string | null } | undefined;
+    if (state?.current_task_id) ids.add(state.current_task_id);
+
+    const failed: string[] = [];
+    for (const taskId of ids) {
+      const row = this.db
+        .prepare(`SELECT status FROM handoff_tasks WHERE id = ?`)
+        .get(taskId) as { status: string } | undefined;
+      if (!row) continue;
+      if (
+        row.status === "COMPLETED" ||
+        row.status === "FAILED" ||
+        row.status === "CANCELLED" ||
+        row.status === "TIMED_OUT"
+      ) {
+        continue;
+      }
+      const info = this.db
+        .prepare(
+          `UPDATE handoff_tasks
+           SET status = 'FAILED',
+               error = ?,
+               completed_at = COALESCE(completed_at, ?),
+               lease_token = NULL,
+               lease_expires_at = NULL,
+               lease_owner = NULL
+           WHERE id = ? AND status = ?`
+        )
+        .run(msg, now, taskId, row.status);
+      if (Number(info.changes ?? 0) === 1) {
+        failed.push(taskId);
+      }
+    }
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET current_task_id = NULL, last_seen_at = ?
+         WHERE id = ?`
+      )
+      .run(now, workerId);
+    return failed;
   }
 
   assertWorkerIdle(workerId: string): void {
@@ -1417,6 +1667,189 @@ export class TaskRepository {
     }
   }
 
+  beginWorkerUrlMutation(workerId: string): {
+    previousReason: WorkerReadinessReason | null;
+  } {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const worker = this.db
+        .prepare(`SELECT * FROM worker_state WHERE id = ?`)
+        .get(workerId) as WorkerRow | undefined;
+      if (!worker) {
+        this.db.exec("ROLLBACK");
+        throw new Error(`Worker ${workerId} not found`);
+      }
+      const inFlight = this.db
+        .prepare(
+          `SELECT id FROM handoff_tasks
+           WHERE lease_owner = ?
+             AND status IN ('DISPATCHING','DISPATCHED','PROCESSING','WAITING_APPROVAL')
+           LIMIT 1`
+        )
+        .get(workerId) as { id: string } | undefined;
+      if (inFlight || worker.current_task_id) {
+        this.db.exec("ROLLBACK");
+        throw new Error(
+          `Worker ${workerId} is busy — refuse mutation while a task is in flight`
+        );
+      }
+      const prev = (worker.readiness_reason ?? null) as
+        | WorkerReadinessReason
+        | null;
+      if (
+        prev === "ROTATION_PENDING" ||
+        prev === "ROTATION_FAILED"
+      ) {
+        this.db.exec("ROLLBACK");
+        throw new Error(
+          `Worker ${workerId} already blocked (${prev}) — refuse concurrent mutation`
+        );
+      }
+      this.db
+        .prepare(
+          `UPDATE worker_state
+           SET readiness_reason = 'ROTATION_PENDING',
+               error = ?
+           WHERE id = ?`
+        )
+        .run(
+          prev
+            ? `ROTATION_PENDING:prev=${prev}`
+            : "ROTATION_PENDING: worker-ops mutation",
+          workerId
+        );
+      this.db.exec("COMMIT");
+      return { previousReason: prev };
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+  }
+
+  clearWorkerError(workerId: string): void {
+    this.db
+      .prepare(
+        `UPDATE worker_state SET readiness_reason = NULL, error = NULL WHERE id = ?`
+      )
+      .run(workerId);
+  }
+
+  /** Clear restart-recovery blockers after broker re-bind (not real runtime faults). */
+  clearWorkerRecoveryBlockers(workerId: string): void {
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET readiness_reason = NULL, error = NULL
+         WHERE id = ?
+           AND (
+             readiness_reason IN (
+               'CONSENT_REQUIRED',
+               'ROTATION_FAILED',
+               'RESTART_REQUIRED',
+               'ROTATION_PENDING'
+             )
+             OR error LIKE 'PENDING_SETUP%'
+             OR error LIKE 'worker-op failed%'
+           )`
+      )
+      .run(workerId);
+  }
+
+  /** Drop stale CONSENT_REQUIRED once MCP read+write are already verified. */
+  sweepStaleConsentRequired(workerId?: string): void {
+    const sql = workerId
+      ? `UPDATE worker_state
+         SET readiness_reason = NULL, error = NULL
+         WHERE id = ?
+           AND readiness_reason = 'CONSENT_REQUIRED'
+           AND mcp_read_verified_at IS NOT NULL
+           AND mcp_write_verified_at IS NOT NULL`
+      : `UPDATE worker_state
+         SET readiness_reason = NULL, error = NULL
+         WHERE readiness_reason = 'CONSENT_REQUIRED'
+           AND mcp_read_verified_at IS NOT NULL
+           AND mcp_write_verified_at IS NOT NULL`;
+    this.db.prepare(sql).run(...(workerId ? [workerId] : []));
+  }
+
+  recordMcpReadVerified(workerId: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET mcp_read_verified_at = ?
+         WHERE id = ?`
+      )
+      .run(now, workerId);
+  }
+
+  recordMcpWriteVerified(workerId: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET mcp_write_verified_at = ?,
+             mcp_write_status = 'VERIFIED',
+             mcp_write_status_reason = NULL,
+             readiness_reason = CASE
+               WHEN readiness_reason IN ('MCP_APPROVAL_REQUIRED', 'CONSENT_REQUIRED')
+                 THEN NULL
+               ELSE readiness_reason
+             END,
+             error = CASE
+               WHEN readiness_reason IN ('MCP_APPROVAL_REQUIRED', 'CONSENT_REQUIRED')
+                 THEN NULL
+               ELSE error
+             END
+         WHERE id = ?`
+      )
+      .run(now, workerId);
+  }
+
+  recordMcpWriteDegraded(workerId: string, reason: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET mcp_write_status = 'DEGRADED',
+             mcp_write_status_reason = ?,
+             mcp_write_verified_at = NULL
+         WHERE id = ?`
+      )
+      .run(`${reason} @ ${now}`.slice(0, 500), workerId);
+  }
+
+  clearMcpWriteDegraded(workerId: string): void {
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET mcp_write_status = NULL,
+             mcp_write_status_reason = NULL
+         WHERE id = ? AND mcp_write_status = 'DEGRADED'`
+      )
+      .run(workerId);
+  }
+
+  setWorkerDisabled(workerId: string, disabled: boolean): void {
+    if (disabled) {
+      this.db
+        .prepare(
+          `UPDATE worker_state SET error = 'DISABLED', readiness_reason = NULL WHERE id = ?`
+        )
+        .run(workerId);
+    } else {
+      this.db
+        .prepare(
+          `UPDATE worker_state SET error = NULL WHERE id = ? AND error = 'DISABLED'`
+        )
+        .run(workerId);
+    }
+  }
+
   abortRotationReservation(
     workerId: string,
     previousReason: WorkerReadinessReason | null
@@ -1442,6 +1875,55 @@ export class TaskRepository {
          WHERE id = ?`
       )
       .run(reason, error ?? null, workerId);
+  }
+
+  /**
+   * Update worker URL during an active worker-op (keeps ROTATION_PENDING).
+   */
+  commitWorkerUrlDuringOp(input: {
+    workerId: string;
+    newWorkerUrl: string;
+    previousWorkerUrl: string;
+  }): void {
+    const now = new Date().toISOString();
+    const info = this.db
+      .prepare(
+        `UPDATE worker_state
+         SET worker_url = ?,
+             tasks_on_chat = 0,
+             tasks_on_chat_url = ?,
+             previous_worker_url = ?,
+             chat_rotated_at = ?,
+             current_task_id = NULL,
+             mcp_write_verified_at = NULL,
+             mcp_write_status = NULL,
+             mcp_write_status_reason = NULL,
+             readiness_reason = CASE
+               WHEN readiness_reason IN (
+                 'RESTART_REQUIRED',
+                 'ROTATION_FAILED',
+                 'MCP_SAFETY_BLOCKED',
+                 'MCP_TOOL_NOT_INVOKED',
+                 'MCP_SUBMIT_TIMEOUT',
+                 'PROBE_RESULT_MISMATCH'
+               ) THEN readiness_reason
+               ELSE 'MCP_APPROVAL_REQUIRED'
+             END
+         WHERE id = ?
+           AND readiness_reason = 'ROTATION_PENDING'`
+      )
+      .run(
+        input.newWorkerUrl,
+        input.newWorkerUrl,
+        input.previousWorkerUrl,
+        now,
+        input.workerId
+      );
+    if (Number(info.changes ?? 0) !== 1) {
+      throw new Error(
+        `commitWorkerUrlDuringOp: worker ${input.workerId} is not ROTATION_PENDING`
+      );
+    }
   }
 
   /**
@@ -1520,6 +2002,9 @@ export class TaskRepository {
       .get(workerId) as WorkerRow | undefined;
 
     if (!row) {
+      if (workerId !== DEFAULT_WORKER_ID) {
+        throw new Error(`Worker ${workerId} not found`);
+      }
       const now = new Date().toISOString();
       this.db
         .prepare(
@@ -1550,6 +2035,9 @@ export class TaskRepository {
     const now = new Date().toISOString();
 
     if (!existing) {
+      if (workerId !== DEFAULT_WORKER_ID) {
+        return;
+      }
       this.db
         .prepare(
           `INSERT INTO worker_state (

@@ -3,7 +3,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-mkdir -p logs
+LOG_DIR="${LOG_DIR:-${CHATGPT_MCP_HOME:-$HOME/.chatgpt-mcp}/logs}"
+mkdir -p "$LOG_DIR"
 
 if [[ ! -f dist/index.js ]]; then
   echo "dist/ missing — run npm run build first" >&2
@@ -12,8 +13,8 @@ fi
 
 start_one() {
   local mode="$1"
-  local pidfile="logs/${mode}.pid"
-  local logfile="logs/${mode}.log"
+  local pidfile="${LOG_DIR}/${mode}.pid"
+  local logfile="${LOG_DIR}/${mode}.log"
   if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
     echo "$mode already running pid $(cat "$pidfile")"
     return
@@ -24,24 +25,24 @@ start_one() {
 }
 
 # Stop prior supervise loop if any
-if [[ -f logs/browser-worker-supervise.pid ]] && kill -0 "$(cat logs/browser-worker-supervise.pid)" 2>/dev/null; then
+if [[ -f ${LOG_DIR}/browser-worker-supervise.pid ]] && kill -0 "$(cat ${LOG_DIR}/browser-worker-supervise.pid)" 2>/dev/null; then
   echo "browser-worker supervise already running"
 else
   pkill -f 'node dist/index.js browser-worker' 2>/dev/null || true
   pkill -f 'supervise-browser-worker.sh' 2>/dev/null || true
   sleep 1
   nohup bash scripts/supervise-browser-worker.sh >/dev/null 2>&1 &
-  echo $! > logs/browser-worker-supervise.pid
+  echo $! > ${LOG_DIR}/browser-worker-supervise.pid
   echo "browser-worker supervise → pid $!"
 fi
 
 start_one remote-mcp
-if [[ -f logs/status-api-supervise.pid ]] && kill -0 "$(cat logs/status-api-supervise.pid)" 2>/dev/null; then
+if [[ -f ${LOG_DIR}/status-api-supervise.pid ]] && kill -0 "$(cat ${LOG_DIR}/status-api-supervise.pid)" 2>/dev/null; then
   echo "status-api supervise already running"
 else
   chmod +x scripts/supervise-status-api.sh
   nohup bash scripts/supervise-status-api.sh >/dev/null 2>&1 &
-  echo $! > logs/status-api-supervise.pid
+  echo $! > ${LOG_DIR}/status-api-supervise.pid
   echo "status-api supervise → pid $!"
 fi
 sleep 2

@@ -3,10 +3,10 @@
  * A1-S self-tests (no live ChatGPT required for unit portion).
  *
  *   npx tsx scripts/spike-a1s.ts
- *   npx tsx scripts/spike-a1s.ts --live   # needs Chrome CDP + workers.a1s.json
+ *   npx tsx scripts/spike-a1s.ts --live   # needs Chrome CDP + workers.json
  */
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { config as loadEnv } from "dotenv";
 import { UiWriteMutex } from "../src/browser/ui-write-mutex.js";
@@ -241,7 +241,13 @@ async function testConcurrentClaimsWhileMutexBusy(): Promise<void> {
 async function liveBrokerSmoke(): Promise<void> {
   const workersFile =
     process.env.HANDOFF_WORKERS_A1S_FILE?.trim() ||
-    resolve(process.cwd(), "data/workers.a1s.json");
+    process.env.HANDOFF_WORKERS_FILE?.trim() ||
+    resolve(
+      process.env.CHATGPT_MCP_HOME?.trim() ||
+        join(homedir(), ".chatgpt-mcp"),
+      "data",
+      "workers.json"
+    );
   if (!existsSync(workersFile)) {
     console.log(`SKIP live — missing ${workersFile}`);
     return;

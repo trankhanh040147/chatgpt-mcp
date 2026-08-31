@@ -384,6 +384,7 @@ export function executeRecover(
            SET status = 'READY',
                current_task_id = NULL,
                error = NULL,
+               readiness_reason = NULL,
                last_seen_at = ?,
                instance_token = NULL,
                pid = NULL
@@ -403,6 +404,14 @@ export function executeRecover(
       if (n === 1) {
         workersReset += 1;
         affectedWorkerIds.push(w.id);
+        db.prepare(
+          `UPDATE worker_operations
+           SET state = 'FAILED',
+               last_error = 'Recovered: worker reset',
+               updated_at = ?
+           WHERE worker_id = ?
+             AND state IN ('PENDING', 'RUNNING', 'VERIFYING')`
+        ).run(now, w.id);
       }
     }
 

@@ -57,23 +57,21 @@ function buildPrompt(canary: string): string {
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const workersFile =
-    process.env.HANDOFF_WORKERS_FILE?.trim() ||
-    resolve(process.cwd(), "data/workers.json");
-  process.env.HANDOFF_WORKERS_FILE = workersFile;
+  const workersFile = process.env.HANDOFF_WORKERS_FILE?.trim() || undefined;
 
   const topology = loadWorkersTopology({
+    dbPath: config.dbPath,
     workersFile,
     workerId: "w1",
     workerUrl: "",
-    cdpEndpoint: "",
+    cdpEndpoint: config.cdpEndpoint,
   });
   validateWorkersTopology(topology, {
     allowSharedCdp: process.env.HANDOFF_A1S === "1",
   });
   if (topology.workers.length < 2) {
     throw new Error(
-      `Need ≥2 workers in ${workersFile} (got ${topology.workers.length})`
+      `Need ≥2 workers in registry (got ${topology.workers.length})`
     );
   }
 
@@ -84,7 +82,7 @@ async function main(): Promise<void> {
   console.log(
     JSON.stringify({
       event: "E2E_DUAL_START",
-      workersFile,
+      workersSource: workersFile ? "file" : "db",
       workers: topology.workers.map((w) => ({
         id: w.id,
         cdp: w.cdpEndpoint,

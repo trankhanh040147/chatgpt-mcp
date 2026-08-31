@@ -69,6 +69,25 @@ export function startRemoteMcpServer(options: RemoteMcpOptions): void {
     try {
       const body = await readJsonBody(req);
 
+      if (body && typeof body === "object" && !Array.isArray(body)) {
+        const rpc = body as {
+          method?: string;
+          params?: { name?: string; arguments?: Record<string, unknown> };
+        };
+        if (rpc.method === "tools/call" && rpc.params?.name) {
+          const args = rpc.params.arguments ?? {};
+          log({
+            event: "INFO",
+            component: "mcp-server",
+            message: `remote-mcp ingress tools/call ${rpc.params.name}`,
+            data: {
+              tool: rpc.params.name,
+              taskId: typeof args.taskId === "string" ? args.taskId : undefined,
+            },
+          });
+        }
+      }
+
       const mcpServer = new McpServer(
         { name: "chatgpt-mcp-remote", version: "0.1.0" },
         {

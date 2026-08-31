@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/dashboard/styles.css" />
@@ -29,6 +29,31 @@
         <circle cx="8" cy="8" r="5.75" />
         <path d="M8 4.75V8l2.25 1.35" />
       </symbol>
+      <symbol id="icon-plus" viewBox="0 0 16 16">
+        <path d="M8 3.25v9.5M3.25 8h9.5" />
+      </symbol>
+      <symbol id="icon-link" viewBox="0 0 16 16">
+        <path d="M6.5 9.5 9.5 6.5M7 4.5l1.5-1.5a2.83 2.83 0 0 1 4 4L11 8.5M9 11.5l-1.5 1.5a2.83 2.83 0 0 1-4-4L5 7.5" />
+      </symbol>
+      <symbol id="icon-refresh" viewBox="0 0 16 16">
+        <path d="M2.5 8a5.5 5.5 0 0 1 9.35-3.9M13.5 8a5.5 5.5 0 0 1-9.35 3.9" />
+        <path d="M12 2.5v2h-2M4 13.5v-2h2" />
+      </symbol>
+      <symbol id="icon-trash" viewBox="0 0 16 16">
+        <path d="M3.25 4.25h9.5M6 4.25V2.75h4v1.5M4.5 4.25l.75 9h5.5l.75-9" />
+        <path d="M6.5 6.75v4.5M9.5 6.75v4.5" />
+      </symbol>
+      <symbol id="icon-play" viewBox="0 0 16 16">
+        <circle cx="8" cy="8" r="5.75" />
+        <polygon points="6.5,5.2 11,8 6.5,10.8" fill="currentColor" />
+      </symbol>
+      <symbol id="icon-pause" viewBox="0 0 16 16">
+        <circle cx="8" cy="8" r="5.75" />
+        <path d="M6.25 5.5v5M9.75 5.5v5" />
+      </symbol>
+      <symbol id="icon-external" viewBox="0 0 16 16">
+        <path d="M7 3.5H3.5v9h9V9M9.5 3.5h3v3M6.5 9.5 12.5 3.5" />
+      </symbol>
     </svg>
 
     <div class="bg-grid" aria-hidden="true"></div>
@@ -36,7 +61,7 @@
     <div class="shell">
       <header class="top">
         <div class="brand">
-          <p class="eyebrow">chatgpt-mcp · dashboard 0.3 · usage est.</p>
+          <p class="eyebrow">chatgpt-mcp · dashboard 0.6 · triage</p>
           <h1>Ops</h1>
         </div>
         <div class="top-meta">
@@ -47,17 +72,87 @@
       </header>
 
       <div id="live">
-        <section class="panel plane" aria-label="Control plane">
-          <h2>Control plane</h2>
-          <dl class="plane-kv" id="plane-kv"></dl>
+        <section class="panel headline-panel" id="headline-panel" aria-label="System status">
+          <div class="headline-hero" id="headline-hero">
+            <div class="headline-badge-row">
+              <span id="headline-status" class="headline-status pill warn">CHECKING</span>
+            </div>
+            <h2 id="headline-title" class="headline-title">Checking system status…</h2>
+            <p id="headline-summary" class="headline-summary muted">Connecting to status API</p>
+            <div class="headline-actions" id="headline-actions">
+              <button type="button" id="btn-headline-recover" class="primary">
+                Recover workers
+              </button>
+              <div class="overflow-wrap">
+                <button
+                  type="button"
+                  id="btn-headline-overflow"
+                  class="ghost"
+                  aria-label="More recovery options"
+                  title="More recovery options"
+                >
+                  ⋯
+                </button>
+                <div id="headline-overflow-menu" class="overflow-menu hidden" hidden>
+                  <button type="button" id="btn-headline-recover-queued" class="danger overflow-item">
+                    Recover + fail queued jobs…
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="headline-metrics">
+            <dl class="plane-kv" id="plane-kv"></dl>
+          </div>
         </section>
 
         <section class="panel" aria-label="Workers">
           <div class="panel-head">
             <h2>Workers</h2>
-            <span class="mono muted" id="worker-count"></span>
+            <span class="worker-count-chip warn" id="worker-count"></span>
+            <button type="button" id="btn-add-worker" class="btn-add-worker" title="Add and configure a new worker">
+              <svg class="btn-icon" aria-hidden="true"><use href="#icon-plus"></use></svg>
+              <span>Add worker…</span>
+            </button>
           </div>
-          <div class="cards" id="workers"></div>
+          <div
+            id="worker-alert"
+            class="worker-alert hidden"
+            hidden
+            role="alert"
+          ></div>
+          <details class="worker-setup panel-inset" id="worker-setup">
+            <summary>CDP + worker chat setup (first time)</summary>
+            <ol class="setup-steps mono muted">
+              <li><code>make chrome</code> — open ChatGPT in the CDP window and log in</li>
+              <li>Switch to <strong>Chat</strong> (not Work) → New chat → send a test line</li>
+              <li>Copy <code>https://chatgpt.com/c/…</code> from the address bar</li>
+              <li>Dashboard → <strong>Assign URL…</strong> on each worker (w1, w2, w3)</li>
+              <li>If stack was down: <code>make restart</code> once (starts broker + status-api)</li>
+            </ol>
+          </details>
+          <div class="cards" id="workers">
+            <article class="card skeleton">
+              <div class="card-head">
+                <div class="skeleton-line" style="width: 40%; height: 16px;"></div>
+                <div class="skeleton-line" style="width: 25%; height: 16px;"></div>
+              </div>
+              <div class="skeleton-line" style="width: 85%; height: 12px; margin-top: 8px;"></div>
+              <div class="skeleton-line" style="width: 60%; height: 12px; margin-top: 8px;"></div>
+              <div class="skeleton-line" style="width: 75%; height: 12px; margin-top: 8px;"></div>
+              <div class="skeleton-line" style="width: 100%; height: 28px; margin-top: 14px;"></div>
+            </article>
+            <article class="card skeleton">
+              <div class="card-head">
+                <div class="skeleton-line" style="width: 40%; height: 16px;"></div>
+                <div class="skeleton-line" style="width: 25%; height: 16px;"></div>
+              </div>
+              <div class="skeleton-line" style="width: 85%; height: 12px; margin-top: 8px;"></div>
+              <div class="skeleton-line" style="width: 60%; height: 12px; margin-top: 8px;"></div>
+              <div class="skeleton-line" style="width: 75%; height: 12px; margin-top: 8px;"></div>
+              <div class="skeleton-line" style="width: 100%; height: 28px; margin-top: 14px;"></div>
+            </article>
+          </div>
         </section>
 
         <div class="lower">
@@ -70,15 +165,12 @@
               <table>
                 <thead>
                   <tr>
-                    <th>Task ID</th>
                     <th>Status</th>
+                    <th>Task ID</th>
                     <th>Owner</th>
-                    <th>Type</th>
                     <th>Age</th>
-                    <th>Finished</th>
                     <th>Duration</th>
                     <th>Usage (est.)</th>
-                    <th>Error</th>
                   </tr>
                 </thead>
                 <tbody id="tasks"></tbody>
@@ -92,8 +184,8 @@
             <div class="ops-actions" aria-label="Guarded ops">
               <h3>Guarded ops</h3>
               <p class="muted ops-note">
-                Preview blast radius, then type the confirm phrase. Purge is
-                CLI-only. Healthy workers are not reset by default.
+                Preview blast radius, then confirm. Purge stays CLI-only.
+                Healthy workers are not reset by default.
               </p>
               <div class="ops-btns">
                 <button type="button" id="btn-recover" class="primary">
@@ -132,7 +224,7 @@
       </div>
 
       <footer class="foot mono muted">
-        Polling every 2s · 127.0.0.1 only · dash 0.3 guarded mutations
+        Polling every 2s · 127.0.0.1 only · dash 0.6 worker ops
       </footer>
     </div>
 
@@ -158,18 +250,38 @@
     <dialog id="ops-modal" class="ops-modal">
       <form method="dialog" id="ops-form">
         <h2 id="ops-modal-title">Confirm ops</h2>
-        <pre id="ops-modal-preview" class="ops-result"></pre>
-        <label class="ops-confirm-label" for="ops-confirm-input">
-          Type <code id="ops-confirm-phrase">…</code> to confirm
-        </label>
-        <input
-          id="ops-confirm-input"
-          class="ops-confirm-input"
-          autocomplete="off"
-          spellcheck="false"
-        />
+        <div id="ops-modal-preview" class="ops-modal-preview"></div>
+        <p id="ops-modal-error" class="ops-modal-error hidden" hidden role="alert"></p>
+        <div id="ops-url-block" class="ops-url-block hidden" hidden>
+          <label class="ops-url-label" for="ops-url-input">
+            Worker chat URL
+          </label>
+          <input
+            id="ops-url-input"
+            class="ops-url-input"
+            type="url"
+            placeholder="https://chatgpt.com/c/…"
+            spellcheck="false"
+          />
+          <p class="muted ops-url-hint">
+            In the <strong>automation Chrome</strong> window (the one opened by
+            <code>make chrome</code>, not your daily browser): Chat → New chat →
+            copy the URL from the address bar. Use a chat you own, not a shared or blocked one.
+          </p>
+        </div>
+        <div id="ops-confirm-block" class="hidden" hidden>
+          <label class="ops-confirm-label" for="ops-confirm-input">
+            Type <code id="ops-confirm-phrase">…</code> to confirm
+          </label>
+          <input
+            id="ops-confirm-input"
+            class="ops-confirm-input"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
         <div class="ops-modal-actions">
-          <button type="submit" value="cancel" class="ghost">Cancel</button>
+          <button type="button" id="ops-cancel" class="ghost">Cancel</button>
           <button
             type="submit"
             value="ok"

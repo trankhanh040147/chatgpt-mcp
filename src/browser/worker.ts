@@ -8,6 +8,7 @@ import type { UiWriteMutex } from "./ui-write-mutex.js";
 import { log } from "../logging/logger.js";
 import type { WorkerStatus } from "../tasks/task.types.js";
 import { DEFAULT_WORKER_ID } from "../tasks/task.types.js";
+import { classifyProbeFailure } from "../mcp/probe-failure.js";
 
 export interface BrowserWorkerOptions {
   dbPath: string;
@@ -191,6 +192,19 @@ export class BrowserWorker {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        if (
+          this.isSharedCdp() &&
+          (message.includes("No broker binding") ||
+            message.includes(`Worker ${this.workerId} not found`))
+        ) {
+          log({
+            event: "INFO",
+            component: "browser-worker",
+            message: `Actor ${this.workerId} stopping: ${message}`,
+          });
+          this.running = false;
+          break;
+        }
         workerState.setStatus("ERROR", { error: message });
         await this.browser
           ?.screenshotOnFailure("worker-crash")
@@ -202,7 +216,14 @@ export class BrowserWorker {
         });
         this.activeTaskId = null;
         this.activeLeaseToken = null;
-        await sleep(5_000);
+        const backoffMs =
+          message.includes("CHAT_ACCESS_DENIED") ||
+          message.includes("redirected away from chat") ||
+          message.includes("Failed to bind") ||
+          message.includes("Worker conversation not ready")
+            ? 120_000
+            : 5_000;
+        await sleep(backoffMs);
         if (ownsCdp) {
           try {
             await this.browser?.close();
@@ -218,6 +239,18 @@ export class BrowserWorker {
 
   stop(): void {
     this.running = false;
+  }
+
+  /** Broker rebound this worker to a new tab — drop stale in-memory dispatch. */
+  clearActiveTaskForBindingChange(): void {
+    if (this.workerState) {
+      this.clearActiveTask(this.workerState);
+    } else {
+      this.activeTaskId = null;
+      this.activeLeaseToken = null;
+      this.activeTaskStartedAt = 0;
+      this.nudgeSent = false;
+    }
   }
 
   async close(): Promise<void> {
@@ -523,10 +556,87 @@ export class BrowserWorker {
 
     workerState.setStatus("BUSY", { currentTaskId: taskId });
 
+    const taskRow = this.repo?.getTaskById(taskId);
+    const isProbe = taskRow?.taskClass === "SYSTEM_PROBE";
+    let probeToken: string | undefined;
+    if (isProbe && taskRow?.prompt) {
+      const m = taskRow.prompt.match(/canary:\s*([a-f0-9]+)/i);
+      probeToken = m?.[1];
+    }
+
+    if (!generating) {
+      const domHint = await browser.detectMcpDomHint(probeToken).catch(() => null);
+      if (domHint === "approval_required") {
+        taskService.markWaitingApproval(taskId);
+        this.repo?.setReadinessReason(
+          this.workerId,
+          "MCP_APPROVAL_REQUIRED",
+          "Click Always allow in ChatGPT for the Cursor connector"
+        );
+        log({
+          event: "INFO",
+          component: "browser-worker",
+          taskId,
+          message: "MCP approval card visible — waiting for operator",
+        });
+        return;
+      }
+      if (isProbe && domHint === "safety_blocked") {
+        taskService.markMcpWriteDegraded(
+          taskId,
+          "PLATFORM_SAFETY: OpenAI blocked MCP write before remote-mcp"
+        );
+        this.clearActiveTask(workerState);
+        log({
+          event: "WARN",
+          component: "browser-worker",
+          taskId,
+          message: "MCP write degraded (platform safety) — skipping nudge",
+        });
+        return;
+      }
+      if (isProbe && domHint === "canary_in_chat" && elapsed >= 15_000) {
+        const classified = classifyProbeFailure({
+          taskStatus: status,
+          domHint: "canary_in_chat",
+        });
+        taskService.failProbeClassified(
+          taskId,
+          classified,
+          "Canary appeared in chat without MCP tool invocation"
+        );
+        this.clearActiveTask(workerState);
+        return;
+      }
+    }
+
     if (!this.nudgeSent && elapsed >= NUDGE_AT_MS) {
       if (generating) {
         // Don't fence a nudge we cannot type yet.
+      } else if (isProbe) {
+        const preNudgeHint = await browser
+          .detectMcpDomHint(probeToken)
+          .catch(() => null);
+        if (preNudgeHint === "safety_blocked") {
+          taskService.markMcpWriteDegraded(
+            taskId,
+            "PLATFORM_SAFETY: OpenAI blocked MCP write before remote-mcp"
+          );
+          this.clearActiveTask(workerState);
+          return;
+        }
       } else {
+        const preNudgeHint = await browser.detectMcpDomHint().catch(() => null);
+        if (preNudgeHint === "safety_blocked") {
+          taskService.markMcpWriteDegraded(
+            taskId,
+            "PLATFORM_SAFETY: OpenAI blocked MCP write before remote-mcp"
+          );
+          this.clearActiveTask(workerState);
+          return;
+        }
+      }
+      if (!generating) {
         const fenced = taskService.markNudgeStarted(
           taskId,
           this.workerId,
@@ -550,12 +660,15 @@ export class BrowserWorker {
             await browser.waitUntilComposerIdle();
             await this.withUiWrite(async () => {
               this.options.assertBindingFresh?.();
-              await browser.sendSubmitNudge(taskId, { skipIdleWait: true });
+              await browser.sendSubmitNudge(taskId, {
+                skipIdleWait: true,
+                probe: isProbe,
+              });
               log({
                 event: "INFO",
                 component: "browser-worker",
                 taskId,
-                message: `Sent submit nudge (TASK_ID=${taskId})`,
+                message: `Sent submit nudge (TASK_ID=${taskId}${isProbe ? " probe" : ""})`,
               });
             });
           } catch {

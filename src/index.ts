@@ -1,8 +1,8 @@
 import { config as loadEnv } from "dotenv";
-import { mkdirSync, appendFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
-import { configureLogger } from "./logging/logger.js";
+import { configureLogger, log } from "./logging/logger.js";
 import { startMcpServer } from "./mcp/server.js";
 import { startRemoteMcpServer } from "./mcp/remote-server.js";
 import { startHttpApi } from "./http/api.js";
@@ -11,12 +11,12 @@ import {
   startBrowserBroker,
   type BrowserBrokerHandle,
 } from "./browser/start-broker.js";
-import { log } from "./logging/logger.js";
+import { resolveBrokerOpsPort } from "./ops/broker-ops-config.js";
 import {
   loadWorkersTopology,
   validateWorkersTopology,
 } from "./config/workers-topology.js";
-import { loadConfig, type AppConfig } from "./config/load-config.js";
+import { loadConfig, remoteMcpTokenFilePath, type AppConfig } from "./config/load-config.js";
 
 export { loadConfig, resolveUserPath, chatgptMcpHome } from "./config/load-config.js";
 export type { AppConfig } from "./config/load-config.js";
@@ -37,6 +37,7 @@ function validateTopologyOrThrow(
   opts?: { includeHttpPort?: boolean; allowSharedCdp?: boolean }
 ): ReturnType<typeof loadWorkersTopology> {
   const topology = loadWorkersTopology({
+    dbPath: config.dbPath,
     workersFile: config.workersFile,
     workerId: config.workerId,
     workerUrl: config.workerUrl,
@@ -118,24 +119,41 @@ async function startBrokerFromConfig(
   });
   if (topology.workers.length < 1) {
     throw new Error(
-      "browser-broker requires HANDOFF_WORKERS_FILE with ≥1 worker sharing one cdpEndpoint"
+      "browser-broker requires ≥1 worker in DB (worker_state) sharing one cdpEndpoint"
     );
   }
-  const cdpEndpoint = topology.workers[0]!.cdpEndpoint;
+  const enabled = topology.workers.filter((w) => w.enabled !== false);
+  if (enabled.length < 1) {
+    throw new Error(
+      "No enabled workers in DB — enable via dashboard or register worker_state rows."
+    );
+  }
+  const cdpEndpoint = enabled[0]?.cdpEndpoint ?? topology.workers[0]!.cdpEndpoint;
+  const brokerOpsToken =
+    process.env.HANDOFF_BROKER_OPS_TOKEN?.trim() ||
+    randomBytes(32).toString("hex");
+  if (!process.env.HANDOFF_BROKER_OPS_TOKEN?.trim()) {
+    log({
+      event: "WARN",
+      component: "browser-broker",
+      message:
+        "HANDOFF_BROKER_OPS_TOKEN not set — generated ephemeral token for this process",
+    });
+  }
   return startBrowserBroker({
     dbPath: config.dbPath,
     cdpEndpoint,
     chatGptUrl: config.chatGptUrl,
-    workers: topology.workers.map((w) => ({
-      id: w.id,
-      workerUrl: w.workerUrl,
-    })),
+    workers: enabled.map((w) => ({ id: w.id, workerUrl: w.workerUrl })),
+    registryWorkerIds: enabled.map((w) => w.id),
     pollIntervalMs: config.pollIntervalMs,
     approvalTimeoutMs: config.approvalTimeoutMs,
     hardTimeoutMs: config.hardTimeoutMs,
     rateLimitBackoffMs: config.rateLimitBackoffMs,
     leaseMs: config.leaseMs,
     workerStaleMs: config.workerStaleMs,
+    brokerOpsPort: resolveBrokerOpsPort(),
+    brokerOpsToken,
   });
 }
 
@@ -192,6 +210,7 @@ async function main(): Promise<void> {
       runLeaseReaper: true,
       reaperIntervalMs: config.reaperIntervalMs,
       workerId: config.workerId,
+      workersFile: config.workersFile,
     });
     await registerHttpKeepalive();
     return;
@@ -222,6 +241,7 @@ async function main(): Promise<void> {
       runLeaseReaper: true,
       reaperIntervalMs: config.reaperIntervalMs,
       workerId: config.workerId,
+      workersFile: config.workersFile,
     });
     const worker = await startWorkerFromConfig(config);
     registerShutdown(worker);
@@ -248,12 +268,11 @@ async function main(): Promise<void> {
     let token = config.remoteMcpToken;
     if (!token) {
       token = randomBytes(32).toString("hex");
-      appendFileSync(
-        resolve(".env"),
-        `\nHANDOFF_REMOTE_MCP_TOKEN=${token}\n`
-      );
+      const tokenPath = remoteMcpTokenFilePath();
+      mkdirSync(dirname(tokenPath), { recursive: true });
+      writeFileSync(tokenPath, `${token}\n`, { encoding: "utf8", mode: 0o600 });
       console.error(
-        `Generated a new HANDOFF_REMOTE_MCP_TOKEN and appended it to .env:\n${token}\n` +
+        `Generated HANDOFF_REMOTE_MCP_TOKEN at ${tokenPath}:\n${token}\n` +
           "Use this as the bearer token when connecting ChatGPT's connector."
       );
     }

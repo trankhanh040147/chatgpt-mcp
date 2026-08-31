@@ -14,3 +14,10 @@ export function sameWorkerChat(currentUrl: string, workerUrl: string): boolean {
   const expected = chatIdFromUrl(workerUrl);
   return Boolean(current && expected && current === expected);
 }
+
+/** Registry URL is a real ChatGPT /c/<uuid> — not onboarding placeholder text. */
+export function isAssignableWorkerUrl(url: string | null | undefined): boolean {
+  if (!url?.trim()) return false;
+  if (/REPLACE_WORKER/i.test(url)) return false;
+  return Boolean(chatIdFromUrl(url.trim()));
+}

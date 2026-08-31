@@ -1,5 +1,5 @@
-# chatgpt-mcp — common ops
-# Run `make` or `make help` for targets.
+# chatgpt-mcp — developer Makefile (internal)
+# Public ops UX: gptmcp — run `gptmcp help` or `npx gptmcp help`
 
 PROJECT_NAME ?= chatgpt-mcp
 HANDOFF_DIR  ?= .
@@ -12,7 +12,10 @@ HTTP_PORT   ?= $(shell grep -E '^HANDOFF_HTTP_PORT=' .env 2>/dev/null | cut -d= 
 HTTP_PORT   ?= 8787
 REMOTE_PORT ?= $(shell grep -E '^HANDOFF_REMOTE_MCP_PORT=' .env 2>/dev/null | cut -d= -f2)
 REMOTE_PORT ?= 8790
+BROKER_OPS_PORT ?= $(shell grep -E '^HANDOFF_BROKER_OPS_PORT=' .env 2>/dev/null | cut -d= -f2)
+BROKER_OPS_PORT ?= 18788
 HEALTH_URL  ?= http://127.0.0.1:$(HTTP_PORT)
+GPTMCP      ?= npx gptmcp
 
 HANDOFF_PATHS := \
 	README.md \
@@ -36,37 +39,71 @@ HANDOFF_PATHS := \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install build setup chrome chrome-if-needed up up-bg down restart status wait-ready \
-	check doctor recover recover-clean recover-all clear-tasks clear-task \
-	logs worker-bg remote-bg status-api-bg test-leases e2e-1 e2e-20 e2e-dual \
+.PHONY: help install install-project build setup test verify \
+	gptmcp start stop restart status logs doctor recover open \
+	chrome chrome-if-needed up up-bg up-bg-legacy down wait-ready check \
+	recover-clean recover-all clear-tasks clear-task \
+	worker-bg remote-bg status-api-bg test-leases e2e-1 e2e-20 e2e-dual \
 	create-worker rotate-worker dashboard dashboard-up handoff-zip
 
-help: ## Show targets
-	@echo "chatgpt-mcp — quick ops"
+help: ## Developer targets (public UX: gptmcp)
+	@echo "chatgpt-mcp — developer Makefile"
+	@echo ""
+	@echo "Public ops (preferred):"
+	@echo "  gptmcp start | stop | restart | status | logs | doctor | recover | open"
+	@echo "  gptmcp worker list | add | rotate …"
+	@echo ""
+	@echo "Onboarding:"
+	@echo "  make install-project    # ./scripts/install.sh"
 	@echo ""
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
-	@echo ""
-	@echo "Typical session:"
-	@echo "  make install build setup    # once"
-	@echo "  make up                     # foreground: CDP + remote-mcp + worker"
-	@echo "  make check                  # expect worker READY"
-	@echo ""
-	@echo "Background:"
-	@echo "  make dashboard-up           # A1-S: status-api + remote-mcp + broker + URL"
-	@echo "  make up-bg && make wait-ready && make check"
-	@echo "  make clear-tasks            # wipe SQLite queue (ID=ho_… for one)"
-	@echo "  make create-worker          # assisted New chat → workers.json (A1-S)"
-	@echo "  make rotate-worker ARGS='--id=w2'  # idle-only chat rotation"
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-16s %s\n", $$1, $$2}'
 
 install: ## npm install
 	npm install
 
-build: ## Compile dist/
+install-project: ## First-run glue (./scripts/install.sh)
+	@chmod +x scripts/install.sh
+	./scripts/install.sh $(ARGS)
+
+build: ## Compile dist/ (+ gptmcp binary)
 	npm run build
 
 setup: ## ~/.chatgpt-mcp + print Cursor MCP JSON
 	npm run setup
+
+test: ## Unit tests
+	npm run test:unit
+
+verify: ## typecheck + unit + build
+	npm run verify
+
+gptmcp: build ## Run gptmcp (pass ARGS='status')
+	$(GPTMCP) $(ARGS)
+
+start: build ## [gptmcp] Start broker stack
+	$(GPTMCP) start
+
+stop: ## [gptmcp] Stop services
+	$(GPTMCP) stop
+
+restart: build ## [gptmcp] Restart broker stack
+	$(GPTMCP) restart
+
+status: ## [gptmcp] System health
+	$(GPTMCP) status
+
+logs: ## [gptmcp] Structured logs
+	$(GPTMCP) logs $(ARGS)
+
+doctor: build ## [gptmcp] Deep diagnostics
+	$(GPTMCP) doctor $(ARGS)
+
+recover: build ## [gptmcp] Repair queue/workers
+	$(GPTMCP) recover $(ARGS)
+
+open: ## [gptmcp] Open dashboard
+	$(GPTMCP) open
 
 chrome: ## Start dedicated CDP Chrome (idempotent)
 	npm run chrome-cdp
@@ -76,10 +113,12 @@ chrome-if-needed: ## Start CDP Chrome only when :9222 is down (idempotent)
 		&& echo "CDP already listening on :9222" \
 		|| npm run chrome-cdp
 
-up: build chrome-if-needed ## Foreground stack: CDP + remote-mcp + worker (Ctrl+C stops services)
+up: build chrome-if-needed ## Foreground stack (legacy — prefer gptmcp start)
 	npm run start
 
-up-bg: build chrome-if-needed ## Background: status-api + browser-worker + remote-mcp
+up-bg: dashboard-up ## Alias for A1-S broker stack
+
+up-bg-legacy: build chrome-if-needed ## Legacy multi-process browser-worker
 	@mkdir -p $(LOG_DIR)
 	@if lsof -nP -iTCP:$(REMOTE_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 		echo "remote-mcp already on :$(REMOTE_PORT)"; \
@@ -89,117 +128,85 @@ up-bg: build chrome-if-needed ## Background: status-api + browser-worker + remot
 		echo "remote-mcp → :$(REMOTE_PORT) (pid $$!)"; \
 	fi
 	@if [ -f $(LOG_DIR)/status-api-supervise.pid ] && kill -0 $$(cat $(LOG_DIR)/status-api-supervise.pid) 2>/dev/null; then \
-		echo "status-api supervise already running (pid $$(cat $(LOG_DIR)/status-api-supervise.pid))"; \
+		echo "status-api supervise already running"; \
 	elif lsof -nP -iTCP:$(HTTP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 		echo "status-api already on :$(HTTP_PORT)"; \
 	else \
 		chmod +x scripts/supervise-status-api.sh; \
 		nohup bash scripts/supervise-status-api.sh >/dev/null 2>&1 & \
 		echo $$! > $(LOG_DIR)/status-api-supervise.pid; \
-		echo "status-api supervise → pid $$!"; \
 	fi
 	@if [ -f $(LOG_DIR)/browser-worker-supervise.pid ] && kill -0 $$(cat $(LOG_DIR)/browser-worker-supervise.pid) 2>/dev/null; then \
-		echo "browser-worker supervise already running (pid $$(cat $(LOG_DIR)/browser-worker-supervise.pid))"; \
-	elif [ -f $(LOG_DIR)/browser-worker.pid ] && kill -0 $$(cat $(LOG_DIR)/browser-worker.pid) 2>/dev/null; then \
-		echo "browser-worker already running (pid $$(cat $(LOG_DIR)/browser-worker.pid))"; \
+		echo "browser-worker supervise already running"; \
 	else \
 		chmod +x scripts/supervise-browser-worker.sh; \
 		nohup bash scripts/supervise-browser-worker.sh >/dev/null 2>&1 & \
 		echo $$! > $(LOG_DIR)/browser-worker-supervise.pid; \
-		echo "browser-worker supervise → pid $$!"; \
 	fi
-	@echo "Run: make status && make wait-ready && make check"
+	@echo "Run: gptmcp status"
 
-down: ## Stop status-api + browser-worker + remote-mcp (Chrome CDP stays up)
-	-pkill -f 'supervise-browser-worker.sh' 2>/dev/null || true
-	-pkill -f 'supervise-status-api.sh' 2>/dev/null || true
-	-pkill -f 'node dist/index.js worker' 2>/dev/null || true
-	-pkill -f 'node dist/index.js browser-worker' 2>/dev/null || true
-	-pkill -f 'node dist/index.js status-api' 2>/dev/null || true
-	-pkill -f 'node dist/index.js remote-mcp' 2>/dev/null || true
-	-rm -f $(LOG_DIR)/worker.pid $(LOG_DIR)/remote-mcp.pid $(LOG_DIR)/status-api.pid $(LOG_DIR)/status-api-supervise.pid $(LOG_DIR)/browser-worker.pid $(LOG_DIR)/browser-worker-supervise.pid
-	@echo "Stopped status-api (:$(HTTP_PORT)), browser-worker, remote-mcp (:$(REMOTE_PORT))."
+down: stop ## Alias of gptmcp stop
 
-restart: down up-bg ## Restart background stack (split status-api + browser-worker)
-
-status: ## Health + /workers + listening ports
-	@curl -sf $(HEALTH_URL)/health 2>/dev/null && echo "  ← /health" || echo "status-api: DOWN (:$(HTTP_PORT))"
-	@curl -sf $(HEALTH_URL)/worker 2>/dev/null || echo "GET /worker failed"
-	@curl -sf $(HEALTH_URL)/workers 2>/dev/null || echo "GET /workers failed"
-	@echo ""
-	@lsof -nP -iTCP:$(HTTP_PORT),$(REMOTE_PORT),9222 -sTCP:LISTEN 2>/dev/null || echo "(no listeners on :$(HTTP_PORT) :$(REMOTE_PORT) :9222)"
-
-doctor: build ## Topology + schema + status-api health
-	npm run doctor
-
-dashboard: ## Print ops dashboard URL (does not start services)
+dashboard: ## Print ops dashboard URL
 	@echo "Open http://127.0.0.1:$(HTTP_PORT)/dashboard/"
-	@echo "(start stack: make dashboard-up)"
+	@echo "(start: gptmcp start)"
 
 dashboard-up: build chrome-if-needed ## Start A1-S stack for dashboard (supervised status-api + remote-mcp + broker)
 	@chmod +x scripts/start-broker-stack.sh
-	HANDOFF_WORKERS_FILE=$${HANDOFF_WORKERS_FILE:-$(CURDIR)/data/workers.a1s.json} \
+	HANDOFF_WORKERS_FILE=$${HANDOFF_WORKERS_FILE:-$${CHATGPT_MCP_HOME:-$$HOME/.chatgpt-mcp}/data/workers.json} \
 		./scripts/start-broker-stack.sh
 	@echo ""
 	@echo "Open http://127.0.0.1:$(HTTP_PORT)/dashboard/"
 
-test-leases: ## Lease/fencing unit tests (no browser)
+test-leases: ## Lease/fencing unit tests
 	npm run test:leases
 
-e2e-dual: ## Live dual-worker canary (needs 2 CDP + start-dual-stack.sh)
+e2e-dual: ## Live dual-worker canary
 	HANDOFF_WORKERS_FILE=$${HANDOFF_WORKERS_FILE:-$(CURDIR)/data/workers.json} npm run e2e:dual
 
-create-worker: ## Assisted New chat → write workers file → optional canary
-	npm run create-worker
+create-worker: ## [gptmcp worker add]
+	$(GPTMCP) worker add $(ARGS)
 
-rotate-worker: ## Rotate worker chat (idle-only; restart broker after)
-	npm run rotate-worker -- $(ARGS)
+rotate-worker: ## [gptmcp worker rotate]
+	$(GPTMCP) worker rotate $(ARGS)
 
-wait-ready: ## Wait until GET /worker reports READY (120s default)
+wait-ready: ## Internal readiness poll (gptmcp start waits automatically)
 	@chmod +x scripts/wait-ready.sh
 	@./scripts/wait-ready.sh 120
 
-check: ## Preflight Node/build/CDP/worker/remote-mcp
+check: ## Legacy preflight (prefer gptmcp doctor)
 	npm run check
 
-recover: build ## Reset worker_state READY + fail stuck DISPATCHING
-	npm run recover
+recover-clean: build ## gptmcp recover --reset-queue --yes
+	$(GPTMCP) recover --reset-queue --yes
 
-recover-clean: build ## recover + fail all QUEUED (use before a fresh smoke test)
-	npm run recover -- --fail-queued
+recover-all: build ## gptmcp recover --all --yes
+	$(GPTMCP) recover --all --yes
 
-recover-all: build ## Fail all open tasks + reset worker (clean slate before e2e)
-	npm run recover -- --fail-queued --fail-open
-
-clear-tasks: ## Delete all SQLite tasks + reset worker READY (ID=ho_… for one)
+clear-tasks: build ## Destructive purge (advanced)
 	npm run recover -- --purge $(if $(ID),--id $(ID))
 
-clear-task: clear-tasks ## Alias of clear-tasks
+clear-task: clear-tasks ## Alias
 
-logs: ## Tail handoff.log
-	@tail -f $(LOG_DIR)/handoff.log
-
-worker-bg: build ## Background worker (status-api + one browser; single-worker default)
+worker-bg: build ## Background worker (legacy single-worker)
 	@mkdir -p $(LOG_DIR)
 	@if lsof -nP -iTCP:$(HTTP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 		echo "worker/status-api already on :$(HTTP_PORT)"; \
 	else \
 		nohup $(NODE) $(DIST) worker >> $(LOG_DIR)/worker.log 2>&1 & \
 		echo $$! > $(LOG_DIR)/worker.pid; \
-		echo "worker pid $$!"; \
 	fi
 
-status-api-bg: build ## Background status-api only (HTTP + lease reaper, supervised)
+status-api-bg: build ## Background status-api only
 	@mkdir -p $(LOG_DIR)
 	@if [ -f $(LOG_DIR)/status-api-supervise.pid ] && kill -0 $$(cat $(LOG_DIR)/status-api-supervise.pid) 2>/dev/null; then \
-		echo "status-api supervise already running (pid $$(cat $(LOG_DIR)/status-api-supervise.pid))"; \
+		echo "status-api supervise already running"; \
 	elif lsof -nP -iTCP:$(HTTP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 		echo "status-api already on :$(HTTP_PORT)"; \
 	else \
 		chmod +x scripts/supervise-status-api.sh; \
 		nohup bash scripts/supervise-status-api.sh >/dev/null 2>&1 & \
 		echo $$! > $(LOG_DIR)/status-api-supervise.pid; \
-		echo "status-api supervise → pid $$!"; \
 	fi
 
 remote-bg: build ## Background remote-mcp only
@@ -209,16 +216,15 @@ remote-bg: build ## Background remote-mcp only
 	else \
 		nohup $(NODE) $(DIST) remote-mcp >> $(LOG_DIR)/remote-mcp.log 2>&1 & \
 		echo $$! > $(LOG_DIR)/remote-mcp.pid; \
-		echo "remote-mcp pid $$!"; \
 	fi
 
 e2e-1: ## One live reliability canary
 	npm run e2e:reliability -- --runs=1
 
-e2e-20: ## 20 consecutive handoffs (≥18 pass)
+e2e-20: ## 20 consecutive handoffs
 	npm run e2e:reliability:20
 
-handoff-zip: ## Zip source for external review (no secrets/node_modules)
+handoff-zip: ## Zip source for external review
 	@rm -f "$(HANDOFF_ZIP)"
 	@zip -rq "$(HANDOFF_ZIP)" $(HANDOFF_PATHS) \
 		-x '*.DS_Store' \

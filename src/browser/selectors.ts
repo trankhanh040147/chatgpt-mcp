@@ -35,6 +35,8 @@ export const selectors = {
     '#prompt-textarea, [contenteditable="true"][data-placeholder], [data-testid="profile-button"], button[aria-label="User menu"]',
   /** Rate limit banner (best-effort detection) */
   rateLimitBanner: ':text("rate limit"), :text("Rate limit"), :text("too many requests")',
+  /** Worker URL not accessible to logged-in account */
+  chatAccessDenied: ':text("don\'t have access to this conversation")',
 } as const;
 
 /** One line only — long dispatch text is truncated by ChatGPT's composer. */

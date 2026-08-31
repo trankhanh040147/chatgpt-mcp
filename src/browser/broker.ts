@@ -1,8 +1,10 @@
 import type { Browser, BrowserContext, Page } from "playwright";
 import { ChatGptBrowser } from "./chatgpt.js";
+import { createWorkerChatOnContext, completeWorkerChatOnPage } from "./create-chat.js";
 import { UiWriteMutex } from "./ui-write-mutex.js";
 import { log } from "../logging/logger.js";
 import { chatIdFromUrl } from "./chat-url.js";
+import { selectors } from "./selectors.js";
 
 export interface BrokerWorkerBinding {
   workerId: string;
@@ -14,16 +16,111 @@ export interface BrokerWorkerBinding {
   connectionGeneration: number;
   chatId: string;
   browser: ChatGptBrowser;
+  /** Wall clock when this binding was last established. */
+  boundAt: number;
+}
+
+export interface BrowserBrokerWorkerSpec {
+  id: string;
+  workerUrl?: string;
 }
 
 export interface BrowserBrokerOptions {
   cdpEndpoint: string;
   chatGptUrl: string;
-  workers: Array<{ id: string; workerUrl: string }>;
+  workers: BrowserBrokerWorkerSpec[];
+  /** All registry ids (for status unbound detection). */
+  registryWorkerIds?: string[];
+}
+
+export interface BrokerStatusSnapshot {
+  healthy: boolean;
+  cdpEndpoint: string;
+  connectionGeneration: number;
+  registryWorkerIds: string[];
+  bindings: Array<{
+    workerId: string;
+    chatId: string;
+    pageUrl: string;
+    generation: number;
+  }>;
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function bindGraceMs(): number {
+  const n = Number(process.env.HANDOFF_BIND_GRACE_MS ?? 60_000);
+  return Number.isFinite(n) && n >= 0 ? n : 60_000;
+}
+
+function safePageUrl(page: Page): string | null {
+  try {
+    if (page.isClosed()) return null;
+    return page.url();
+  } catch {
+    return null;
+  }
+}
+
+function pageMatchesChat(page: Page, chatId: string): boolean {
+  const url = safePageUrl(page);
+  if (!url) return false;
+  return chatIdFromUrl(url) === chatId;
+}
+
+function isInaccessibleChatBindError(message: string): boolean {
+  return (
+    message.includes("CHAT_ACCESS_DENIED") ||
+    message.includes("redirected away from chat") ||
+    message.includes("Failed to bind") ||
+    message.includes("Worker conversation not ready")
+  );
+}
+
+function autoRebindBlockMs(): number {
+  const n = Number(process.env.HANDOFF_AUTO_REBIND_BLOCK_MS ?? 1_800_000);
+  return Number.isFinite(n) && n >= 0 ? n : 1_800_000;
+}
+
+/** Page left /c/<id> for home or another surface — typical deleted/inaccessible chat. */
+function pageRedirectedOffChat(
+  pageUrl: string | null,
+  expectedChatId: string
+): boolean {
+  if (!pageUrl) return true;
+  const id = chatIdFromUrl(pageUrl);
+  return id !== expectedChatId;
+}
+
+async function verifyChatPageStable(
+  page: Page,
+  chatId: string,
+  workerUrl: string
+): Promise<void> {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    if (page.isClosed()) {
+      throw new Error(`Failed to bind — page closed while opening ${workerUrl}`);
+    }
+    const current = page.url();
+    if (chatIdFromUrl(current) !== chatId) {
+      throw new Error(
+        `Failed to bind to ${chatId} (page redirected to ${current})`
+      );
+    }
+    const denied = await page
+      .locator(selectors.chatAccessDenied)
+      .first()
+      .isVisible({ timeout: 400 })
+      .catch(() => false);
+    if (denied) {
+      throw new Error(
+        "CHAT_ACCESS_DENIED: logged-in account cannot open this /c/ URL"
+      );
+    }
+    await page.waitForTimeout(500);
+  }
 }
 
 /**
@@ -42,26 +139,74 @@ export class BrowserBroker {
   private reconnecting = false;
   private closed = false;
   readonly uiWriteMutex = new UiWriteMutex();
+  /** In-flight create-chat automation per worker — abort on cancel/disable. */
+  private readonly uiAbortByWorker = new Map<string, AbortController>();
+  /** Pause heal/auto-rebind after inaccessible chat URL (redirect / access denied). */
+  private readonly autoRebindBlocked = new Map<
+    string,
+    { reason: string; until: number }
+  >();
+  private bindingChangedHandler: ((workerId: string) => void) | null = null;
+
+  onBindingChanged(handler: (workerId: string) => void): void {
+    this.bindingChangedHandler = handler;
+  }
+
+  private blockAutoRebind(workerId: string, reason: string): void {
+    const until = Date.now() + autoRebindBlockMs();
+    this.autoRebindBlocked.set(workerId, { reason, until });
+    log({
+      event: "WARN",
+      component: "browser-broker",
+      message: `Auto-rebind paused worker=${workerId} (${reason}) until operator fixes URL or removes worker`,
+    });
+  }
+
+  private clearAutoRebindBlock(workerId: string): void {
+    this.autoRebindBlocked.delete(workerId);
+  }
+
+  private canAutoRebind(workerId: string): boolean {
+    const blocked = this.autoRebindBlocked.get(workerId);
+    if (!blocked) return true;
+    if (Date.now() >= blocked.until) {
+      this.autoRebindBlocked.delete(workerId);
+      return true;
+    }
+    return false;
+  }
+
+  private notifyBindingChanged(workerId: string): void {
+    this.bindingChangedHandler?.(workerId);
+  }
 
   constructor(private readonly options: BrowserBrokerOptions) {
     if (options.workers.length < 1) {
-      throw new Error("BrowserBroker requires at least one worker binding");
+      throw new Error("BrowserBroker requires at least one worker entry");
     }
     const ids = new Set(options.workers.map((w) => w.id));
     if (ids.size !== options.workers.length) {
       throw new Error("BrowserBroker worker ids must be unique");
     }
-    const urls = new Set(options.workers.map((w) => w.workerUrl));
-    if (urls.size !== options.workers.length) {
+    const withUrl = options.workers.filter(
+      (w) => w.workerUrl && chatIdFromUrl(w.workerUrl)
+    );
+    const urls = new Set(withUrl.map((w) => w.workerUrl!));
+    if (urls.size !== withUrl.length) {
       throw new Error("BrowserBroker worker URLs must be unique");
     }
-    const chatIds = options.workers.map((w) => chatIdFromUrl(w.workerUrl));
-    if (chatIds.some((c) => !c)) {
-      throw new Error("BrowserBroker workerUrl must include /c/<id>");
-    }
+    const chatIds = withUrl.map((w) => chatIdFromUrl(w.workerUrl!)!);
     if (new Set(chatIds).size !== chatIds.length) {
       throw new Error("BrowserBroker chat ids must be unique");
     }
+  }
+
+  getCdpEndpoint(): string {
+    return this.options.cdpEndpoint;
+  }
+
+  getContext(): BrowserContext | null {
+    return this.context;
   }
 
   getConnectionGeneration(): number {
@@ -100,8 +245,32 @@ export class BrowserBroker {
     this.bindings.clear();
     this.chatOwners.clear();
 
+    let bound = 0;
     for (const w of this.options.workers) {
-      await this.bindWorker(w.id, w.workerUrl);
+      if (!w.workerUrl || !chatIdFromUrl(w.workerUrl)) continue;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await this.bindWorkerLocked(w.id, w.workerUrl);
+          bound += 1;
+          break;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (attempt >= 3) {
+            log({
+              event: "WARN",
+              component: "browser-broker",
+              message: `Bind failed worker=${w.id}: ${message}`,
+            });
+          } else {
+            log({
+              event: "WARN",
+              component: "browser-broker",
+              message: `Bind retry ${attempt} worker=${w.id}: ${message}`,
+            });
+            await sleep(1500 * attempt);
+          }
+        }
+      }
     }
 
     this.healthy = true;
@@ -112,7 +281,7 @@ export class BrowserBroker {
     log({
       event: "INFO",
       component: "browser-broker",
-      message: `Broker ready cdp=${this.options.cdpEndpoint} gen=${this.connectionGeneration} workers=[${[...this.bindings.keys()].join(",")}]`,
+      message: `Broker ready cdp=${this.options.cdpEndpoint} gen=${this.connectionGeneration} bound=${bound} workers=[${[...this.bindings.keys()].join(",")}]`,
     });
   }
 
@@ -189,19 +358,285 @@ export class BrowserBroker {
     return b;
   }
 
+  hasBinding(workerId: string): boolean {
+    return this.bindings.has(workerId);
+  }
+
   listBindings(): BrokerWorkerBinding[] {
     return [...this.bindings.values()];
   }
 
-  /**
-   * Fail-closed: exact chat id match, unique among bindings.
-   * Serialized — concurrent binds cannot race on the same chat/page.
-   */
+  getStatusSnapshot(): BrokerStatusSnapshot {
+    return {
+      healthy: this.isHealthy(),
+      cdpEndpoint: this.options.cdpEndpoint,
+      connectionGeneration: this.connectionGeneration,
+      registryWorkerIds:
+        this.options.registryWorkerIds ??
+        this.options.workers.map((w) => w.id),
+      bindings: this.listBindings().flatMap((b) => {
+        const pageUrl = safePageUrl(b.page);
+        if (!pageUrl) return [];
+        return [
+          {
+            workerId: b.workerId,
+            chatId: b.chatId,
+            pageUrl,
+            generation: b.generation,
+          },
+        ];
+      }),
+    };
+  }
+
+  private workerSpec(workerId: string): BrowserBrokerWorkerSpec | undefined {
+    return this.options.workers.find((w) => w.id === workerId);
+  }
+
   async bindWorker(
     workerId: string,
     workerUrl: string
   ): Promise<BrokerWorkerBinding> {
     return this.withBindLock(() => this.bindWorkerLocked(workerId, workerUrl));
+  }
+
+  async rebindWorker(
+    workerId: string,
+    workerUrl: string
+  ): Promise<BrokerWorkerBinding> {
+    return this.withBindLock(async () => {
+      const prev = this.bindings.get(workerId);
+      const newChat = chatIdFromUrl(workerUrl);
+      if (!newChat) throw new Error(`Invalid workerUrl: ${workerUrl}`);
+      if (prev && chatIdFromUrl(prev.workerUrl) === newChat) {
+        return prev;
+      }
+      if (prev) {
+        this.chatOwners.delete(prev.chatId);
+        this.bindings.delete(workerId);
+        if (!prev.page.isClosed()) {
+          await prev.page.close().catch(() => undefined);
+        }
+      }
+      return this.bindWorkerLocked(workerId, workerUrl);
+    });
+  }
+
+  async unbindWorker(workerId: string): Promise<void> {
+    await this.withBindLock(async () => {
+      const prev = this.bindings.get(workerId);
+      if (!prev) return;
+      this.chatOwners.delete(prev.chatId);
+      this.bindings.delete(workerId);
+      if (!prev.page.isClosed()) {
+        await prev.page.close().catch(() => undefined);
+      }
+      log({
+        event: "INFO",
+        component: "browser-broker",
+        message: `Unbound worker=${workerId}`,
+      });
+      this.notifyBindingChanged(workerId);
+    });
+  }
+
+  /** Drop bindings whose tab left /c/<id> (e.g. navigated to home). */
+  async pruneDriftedBindings(opts?: { autoRebind?: boolean }): Promise<void> {
+    const grace = bindGraceMs();
+    const now = Date.now();
+    const drifted: string[] = [];
+    for (const b of this.bindings.values()) {
+      if (now - b.boundAt < grace) continue;
+      if (b.page.isClosed() || !pageMatchesChat(b.page, b.chatId)) {
+        drifted.push(b.workerId);
+      }
+    }
+    for (const workerId of drifted) {
+      const b = this.bindings.get(workerId);
+      const spec = this.workerSpec(workerId);
+      const driftPageUrl = b ? safePageUrl(b.page) : null;
+      const expectedChatId = b?.chatId ?? chatIdFromUrl(spec?.workerUrl ?? "") ?? "?";
+      log({
+        event: "WARN",
+        component: "browser-broker",
+        message: `Pruning drifted binding worker=${workerId} chat=${b?.chatId ?? "?"} page=${driftPageUrl ?? "closed"}`,
+      });
+      if (
+        typeof expectedChatId === "string" &&
+        expectedChatId !== "?" &&
+        pageRedirectedOffChat(driftPageUrl, expectedChatId)
+      ) {
+        this.blockAutoRebind(
+          workerId,
+          `page drifted off chat (${driftPageUrl ?? "closed"})`
+        );
+      }
+      await this.unbindWorker(workerId);
+      if (
+        opts?.autoRebind !== false &&
+        spec?.workerUrl &&
+        this.canAutoRebind(workerId)
+      ) {
+        try {
+          await this.bindWorker(workerId, spec.workerUrl);
+          log({
+            event: "INFO",
+            component: "browser-broker",
+            message: `Auto-rebound worker=${workerId} after drift prune`,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (isInaccessibleChatBindError(message)) {
+            this.blockAutoRebind(workerId, message.slice(0, 120));
+          }
+          log({
+            event: "WARN",
+            component: "browser-broker",
+            message: `Auto-rebind failed worker=${workerId}: ${message}`,
+          });
+        }
+      } else if (spec?.workerUrl && !this.canAutoRebind(workerId)) {
+        log({
+          event: "INFO",
+          component: "browser-broker",
+          message: `Skipping auto-rebind worker=${workerId} — inaccessible URL backoff active`,
+        });
+      }
+    }
+  }
+
+  /** Bind registry workers that have a URL but no live tab binding. */
+  async healUnboundWorkers(): Promise<number> {
+    let healed = 0;
+    for (const w of this.options.workers) {
+      if (!w.workerUrl || !chatIdFromUrl(w.workerUrl)) continue;
+      if (this.hasBinding(w.id)) continue;
+      if (!this.canAutoRebind(w.id)) continue;
+      try {
+        await this.bindWorker(w.id, w.workerUrl);
+        healed += 1;
+        log({
+          event: "INFO",
+          component: "browser-broker",
+          message: `Healed unbound worker=${w.id}`,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (isInaccessibleChatBindError(message)) {
+          this.blockAutoRebind(w.id, message.slice(0, 120));
+        }
+        log({
+          event: "WARN",
+          component: "browser-broker",
+          message: `Heal bind failed worker=${w.id}: ${message}`,
+        });
+      }
+    }
+    return healed;
+  }
+
+  async reconcileBindings(): Promise<void> {
+    await this.pruneDriftedBindings({ autoRebind: true });
+    await this.healUnboundWorkers();
+  }
+
+  cancelWorkerUi(workerId: string): void {
+    const ctrl = this.uiAbortByWorker.get(workerId);
+    if (ctrl) {
+      ctrl.abort();
+      this.uiAbortByWorker.delete(workerId);
+      log({
+        event: "INFO",
+        component: "browser-broker",
+        message: `Cancelled in-flight UI work worker=${workerId}`,
+      });
+    }
+    this.notifyBindingChanged(workerId);
+  }
+
+  /** In-flight create-chat per worker — dedupe concurrent HTTP + reconciler retries. */
+  private readonly createChatInFlight = new Map<
+    string,
+    Promise<{ workerUrl: string; chatId: string }>
+  >();
+
+  async createChatForWorker(
+    workerId: string,
+    bootstrapMessage?: string
+  ): Promise<{ workerUrl: string; chatId: string }> {
+    const existing = this.createChatInFlight.get(workerId);
+    if (existing) {
+      log({
+        event: "INFO",
+        component: "browser-broker",
+        message: `create-chat already in flight for ${workerId} — awaiting`,
+      });
+      return existing;
+    }
+    const run = this.createChatForWorkerInner(workerId, bootstrapMessage).finally(
+      () => {
+        if (this.createChatInFlight.get(workerId) === run) {
+          this.createChatInFlight.delete(workerId);
+        }
+      }
+    );
+    this.createChatInFlight.set(workerId, run);
+    return run;
+  }
+
+  private async createChatForWorkerInner(
+    workerId: string,
+    bootstrapMessage?: string
+  ): Promise<{ workerUrl: string; chatId: string }> {
+    if (!this.context) throw new Error("Broker not connected");
+    const ctrl = new AbortController();
+    this.uiAbortByWorker.set(workerId, ctrl);
+    const page = await this.context.newPage();
+    try {
+      const created = await this.uiWriteMutex.run(async () => {
+        return await completeWorkerChatOnPage(page, {
+          chatGptUrl: this.options.chatGptUrl,
+          bootstrapMessage,
+          signal: ctrl.signal,
+        });
+      });
+      await this.withBindLock(async () => {
+        await this.bindWorkerLocked(workerId, created.workerUrl);
+      });
+      return { workerUrl: created.workerUrl, chatId: created.chatId };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!page.isClosed()) {
+        log({
+          event: "WARN",
+          component: "browser-broker",
+          message: `create-chat failed — tab left open for manual setup worker=${workerId}: ${message}`,
+          data: { workerId },
+        });
+      }
+      throw err;
+    } finally {
+      if (this.uiAbortByWorker.get(workerId) === ctrl) {
+        this.uiAbortByWorker.delete(workerId);
+      }
+    }
+  }
+
+  async probeSession(workerId: string): Promise<{ ready: boolean; reason?: string }> {
+    try {
+      const b = this.getBinding(workerId);
+      if (await b.browser.detectChatAccessDenied()) {
+        return {
+          ready: false,
+          reason: "CHAT_ACCESS_DENIED: use Assign URL with a chat from CDP Chrome",
+        };
+      }
+      const ready = await b.browser.ensureSessionReady();
+      return { ready };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ready: false, reason: message };
+    }
   }
 
   private async bindWorkerLocked(
@@ -223,8 +658,8 @@ export class BrowserBroker {
       );
     }
 
-    // Prefer a page already owned by this worker; else find by chat id unused.
     let page: Page | null = null;
+    let openedNewPage = false;
     const prev = this.bindings.get(workerId);
     if (prev && !prev.page.isClosed() && chatIdFromUrl(prev.page.url()) === chatId) {
       page = prev.page;
@@ -239,72 +674,83 @@ export class BrowserBroker {
         }) ?? null;
     }
 
-    if (!page) {
-      page = await this.context.newPage();
-      await page.goto(workerUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: 60_000,
+    try {
+      if (!page) {
+        page = await this.context.newPage();
+        openedNewPage = true;
+        await page.goto(workerUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: 60_000,
+        });
+        await verifyChatPageStable(page, chatId, workerUrl);
+      }
+
+      if (chatIdFromUrl(page.url()) !== chatId) {
+        await page.goto(workerUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: 60_000,
+        });
+        await verifyChatPageStable(page, chatId, workerUrl);
+      }
+      const finalId = chatIdFromUrl(page.url());
+      if (finalId !== chatId) {
+        const message = `Failed to bind ${workerId} to ${chatId} (page at ${page.url()})`;
+        this.blockAutoRebind(workerId, message);
+        throw new Error(message);
+      }
+
+      const ownerAfter = this.chatOwners.get(chatId);
+      if (ownerAfter && ownerAfter !== workerId) {
+        throw new Error(
+          `Duplicate chat binding after navigate: ${chatId} owned by ${ownerAfter}`
+        );
+      }
+
+      const generation = (prev?.generation ?? 0) + 1;
+      const browser = ChatGptBrowser.attachShared({
+        browser: this.browser,
+        context: this.context,
+        page,
+        workerUrl,
+        chatGptUrl: this.options.chatGptUrl,
       });
-      await page.waitForTimeout(1500);
-    }
 
-    if (chatIdFromUrl(page.url()) !== chatId) {
-      await page.goto(workerUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: 60_000,
+      if (prev) {
+        this.chatOwners.delete(prev.chatId);
+      }
+
+      const binding: BrokerWorkerBinding = {
+        workerId,
+        workerUrl,
+        page,
+        generation,
+        connectionGeneration: this.connectionGeneration,
+        chatId,
+        browser,
+        boundAt: Date.now(),
+      };
+      this.bindings.set(workerId, binding);
+      this.chatOwners.set(chatId, workerId);
+      this.clearAutoRebindBlock(workerId);
+      log({
+        event: "INFO",
+        component: "browser-broker",
+        message: `Bound worker=${workerId} chat=${chatId} generation=${generation} connGen=${this.connectionGeneration}`,
       });
-      await page.waitForTimeout(1500);
+      this.notifyBindingChanged(workerId);
+      return binding;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isInaccessibleChatBindError(message)) {
+        this.blockAutoRebind(workerId, message.slice(0, 120));
+      }
+      if (openedNewPage && page && !page.isClosed()) {
+        await page.close().catch(() => undefined);
+      }
+      throw err;
     }
-    const finalId = chatIdFromUrl(page.url());
-    if (finalId !== chatId) {
-      throw new Error(
-        `Failed to bind ${workerId} to ${chatId} (page at ${page.url()})`
-      );
-    }
-
-    // Re-check uniqueness after navigation (another bind may have claimed).
-    const ownerAfter = this.chatOwners.get(chatId);
-    if (ownerAfter && ownerAfter !== workerId) {
-      throw new Error(
-        `Duplicate chat binding after navigate: ${chatId} owned by ${ownerAfter}`
-      );
-    }
-
-    const generation = (prev?.generation ?? 0) + 1;
-    const browser = ChatGptBrowser.attachShared({
-      browser: this.browser,
-      context: this.context,
-      page,
-      workerUrl,
-      chatGptUrl: this.options.chatGptUrl,
-    });
-
-    if (prev) {
-      this.chatOwners.delete(prev.chatId);
-    }
-
-    const binding: BrokerWorkerBinding = {
-      workerId,
-      workerUrl,
-      page,
-      generation,
-      connectionGeneration: this.connectionGeneration,
-      chatId,
-      browser,
-    };
-    this.bindings.set(workerId, binding);
-    this.chatOwners.set(chatId, workerId);
-    log({
-      event: "INFO",
-      component: "browser-broker",
-      message: `Bound worker=${workerId} chat=${chatId} generation=${generation} connGen=${this.connectionGeneration}`,
-    });
-    return binding;
   }
 
-  /**
-   * Fail-closed page/chat/generation check immediately before irreversible write.
-   */
   assertBindingFresh(workerId: string): BrokerWorkerBinding {
     if (!this.healthy) {
       throw new Error(`Broker CDP unhealthy — refuse UI write for ${workerId}`);
@@ -318,10 +764,9 @@ export class BrowserBroker {
     if (b.page.isClosed()) {
       throw new Error(`Page closed for worker ${workerId}`);
     }
-    const current = chatIdFromUrl(b.page.url());
-    if (current !== b.chatId) {
+    if (!pageMatchesChat(b.page, b.chatId)) {
       throw new Error(
-        `Binding drift for ${workerId}: expected chat ${b.chatId}, page at ${b.page.url()}`
+        `Binding drift for ${workerId}: expected chat ${b.chatId}, page at ${safePageUrl(b.page) ?? "closed"}`
       );
     }
     if (this.chatOwners.get(b.chatId) !== workerId) {
