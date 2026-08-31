@@ -2,6 +2,8 @@
 
 Local read/ops UI for workers and tasks. Bind is **loopback only** (`127.0.0.1:8787`). Do **not** tunnel `:8787` — that is the status API, not ChatGPT MCP.
 
+> **Planned:** React rebuild (dashboard **1.0**) — spec [`.planning/active/dashboard-react-rebuild.md`](../.planning/active/dashboard-react-rebuild.md). Figma Make prototype is unreviewed; design will be finalized before implementation.
+
 ChatGPT still connects via [connect-chatgpt.md](connect-chatgpt.md) on `:8790/mcp`.
 
 ## Open
