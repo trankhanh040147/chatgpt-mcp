@@ -27,7 +27,8 @@ export class BrokerOpsClient {
   private async request<T>(
     method: string,
     path: string,
-    body?: unknown
+    body?: unknown,
+    timeoutMs = 120_000
   ): Promise<T> {
     const url = `${this.baseUrl.replace(/\/$/, "")}${path}`;
     const res = await fetch(url, {
@@ -37,6 +38,7 @@ export class BrokerOpsClient {
         "Content-Type": "application/json",
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text();
     let parsed: unknown = null;
@@ -78,6 +80,10 @@ export class BrokerOpsClient {
 
   async cancelUi(workerId: string): Promise<void> {
     await this.request("POST", "/broker/cancel-ui", { workerId });
+  }
+
+  async despawnActor(workerId: string): Promise<void> {
+    await this.request("POST", "/broker/despawn-actor", { workerId });
   }
 
   async createChat(

@@ -8,6 +8,7 @@ import {
 } from "../context.js";
 import {
   collectSystemSnapshot,
+  filterRegistryWorkers,
   serviceLabel,
   type SystemSnapshot,
 } from "../ops/health.js";
@@ -39,18 +40,37 @@ export async function runStatus(args: ParsedArgs): Promise<number> {
   blank();
 
   if (snap.workers.length) {
+    const registryWorkers = filterRegistryWorkers(
+      snap.workers,
+      snap.registryWorkerIds
+    );
     console.log("WORKERS");
-    for (const w of snap.workers) {
+    for (const w of registryWorkers) {
+      const ready = w.healthState === "READY";
       const dot =
-        w.healthState === "READY" || w.status === "READY"
+        ready
           ? statusDot(true)
           : w.enabled === false
             ? statusDot("warn")
             : statusDot(false);
       const label =
         w.enabled === false ? "DISABLED" : (w.healthState ?? w.status);
+      const detail = w.readinessReason
+        ? `${w.detail ?? ""} (${w.readinessReason})`
+        : w.detail ?? "";
       console.log(
-        `  ${w.id.padEnd(6)} ${dot}  ${label.padEnd(12)} ${w.detail ?? ""}`
+        `  ${w.id.padEnd(6)} ${dot}  ${label.padEnd(12)} ${detail}`
+      );
+    }
+    const ghosts = snap.workers.filter(
+      (w) => !snap.registryWorkerIds.includes(w.id)
+    );
+    if (ghosts.length) {
+      console.log(
+        style(
+          `  ${ghosts.length} stale DB worker(s) not in registry: ${ghosts.map((g) => g.id).join(", ")}`,
+          "dim"
+        )
       );
     }
     blank();
@@ -78,6 +98,9 @@ export async function runStatus(args: ParsedArgs): Promise<number> {
   if (snap.overall !== "healthy") {
     blank();
     console.log("Next");
+    if (snap.brokerBindings === 0) {
+      console.log("  gptmcp open   → New chat… or Assign URL…");
+    }
     console.log("  gptmcp doctor");
   }
 
@@ -123,8 +146,8 @@ function toJson(snap: SystemSnapshot): Record<string, unknown> {
       enabled: w.enabled !== false,
       recommendedAction: w.recommendedAction ?? null,
     })),
-    queue: snap.queue,
-    ports: snap.ports,
+    brokerBindings: snap.brokerBindings,
+    registryWorkerIds: snap.registryWorkerIds,
     dashboardUrl: snap.dashboardUrl,
   };
 }

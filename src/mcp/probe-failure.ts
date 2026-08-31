@@ -39,6 +39,13 @@ export function classifyProbeFailure(input: {
     return "MCP_SAFETY_BLOCKED";
   }
   if (
+    err.includes("platform's safety") ||
+    err.includes("platform safety") ||
+    (err.includes("tool call was blocked") && err.includes("safety"))
+  ) {
+    return "MCP_SAFETY_BLOCKED";
+  }
+  if (
     input.domHint === "approval_required" ||
     err.includes("mcp_approval_required") ||
     err.includes("mcp write confirmation") ||
@@ -79,7 +86,61 @@ export function probeFailureToReadiness(
   return reason;
 }
 
-export function probeFailureOperatorMessage(reason: ProbeMcpFailureReason): string {
+export function probeResultMatchesCanary(result: string, token: string): boolean {
+  const trimmed = result.trim();
+  const expected = `CREATE_WORKER_CANARY=${token}`;
+  if (trimmed === expected) return true;
+  return new RegExp(`CREATE_WORKER_CANARY=${token}(?:\\b|[^a-zA-Z0-9])`).test(
+    trimmed
+  );
+}
+
+/** Classify a COMPLETED SYSTEM_PROBE whose result is not the expected canary. */
+export function classifyCompletedProbeResult(result: string): ProbeMcpFailureReason {
+  const r = result.toLowerCase();
+  if (
+    r.includes("safety") &&
+    (r.includes("blocked") ||
+      r.includes("blocked by") ||
+      r.includes("safety checks"))
+  ) {
+    return "MCP_SAFETY_BLOCKED";
+  }
+  if (
+    r.includes("handoff_complete_probe") &&
+    (r.includes("not available") ||
+      r.includes("not exposed") ||
+      r.includes("toolset") ||
+      r.includes("tool is not"))
+  ) {
+    return "MCP_TOOL_NOT_INVOKED";
+  }
+  if (
+    r.includes("handoff_submit_result") &&
+    (r.includes("not available") || r.includes("not exposed"))
+  ) {
+    return "MCP_TOOL_NOT_INVOKED";
+  }
+  if (!r.includes("create_worker_canary=")) {
+    return "MCP_TOOL_NOT_INVOKED";
+  }
+  return "PROBE_RESULT_MISMATCH";
+}
+
+export function probeFailureOperatorMessage(
+  reason: ProbeMcpFailureReason,
+  detail?: string | null
+): string {
+  const d = (detail ?? "").toLowerCase();
+  if (
+    reason === "MCP_TOOL_NOT_INVOKED" &&
+    d.includes("handoff_complete_probe")
+  ) {
+    return (
+      "ChatGPT connector is missing handoff_complete_probe — run npm run build && gptmcp restart, " +
+      "then refresh the MCP connection in ChatGPT (or New chat)"
+    );
+  }
   switch (reason) {
     case "MCP_SAFETY_BLOCKED":
       return "MCP write blocked by OpenAI safety checks before remote-mcp (chat binding may still be OK)";
@@ -94,7 +155,10 @@ export function probeFailureOperatorMessage(reason: ProbeMcpFailureReason): stri
   }
 }
 
-export function probeFailureDashboardBanner(reason: ProbeMcpFailureReason): {
+export function probeFailureDashboardBanner(
+  reason: ProbeMcpFailureReason,
+  detail?: string | null
+): {
   title: string;
   body: string;
   action: string;
@@ -115,8 +179,12 @@ export function probeFailureDashboardBanner(reason: ProbeMcpFailureReason): {
     case "MCP_TOOL_NOT_INVOKED":
       return {
         title: "MCP tool not invoked",
-        body: "ChatGPT printed a reply without calling the MCP write tool.",
-        action: "Try <em>New chat…</em> or <em>Retry verify</em>.",
+        body: detail?.toLowerCase().includes("handoff_complete_probe")
+          ? "ChatGPT could not call handoff_complete_probe — connector likely stale."
+          : "ChatGPT printed a reply without calling the MCP write tool.",
+        action: detail?.toLowerCase().includes("handoff_complete_probe")
+          ? "<code>npm run build && gptmcp restart</code> then New chat or refresh MCP in ChatGPT."
+          : "Try <em>New chat…</em> or <em>Retry verify</em>.",
       };
     case "MCP_SUBMIT_TIMEOUT":
       return {

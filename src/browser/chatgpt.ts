@@ -253,13 +253,25 @@ export class ChatGptBrowser {
       .catch(() => false);
     if (allowVisible) return "approval_required";
 
+    const allowCard = await page
+      .getByText(/Allow ChatGPT to use/i)
+      .first()
+      .isVisible({ timeout: 400 })
+      .catch(() => false);
+    if (allowCard) return "approval_required";
+
     const assistantTexts = await page
       .locator('[data-message-author-role="assistant"]')
       .allTextContents()
       .catch(() => [] as string[]);
     const combined = assistantTexts.join("\n");
 
-    if (/blocked by openai.?s safety checks/i.test(combined)) {
+    if (
+      /blocked by (?:openai.?s|the platform.?s) safety checks/i.test(combined) ||
+      /safety checks blocked/i.test(combined) ||
+      (/tool call was blocked/i.test(combined) && /safety/i.test(combined)) ||
+      /unable to complete.*blocked by.*safety/i.test(combined)
+    ) {
       return "safety_blocked";
     }
 

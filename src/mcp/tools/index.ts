@@ -6,6 +6,7 @@ import {
   UNSCOPED_CLIENT_SESSION_ID,
 } from "../../tasks/task.types.js";
 import {
+  PROBE_ACK_TOOL_DESCRIPTION,
   PROBE_COMPLETE_TOOL_DESCRIPTION,
   PROBE_GET_TASK_SUBMIT_POLICY,
   SUBMIT_POLICY,
@@ -150,11 +151,14 @@ export function registerHandoffTools(
         mediaType: f.mediaType,
       }));
 
+      const rawContext = (task.context ?? {}) as Record<string, unknown>;
+      const { _probeToken: _ignored, ...publicContext } = rawContext;
+
       return jsonContent({
         taskId: task.id,
         type: task.type,
         prompt: task.prompt,
-        context: task.context ?? {},
+        context: publicContext,
         status: task.status,
         files,
         mustReadAttachedFiles:
@@ -204,6 +208,25 @@ export function registerHandoffTools(
         }
         throw new Error("FILE_NOT_ALLOWED");
       }
+    }
+  );
+
+  server.tool(
+    "handoff_ack",
+    PROBE_ACK_TOOL_DESCRIPTION,
+    {
+      taskId: taskIdSchema,
+    },
+    {
+      title: "Acknowledge system probe",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    async (args) => {
+      const output = taskService.completeProbeAck(args.taskId as string);
+      return jsonContent(output);
     }
   );
 

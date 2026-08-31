@@ -37,6 +37,7 @@ function validateTopologyOrThrow(
   opts?: { includeHttpPort?: boolean; allowSharedCdp?: boolean }
 ): ReturnType<typeof loadWorkersTopology> {
   const topology = loadWorkersTopology({
+    dbPath: config.dbPath,
     workersFile: config.workersFile,
     workerId: config.workerId,
     workerUrl: config.workerUrl,
@@ -118,14 +119,13 @@ async function startBrokerFromConfig(
   });
   if (topology.workers.length < 1) {
     throw new Error(
-      "browser-broker requires HANDOFF_WORKERS_FILE with ≥1 worker sharing one cdpEndpoint"
+      "browser-broker requires ≥1 worker in DB (worker_state) sharing one cdpEndpoint"
     );
   }
   const enabled = topology.workers.filter((w) => w.enabled !== false);
   if (enabled.length < 1) {
     throw new Error(
-      "No enabled workers in HANDOFF_WORKERS_FILE — browser-broker cannot start. " +
-        "Set enabled: true for at least one worker (dashboard Enable… or edit workers file)."
+      "No enabled workers in DB — enable via dashboard or register worker_state rows."
     );
   }
   const cdpEndpoint = enabled[0]?.cdpEndpoint ?? topology.workers[0]!.cdpEndpoint;

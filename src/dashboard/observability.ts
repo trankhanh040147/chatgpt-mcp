@@ -100,6 +100,33 @@ export interface WorkerIndicator {
   severity: "ok" | "warn" | "bad";
 }
 
+/** True when an in-flight handoff has exceeded normal dispatch/processing bounds. */
+export function isHandoffTaskStuck(
+  task: HandoffTask,
+  nowIso = new Date().toISOString(),
+  opts?: { longRunningMs?: number; dispatchingStuckMs?: number }
+): boolean {
+  const longMs = opts?.longRunningMs ?? 10 * 60_000;
+  const dispatchingMs = opts?.dispatchingStuckMs ?? 120_000;
+  const timing = taskTiming(task, nowIso);
+
+  if (task.status === "DISPATCHING") {
+    const age = timing.queueMs ?? msBetween(task.createdAt, nowIso);
+    return age != null && age > dispatchingMs;
+  }
+
+  if (
+    task.status === "DISPATCHED" ||
+    task.status === "PROCESSING" ||
+    task.status === "WAITING_APPROVAL"
+  ) {
+    const age = timing.processingAgeMs;
+    return age != null && age > longMs;
+  }
+
+  return false;
+}
+
 export function deriveWorkerIndicators(input: {
   status: WorkerStatus | string;
   healthy: boolean;

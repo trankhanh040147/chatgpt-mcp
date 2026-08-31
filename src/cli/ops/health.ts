@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import { initDatabase, getDatabase } from "../../db/sqlite.js";
+import { resolveWorkersFilePath } from "../../config/load-config.js";
 import type { AppConfig } from "../../config/load-config.js";
+import { loadWorkersTopology } from "../../config/workers-topology.js";
 import { statusBaseUrl, remoteMcpUrl } from "../context.js";
 
 export type ServiceState = "healthy" | "degraded" | "down" | "unknown";
@@ -13,6 +15,8 @@ export interface SystemSnapshot {
   overall: ServiceState;
   workers: WorkerSnapshot[];
   queue: QueueSnapshot;
+  brokerBindings: number;
+  registryWorkerIds: string[];
   ports: {
     http: number;
     remoteMcp: number;
@@ -106,21 +110,57 @@ function deriveOverall(parts: ServiceState[]): ServiceState {
   return "unknown";
 }
 
+function workerIsReady(w: {
+  id: string;
+  healthState?: string;
+  status?: string;
+}): boolean {
+  return w.healthState === "READY";
+}
+
+export function filterRegistryWorkers(
+  workers: WorkerSnapshot[],
+  registryIds: string[]
+): WorkerSnapshot[] {
+  const ids = new Set(registryIds);
+  return workers.filter((w) => ids.has(w.id));
+}
+
 export async function collectSystemSnapshot(
   config: AppConfig,
   brokerOpsPort: number
 ): Promise<SystemSnapshot> {
   const base = statusBaseUrl(config);
+  const workersFile = resolveWorkersFilePath(config.workersFile);
+  let registryWorkerIds: string[] = [];
+  try {
+    const topo = loadWorkersTopology({
+      dbPath: config.dbPath,
+      workersFile: config.workersFile,
+      workerId: config.workerId,
+      workerUrl: "",
+      cdpEndpoint: config.cdpEndpoint,
+    });
+    registryWorkerIds = topo.workers.map((w) => w.id);
+  } catch {
+    registryWorkerIds = [];
+  }
+
   const health = await fetchJson<{ ok?: boolean }>(`${base}/health`);
   const statusApi: ServiceState = health?.ok ? "healthy" : "down";
 
   const brokerStatus = await fetchJson<{
     healthy?: boolean;
     bindings?: unknown[];
+    registryWorkerIds?: string[];
   }>(`${base}/broker/status`);
   let broker: ServiceState = "down";
   if (brokerStatus?.healthy) broker = "healthy";
   else if (brokerStatus) broker = "degraded";
+  const brokerBindings = brokerStatus?.bindings?.length ?? 0;
+  if (brokerStatus?.registryWorkerIds?.length) {
+    registryWorkerIds = brokerStatus.registryWorkerIds;
+  }
 
   const remoteOk = await probeRemoteMcp(config);
   const remoteMcp: ServiceState = remoteOk ? "healthy" : "down";
@@ -173,11 +213,7 @@ export async function collectSystemSnapshot(
   }
 
   const workerStates = workers.map((w) =>
-    w.healthState === "READY" || (w.healthy && w.status === "READY")
-      ? "healthy"
-      : w.healthState === "OFFLINE" || w.status === "OFFLINE"
-        ? "down"
-        : "degraded"
+    workerIsReady(w) ? "healthy" : "down"
   ) as ServiceState[];
 
   const overall = deriveOverall([
@@ -199,6 +235,8 @@ export async function collectSystemSnapshot(
     overall,
     workers,
     queue: queueCounts(config.dbPath),
+    brokerBindings,
+    registryWorkerIds,
     ports: {
       http: config.httpPort,
       remoteMcp: config.remoteMcpPort,

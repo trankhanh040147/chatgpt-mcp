@@ -10,6 +10,10 @@ You have access to an external ChatGPT handoff system via MCP tools.
 
 Prefer the user skill `chatgpt-mcp` (`/chatgpt-mcp`). This rule is the **normative** handoff policy; the skill repeats the same invariants.
 
+## Browser automation debug (create-chat / + menu)
+
+For worker New chat, `attachCursorPlugin`, or ChatGPT UI freezes — use skill **`/chatgpt-mcp-browser-debugger`** and **Chrome DevTools MCP** (`chrome-devtools` in `.cursor/mcp.json`, `:9222`). Snapshot → interact → verify before editing `create-chat.ts`. Repo scripts: `npm run diagnose:plus-menu`, `npm run e2e:create-chat`.
+
 ## Handoff depth (pick one before any create)
 
 A **decision** is the bounded user/engineering choice being resolved. Related subquestions belong to the same decision; rephrasing does not reset the budget. One decision → at most **one** `handoff_create_task`. State the tier in one sentence before calling MCP.

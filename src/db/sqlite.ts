@@ -159,6 +159,30 @@ ON worker_operations(worker_id, state);
       "readiness_reason",
       "readiness_reason TEXT"
     );
+    addColumnIfMissing(
+      db,
+      "worker_state",
+      "mcp_read_verified_at",
+      "mcp_read_verified_at TEXT"
+    );
+    addColumnIfMissing(
+      db,
+      "worker_state",
+      "mcp_write_verified_at",
+      "mcp_write_verified_at TEXT"
+    );
+    addColumnIfMissing(
+      db,
+      "worker_state",
+      "mcp_write_status",
+      "mcp_write_status TEXT"
+    );
+    addColumnIfMissing(
+      db,
+      "worker_state",
+      "mcp_write_status_reason",
+      "mcp_write_status_reason TEXT"
+    );
   }
 
   if (version >= SCHEMA_USER_VERSION) {

@@ -5,8 +5,12 @@ import {
   loadWorkersTopology,
   validateWorkersTopology,
 } from "../../config/workers-topology.js";
-import { topologyAllowsSharedCdp } from "../../config/write-workers-topology.js";
+import { isAssignableWorkerUrl } from "../../browser/chat-url.js";
+import {
+  topologyAllowsSharedCdp,
+} from "../../config/write-workers-topology.js";
 import { isProbeMcpFailureReason } from "../../mcp/probe-failure.js";
+import { detectDbPathSplitBrain } from "../../config/load-config.js";
 import type { ParsedArgs } from "../args.js";
 import { hasFlag, wantsJson } from "../args.js";
 import { ExitCode } from "../exit-codes.js";
@@ -18,6 +22,7 @@ import {
 } from "../context.js";
 import {
   collectSystemSnapshot,
+  filterRegistryWorkers,
   probeCdp,
   probeRemoteMcp,
 } from "../ops/health.js";
@@ -55,8 +60,21 @@ export async function runDoctor(args: ParsedArgs): Promise<number> {
   });
   if (!distOk) issues.push("Project not built");
 
+  const dbSplit = detectDbPathSplitBrain(config.dbPath, repoRoot());
+  if (dbSplit) {
+    checks.push({ name: "DB path", ok: false, detail: "split-brain risk" });
+    issues.push(dbSplit);
+  } else {
+    checks.push({
+      name: "DB path",
+      ok: true,
+      detail: config.dbPath,
+    });
+  }
+
   try {
     const topology = loadWorkersTopology({
+      dbPath: config.dbPath,
       workersFile: workersFilePath(config),
       workerId: config.workerId,
       workerUrl: "",
@@ -70,6 +88,14 @@ export async function runDoctor(args: ParsedArgs): Promise<number> {
       ok: true,
       detail: `${topology.workers.length} worker(s) in registry`,
     });
+    const pending = topology.workers.filter(
+      (w) => !isAssignableWorkerUrl(w.workerUrl)
+    );
+    if (pending.length > 0) {
+      issues.push(
+        `Worker URL not assigned (${pending.map((w) => w.id).join(", ")}) — gptmcp open → New chat…`
+      );
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     checks.push({ name: "Configuration", ok: false, detail: msg });
@@ -119,10 +145,19 @@ export async function runDoctor(args: ParsedArgs): Promise<number> {
   checks.push({
     name: "Broker",
     ok: snap.broker === "healthy",
-    detail: `:${snap.ports.brokerOps}`,
+    detail: `:${snap.ports.brokerOps} · bindings=${snap.brokerBindings}`,
   });
+  if (snap.brokerBindings === 0 && snap.registryWorkerIds.length > 0) {
+    issues.push(
+      "Broker has no tab bindings — open dashboard → New chat… or Assign URL…"
+    );
+  }
 
-  for (const w of snap.workers) {
+  const registryWorkers = filterRegistryWorkers(
+    snap.workers,
+    snap.registryWorkerIds
+  );
+  for (const w of registryWorkers) {
     const ok = w.healthState === "READY";
     checks.push({
       name: `Worker ${w.id}`,

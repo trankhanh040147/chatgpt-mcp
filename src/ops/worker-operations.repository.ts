@@ -239,4 +239,15 @@ export class WorkerOperationsRepository {
       .get(workerId) as { ok: number } | undefined;
     return Boolean(row);
   }
+
+  /** Mark every in-flight op for a worker failed (remove / fleet purge). */
+  failAllActiveForWorker(workerId: string, message: string): string[] {
+    const active = this.listActiveForWorker(workerId);
+    const ids: string[] = [];
+    for (const op of active) {
+      this.update(op.id, { state: "FAILED", lastError: message });
+      ids.push(op.id);
+    }
+    return ids;
+  }
 }

@@ -16,11 +16,13 @@ import { DEFAULT_WORKER_ID, type HandoffTask } from "../tasks/task.types.js";
 import {
   dashboardContentMode,
   deriveWorkerIndicators,
+  isHandoffTaskStuck,
   redactPreview,
   sanitizeChatUrl,
   taskTiming,
 } from "../dashboard/observability.js";
-import { loadWorkersTopology } from "../config/workers-topology.js";
+import { loadWorkersTopology, workersTopologySource } from "../config/workers-topology.js";
+import { resolveWorkersFilePath } from "../config/load-config.js";
 import {
   isChatBudgetExhausted,
   parseMaxTasksPerChat,
@@ -49,6 +51,19 @@ import { resolveBrokerOpsPort } from "../ops/broker-ops-config.js";
 import { WorkerController } from "../ops/worker-controller.js";
 import { buildWorkerHealthRow } from "../ops/worker-health.js";
 import { nextWorkerId, upsertWorkerRegistryEntry } from "../config/write-workers-topology.js";
+
+const HTTP_API_BUILD_VERSION = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkgPath = join(here, "../../package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
+    return String(pkg.version ?? "unknown");
+  } catch {
+    return "unknown";
+  }
+})();
+
+const HTTP_API_GENERATION = `${process.pid}-${Date.now()}`;
 
 const OPS_BODY_MAX = 8_192;
 const PLAN_TTL_MS = 90_000;
@@ -223,6 +238,17 @@ function sleep(ms: number): Promise<void> {
 
 export function startHttpApi(options: HttpApiOptions): Promise<void> {
   initDatabase(options.dbPath);
+  log({
+    event: "INFO",
+    component: "http-api",
+    message: `HANDOFF_DB_PATH=${options.dbPath}`,
+    data: {
+      dbPath: options.dbPath,
+      port: options.port,
+      generation: HTTP_API_GENERATION,
+      buildVersion: HTTP_API_BUILD_VERSION,
+    },
+  });
   const repo = new TaskRepository(getDatabase());
   const taskService = new TaskService(repo);
   const viewWorkerId = options.workerId?.trim() || DEFAULT_WORKER_ID;
@@ -232,13 +258,15 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
     process.env.HANDOFF_WORKERS_FILE?.trim() ||
     "";
   const brokerClient = brokerOpsClientFromEnv();
-  const workerController =
-    brokerClient && workersFile
-      ? WorkerController.create({
+  const workerOpsReady =
+    brokerClient &&
+    (workersFile || workersTopologySource() === "db");
+  const workerController = workerOpsReady
+    ? WorkerController.create({
           taskRepo: repo,
           taskService,
-          broker: brokerClient,
-          workersFile,
+          broker: brokerClient!,
+          workersFile: workersFile || options.dbPath,
         })
       : null;
 
@@ -396,11 +424,15 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           usageTotals: usageBundleTotal(getDatabase(), since24h),
           costConfig: costMeta,
           referencePricingEnabled: costMeta?.referencePricingEnabled ?? false,
+          generation: HTTP_API_GENERATION,
+          buildVersion: HTTP_API_BUILD_VERSION,
+          dbPath: options.dbPath,
         });
         return;
       }
 
       if (req.method === "GET" && url.pathname === "/workers") {
+        repo.sweepStaleConsentRequired();
         const now = Date.now();
         const nowIso = new Date(now).toISOString();
         const staleMs = Number(process.env.HANDOFF_WORKER_STALE_MS ?? 120_000);
@@ -989,7 +1021,9 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
       }
 
       if (req.method === "GET" && url.pathname === "/workers/health") {
+        repo.sweepStaleConsentRequired();
         const now = Date.now();
+        const nowIso = new Date(now).toISOString();
         const staleMs = Number(process.env.HANDOFF_WORKER_STALE_MS ?? 120_000);
         let brokerStatus = null;
         let brokerReachable = false;
@@ -1000,22 +1034,48 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           }
         }
         const workerRows = repo.listWorkers();
+        let registryIds = new Set<string>();
+        try {
+          const topo = loadWorkersTopology({
+            dbPath: options.dbPath,
+            workersFile: workersFile || undefined,
+            workerId: viewWorkerId,
+            workerUrl: "",
+            cdpEndpoint: "",
+          });
+          registryIds = new Set(topo.workers.map((r) => r.id));
+        } catch {
+          registryIds = new Set();
+        }
         const workers = await Promise.all(
           workerRows.map(async (w) => {
+            const activeOp = workerController
+              ? workerController
+                  .listActiveOperations()
+                  .find((o) => o.workerId === w.id)
+              : undefined;
             const health = buildWorkerHealthRow({
               worker: w,
               brokerStatus,
               brokerReachable,
               staleMs,
               now,
+              activeOperation: activeOp
+                ? { state: activeOp.state, kind: activeOp.kind }
+                : null,
             });
-            const activeOp = workerController
-              ? workerController
-                  .listActiveOperations()
-                  .find((o) => o.workerId === w.id)
-              : undefined;
-            const stuckInFlightTaskId =
+            const inFlightTaskId =
               w.id === "default" ? null : repo.getInFlightTaskId(w.id);
+            let stuckInFlightTaskId: string | null = null;
+            if (inFlightTaskId) {
+              const inFlightTask = repo.getTaskById(inFlightTaskId);
+              if (
+                inFlightTask &&
+                isHandoffTaskStuck(inFlightTask, nowIso)
+              ) {
+                stuckInFlightTaskId = inFlightTaskId;
+              }
+            }
             let chatAccessDenied = false;
             let chatProbeReason: string | undefined;
             if (
@@ -1042,7 +1102,15 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
             }
             return {
               ...w,
+              inRegistry: w.id === "default" || registryIds.has(w.id),
+              mcpReadVerifiedAt: w.mcpReadVerifiedAt,
+              mcpWriteVerifiedAt: w.mcpWriteVerifiedAt,
+              mcpWriteStatus: w.mcpWriteStatus,
+              mcpWriteStatusReason: w.mcpWriteStatusReason,
               healthState: health.healthState,
+              operatorState: health.operatorState,
+              operatorAction: health.operatorAction,
+              operatorDetail: health.operatorDetail,
               conditions: health.conditions,
               recommendedAction: health.recommendedAction,
               indicators: health.indicators,
@@ -1058,6 +1126,7 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
                     updatedAt: activeOp.updatedAt,
                   }
                 : null,
+              inFlightTaskId,
               stuckInFlightTaskId,
             };
           })
@@ -1194,7 +1263,29 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
         const workerId = String(body.workerId ?? "").trim();
         await handleWorkerOpsPost(res, body, () =>
-          workerController!.retryVerify(workerId)
+          workerController!.continueConnection(workerId)
+        );
+        return;
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/ops/workers/continue-connection" &&
+        workerController
+      ) {
+        const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
+        if (gate) {
+          sendJson(res, 403, { error: gate });
+          return;
+        }
+        const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? "").trim();
+        if (!workerId) {
+          sendJson(res, 400, { error: "workerId required" });
+          return;
+        }
+        await handleWorkerOpsPost(res, body, () =>
+          workerController!.continueConnection(workerId)
         );
         return;
       }
@@ -1305,7 +1396,7 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
           return;
         }
         try {
-          workerController.removeWorker(workerId);
+          await workerController.removeWorker(workerId);
           rotateOpsCsrf();
           sendJson(res, 200, {
             ok: true,
@@ -1323,8 +1414,7 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
       if (
         req.method === "POST" &&
         url.pathname === "/ops/workers/add" &&
-        workerController &&
-        workersFile
+        workerController
       ) {
         const gate = requireOpsBrowser(req) ?? requireOpsCsrf(req);
         if (gate) {
@@ -1333,26 +1423,30 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
         }
         const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
         const topo = loadWorkersTopology({
-          workersFile,
+          dbPath: options.dbPath,
+          workersFile: workersFile || undefined,
           workerId: DEFAULT_WORKER_ID,
           workerUrl: "",
           cdpEndpoint: process.env.CHATGPT_CDP_ENDPOINT?.trim() || "",
         });
         const newId = nextWorkerId(topo.workers);
-        const cdp = topo.workers[0]?.cdpEndpoint ?? "";
+        const cdp =
+          topo.workers[0]?.cdpEndpoint ??
+          process.env.CHATGPT_CDP_ENDPOINT?.trim() ??
+          "http://127.0.0.1:9222";
         const placeholderUrl = `https://chatgpt.com/c/${randomUUID()}`;
-        upsertWorkerRegistryEntry({
-          filePath: workersFile,
-          entry: {
-            id: newId,
-            workerUrl: placeholderUrl,
-            cdpEndpoint: cdp,
-            enabled: true,
-          },
-        });
-        try {
-          repo.getWorkerState(newId);
-        } catch {
+        if (workersTopologySource() === "file" && workersFile) {
+          upsertWorkerRegistryEntry({
+            filePath: workersFile,
+            entry: {
+              id: newId,
+              workerUrl: placeholderUrl,
+              cdpEndpoint: cdp,
+              enabled: true,
+            },
+          });
+        }
+        if (!repo.findWorkerRegistryRow(newId)) {
           repo.registerWorkerInstance({
             workerId: newId,
             workerUrl: placeholderUrl,
@@ -1361,16 +1455,43 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
             staleMs: Number(process.env.HANDOFF_WORKER_STALE_MS ?? 120_000),
             pid: 0,
           });
+          repo.updateWorkerState(newId, "STARTING", {
+            error: "PENDING_SETUP: New chat required",
+          });
+        }
+        let operationId: string | undefined;
+        let autoCreateChatError: string | undefined;
+        if (workerController && brokerClient) {
+          try {
+            const reachable = await brokerClient.ping();
+            if (reachable) {
+              const op = workerController.createChat(newId);
+              operationId = op.operationId;
+            } else {
+              autoCreateChatError = "broker unreachable — start stack then New chat…";
+            }
+          } catch (err) {
+            autoCreateChatError =
+              err instanceof Error ? err.message : String(err);
+          }
         }
         rotateOpsCsrf();
-        sendJson(res, 200, { ok: true, workerId: newId, csrf: opsCsrf });
+        sendJson(res, 200, {
+          ok: true,
+          workerId: newId,
+          operationId,
+          autoCreateChat: Boolean(operationId),
+          autoCreateChatError,
+          csrf: opsCsrf,
+        });
         return;
       }
 
       if (req.method === "GET" && url.pathname === "/ops/topology") {
         try {
           const topology = loadWorkersTopology({
-            workersFile: process.env.HANDOFF_WORKERS_FILE,
+            dbPath: options.dbPath,
+            workersFile: resolveWorkersFilePath(workersFile),
             workerId:
               process.env.HANDOFF_WORKER_ID?.trim() || DEFAULT_WORKER_ID,
             workerUrl: process.env.HANDOFF_WORKER_URL?.trim() || "",
@@ -1388,6 +1509,7 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
             {
               source: topology.source,
               filePath: topology.filePath ?? null,
+              dbPath: topology.dbPath ?? null,
               workers: topology.workers.map((w) => {
                 const state = live.get(w.id);
                 return {

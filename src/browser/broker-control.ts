@@ -43,6 +43,8 @@ export interface StartBrokerControlServerOptions {
   broker: BrowserBroker;
   /** Spawn claim-loop actor after bind/rebind (recovery when startup bind raced CDP). */
   onWorkerBound?: (workerId: string) => void;
+  /** Stop page actor after fleet remove / unbind without restart. */
+  despawnWorkerActor?: (workerId: string) => void;
 }
 
 export function startBrokerControlServer(
@@ -67,6 +69,12 @@ export function startBrokerControlServer(
 
         if (req.method === "GET" && url.pathname === "/broker/status") {
           sendJson(res, 200, options.broker.getStatusSnapshot());
+          return;
+        }
+
+        if (req.method === "POST" && url.pathname === "/broker/reconcile") {
+          await options.broker.reconcileBindings();
+          sendJson(res, 200, { ok: true, ...options.broker.getStatusSnapshot() });
           return;
         }
 
@@ -115,6 +123,16 @@ export function startBrokerControlServer(
               return;
             }
             options.broker.cancelWorkerUi(workerId);
+            sendJson(res, 200, { ok: true });
+            return;
+          }
+
+          if (url.pathname === "/broker/despawn-actor") {
+            if (!workerId) {
+              sendJson(res, 400, { error: "workerId required" });
+              return;
+            }
+            options.despawnWorkerActor?.(workerId);
             sendJson(res, 200, { ok: true });
             return;
           }

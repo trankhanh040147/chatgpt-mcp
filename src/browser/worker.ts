@@ -192,6 +192,19 @@ export class BrowserWorker {
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        if (
+          this.isSharedCdp() &&
+          (message.includes("No broker binding") ||
+            message.includes(`Worker ${this.workerId} not found`))
+        ) {
+          log({
+            event: "INFO",
+            component: "browser-worker",
+            message: `Actor ${this.workerId} stopping: ${message}`,
+          });
+          this.running = false;
+          break;
+        }
         workerState.setStatus("ERROR", { error: message });
         await this.browser
           ?.screenshotOnFailure("worker-crash")
@@ -219,6 +232,18 @@ export class BrowserWorker {
 
   stop(): void {
     this.running = false;
+  }
+
+  /** Broker rebound this worker to a new tab — drop stale in-memory dispatch. */
+  clearActiveTaskForBindingChange(): void {
+    if (this.workerState) {
+      this.clearActiveTask(this.workerState);
+    } else {
+      this.activeTaskId = null;
+      this.activeLeaseToken = null;
+      this.activeTaskStartedAt = 0;
+      this.nudgeSent = false;
+    }
   }
 
   async close(): Promise<void> {
@@ -532,27 +557,38 @@ export class BrowserWorker {
       probeToken = m?.[1];
     }
 
-    if (isProbe && !generating) {
+    if (!generating) {
       const domHint = await browser.detectMcpDomHint(probeToken).catch(() => null);
-      if (domHint === "safety_blocked") {
-        taskService.failProbeClassified(
+      if (domHint === "approval_required") {
+        taskService.markWaitingApproval(taskId);
+        this.repo?.setReadinessReason(
+          this.workerId,
+          "MCP_APPROVAL_REQUIRED",
+          "Click Always allow in ChatGPT for the Cursor connector"
+        );
+        log({
+          event: "INFO",
+          component: "browser-worker",
           taskId,
-          "MCP_SAFETY_BLOCKED",
-          "OpenAI safety checks blocked MCP write before remote-mcp"
+          message: "MCP approval card visible — waiting for operator",
+        });
+        return;
+      }
+      if (isProbe && domHint === "safety_blocked") {
+        taskService.markMcpWriteDegraded(
+          taskId,
+          "PLATFORM_SAFETY: OpenAI blocked MCP write before remote-mcp"
         );
         this.clearActiveTask(workerState);
         log({
           event: "WARN",
           component: "browser-worker",
           taskId,
-          message: "Probe classified MCP_SAFETY_BLOCKED from ChatGPT DOM — skipping nudge",
+          message: "MCP write degraded (platform safety) — skipping nudge",
         });
         return;
       }
-      if (domHint === "approval_required") {
-        taskService.markWaitingApproval(taskId);
-      }
-      if (domHint === "canary_in_chat" && elapsed >= 15_000) {
+      if (isProbe && domHint === "canary_in_chat" && elapsed >= 15_000) {
         const classified = classifyProbeFailure({
           taskStatus: status,
           domHint: "canary_in_chat",
@@ -575,10 +611,19 @@ export class BrowserWorker {
           .detectMcpDomHint(probeToken)
           .catch(() => null);
         if (preNudgeHint === "safety_blocked") {
-          taskService.failProbeClassified(
+          taskService.markMcpWriteDegraded(
             taskId,
-            "MCP_SAFETY_BLOCKED",
-            "OpenAI safety checks blocked MCP write before remote-mcp"
+            "PLATFORM_SAFETY: OpenAI blocked MCP write before remote-mcp"
+          );
+          this.clearActiveTask(workerState);
+          return;
+        }
+      } else {
+        const preNudgeHint = await browser.detectMcpDomHint().catch(() => null);
+        if (preNudgeHint === "safety_blocked") {
+          taskService.markMcpWriteDegraded(
+            taskId,
+            "PLATFORM_SAFETY: OpenAI blocked MCP write before remote-mcp"
           );
           this.clearActiveTask(workerState);
           return;

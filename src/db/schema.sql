@@ -75,7 +75,11 @@ CREATE TABLE IF NOT EXISTS worker_state (
     tasks_on_chat_url TEXT,
     previous_worker_url TEXT,
     chat_rotated_at TEXT,
-    readiness_reason TEXT
+    readiness_reason TEXT,
+    mcp_read_verified_at TEXT,
+    mcp_write_verified_at TEXT,
+    mcp_write_status TEXT,
+    mcp_write_status_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS worker_chat_dispatch (

@@ -11,7 +11,16 @@ if [[ ! -f dist/index.js ]]; then
   exit 1
 fi
 
-export HANDOFF_WORKERS_FILE="${HANDOFF_WORKERS_FILE:-${CHATGPT_MCP_HOME:-$HOME/.chatgpt-mcp}/data/workers.json}"
+# Worker topology SSOT: SQLite worker_state (default). Legacy JSON only when
+# HANDOFF_WORKERS_SOURCE=file or HANDOFF_WORKERS_FILE is set explicitly.
+export HANDOFF_DB_PATH="${HANDOFF_DB_PATH:-$ROOT/data/handoff.sqlite}"
+if [[ "${HANDOFF_WORKERS_SOURCE:-}" == "file" ]]; then
+  export HANDOFF_WORKERS_FILE="${HANDOFF_WORKERS_FILE:-${CHATGPT_MCP_HOME:-$HOME/.chatgpt-mcp}/data/workers.json}"
+elif [[ -n "${HANDOFF_WORKERS_FILE:-}" ]]; then
+  export HANDOFF_WORKERS_FILE
+else
+  unset HANDOFF_WORKERS_FILE
+fi
 
 # Shared broker control token — status-api must match browser-broker (see HANDOFF_BROKER_OPS_TOKEN).
 export HANDOFF_BROKER_OPS_PORT="${HANDOFF_BROKER_OPS_PORT:-18788}"
@@ -25,10 +34,15 @@ if [[ -z "${HANDOFF_BROKER_OPS_TOKEN:-}" ]]; then
   fi
 fi
 
-if [[ ! -f "$HANDOFF_WORKERS_FILE" ]]; then
-  echo "Missing $HANDOFF_WORKERS_FILE" >&2
-  echo "Run: npm run setup  (or ./scripts/install.sh) to seed workers.json" >&2
-  echo "Template: docs/workers.example.a1s.json" >&2
+if [[ -n "${HANDOFF_WORKERS_FILE:-}" ]]; then
+  if [[ ! -f "$HANDOFF_WORKERS_FILE" ]]; then
+    echo "Missing $HANDOFF_WORKERS_FILE" >&2
+    echo "Run: npm run setup  (or set HANDOFF_WORKERS_SOURCE=db for SQLite-only)" >&2
+    exit 1
+  fi
+elif [[ ! -f "$HANDOFF_DB_PATH" ]]; then
+  echo "Missing $HANDOFF_DB_PATH" >&2
+  echo "Run: gptmcp setup  or dashboard Add worker (DB registry)" >&2
   exit 1
 fi
 
@@ -64,6 +78,27 @@ preflight_broker_port() {
   exit 1
 }
 
+preflight_status_api_port() {
+  local port="${HANDOFF_HTTP_PORT:-8787}"
+  local listener
+  listener="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+  if [[ -z "$listener" ]]; then
+    return 0
+  fi
+  local cmd
+  cmd="$(ps -p "$listener" -o command= 2>/dev/null || true)"
+  if [[ "$cmd" == *"dist/index.js"* && "$cmd" == *"status-api"* ]]; then
+    kill "$listener" 2>/dev/null || true
+    sleep 1
+    return 0
+  fi
+  echo "ERROR: HANDOFF_HTTP_PORT=$port already in use (pid $listener)" >&2
+  echo "  $cmd" >&2
+  echo "Stop that process or set HANDOFF_HTTP_PORT to a free port." >&2
+  exit 1
+}
+
+preflight_status_api_port
 preflight_broker_port
 
 wait_for_cdp() {
@@ -106,8 +141,11 @@ echo "status-api supervise → pid $status_sup_pid"
 
 wait_for_cdp
 
-start_named browser-broker browser-broker \
-  HANDOFF_WORKERS_FILE="$HANDOFF_WORKERS_FILE"
+broker_exports=( "HANDOFF_DB_PATH=$HANDOFF_DB_PATH" )
+if [[ -n "${HANDOFF_WORKERS_FILE:-}" ]]; then
+  broker_exports+=( "HANDOFF_WORKERS_FILE=$HANDOFF_WORKERS_FILE" )
+fi
+start_named browser-broker browser-broker "${broker_exports[@]}"
 
 sleep 2
 curl -sf "http://127.0.0.1:8787/health" && echo || echo "status-api not healthy yet"
@@ -132,5 +170,9 @@ else
   echo "broker ops not reachable (:${HANDOFF_BROKER_OPS_PORT}) — check $LOG_DIR/browser-broker.log and port conflict (lsof -i :${HANDOFF_BROKER_OPS_PORT})"
 fi
 curl -sf "http://127.0.0.1:8787/workers" | head -c 300 && echo "…" || echo "workers not ready yet"
-echo "Done. HANDOFF_WORKERS_FILE=$HANDOFF_WORKERS_FILE (A1-S broker)"
+if [[ -n "${HANDOFF_WORKERS_FILE:-}" ]]; then
+  echo "Done. HANDOFF_WORKERS_FILE=$HANDOFF_WORKERS_FILE (legacy JSON registry)"
+else
+  echo "Done. HANDOFF_DB_PATH=$HANDOFF_DB_PATH (worker registry in SQLite)"
+fi
 echo "Broker token: $LOG_DIR/broker-ops.token (status-api reads this automatically)"

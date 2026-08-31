@@ -160,13 +160,20 @@ function healthStateClass(state) {
     case "READY":
       return "ok";
     case "DEGRADED":
+    case "STARTING":
+    case "ACTION_REQUIRED":
       return "warn";
     case "BLOCKED":
     case "OFFLINE":
+    case "ERROR":
       return "bad";
     default:
       return "warn";
   }
+}
+
+function operatorStateClass(state) {
+  return healthStateClass(state);
 }
 
 function mergeWorkerRows(baseWorkers, healthWorkers) {
@@ -184,39 +191,63 @@ function formatConditions(conditions) {
     .join(" · ");
 }
 
-const MCP_PROBE_BANNERS = {
-  MCP_SAFETY_BLOCKED: {
-    title: "MCP safety blocked",
-    body: "Chat binding OK — OpenAI blocked the write tool before remote-mcp.",
-    action: "Try <em>New chat…</em> for a fresh conversation.",
+const MCP_WRITE_BANNERS = {
+  DEGRADED: {
+    title: "MCP write degraded",
+    body: "ChatGPT blocked the write tool before it reached chatgpt-mcp. Browser and binding remain healthy.",
+    action:
+      "<em>Retry once</em> or <em>New chat…</em>. Refresh connector actions in Workspace → Apps if tools changed.",
     border: "rgba(200,120,48,.45)",
     bg: "rgba(200,120,48,.08)",
   },
+};
+
+function renderMcpConnectorBanner(w) {
+  if (w.mcpWriteVerifiedAt || w.mcpWriteStatus === "DEGRADED") return "";
+  if (w.readinessReason === "MCP_APPROVAL_REQUIRED") {
+    return `<div class="worker-op-banner" style="border-color:rgba(80,160,220,.45);background:rgba(80,160,220,.1)"><strong>MCP approval required</strong> — In the worker chat tab, click <strong>Always allow</strong> on the Cursor connector prompt, then <em>Continue</em> here.</div>`;
+  }
+  if (w.operatorState === "READY" || w.healthState === "READY") {
+    return `<div class="worker-op-banner" style="border-color:rgba(80,160,220,.35);background:rgba(80,160,220,.08)"><strong>Connector handshake</strong> — Worker tab should show <code>TASK_ID=ho_…</code>. When ChatGPT asks <em>Allow ChatGPT to use Cursor?</em>, click <strong>Always allow</strong>.</div>`;
+  }
+  return "";
+}
+
+function renderMcpWriteBanner(w) {
+  if (w.mcpWriteStatus !== "DEGRADED") return "";
+  const spec = MCP_WRITE_BANNERS.DEGRADED;
+  const detail = w.mcpWriteStatusReason
+    ? ` (${String(w.mcpWriteStatusReason).slice(0, 120)})`
+    : "";
+  return `<div class="worker-op-banner" style="border-color:${spec.border};background:${spec.bg}"><strong>${escapeHtml(spec.title)}</strong> — ${escapeHtml(spec.body)}${escapeHtml(detail)} ${spec.action}</div>`;
+}
+
+const MCP_PROBE_BANNERS = {
   MCP_APPROVAL_REQUIRED: {
     title: "MCP approval required",
     body: "Approve handoff MCP writes in ChatGPT.",
-    action: "<em>Retry verify</em> after allowing the tool.",
+    action: "Click <em>Continue</em> after allowing the tool.",
     border: "rgba(200,120,48,.45)",
     bg: "rgba(200,120,48,.08)",
   },
   MCP_TOOL_NOT_INVOKED: {
     title: "MCP tool not invoked",
     body: "ChatGPT replied in chat without calling the MCP write tool.",
-    action: "<em>New chat…</em> or <em>Retry verify</em>.",
+    action: "<em>New chat…</em> or <em>Continue</em>.",
     border: "rgba(200,120,48,.45)",
     bg: "rgba(200,120,48,.08)",
   },
   MCP_SUBMIT_TIMEOUT: {
     title: "MCP submit timeout",
     body: "No MCP write reached remote-mcp in the verification window.",
-    action: "Check connector permissions; <em>Retry verify</em> or <em>New chat…</em>.",
+    action: "Check connector permissions; <em>Continue</em> or <em>New chat…</em>.",
     border: "rgba(200,120,48,.45)",
     bg: "rgba(200,120,48,.08)",
   },
   PROBE_RESULT_MISMATCH: {
     title: "Probe result mismatch",
     body: "remote-mcp received a submit but the canary did not match.",
-    action: "<em>Retry verify</em> or <em>New chat…</em>.",
+    action: "<em>Continue</em> or <em>New chat…</em>.",
     border: "rgba(200,120,48,.45)",
     bg: "rgba(200,120,48,.08)",
   },
@@ -225,7 +256,19 @@ const MCP_PROBE_BANNERS = {
 function renderMcpProbeBanner(w) {
   const spec = MCP_PROBE_BANNERS[w.readinessReason];
   if (!spec) return "";
-  return `<div class="worker-op-banner" style="border-color:${spec.border};background:${spec.bg}"><strong>${escapeHtml(spec.title)}</strong> — ${escapeHtml(spec.body)} ${spec.action}</div>`;
+  let body = spec.body;
+  let action = spec.action;
+  const err = String(w.error ?? "");
+  if (
+    w.readinessReason === "MCP_TOOL_NOT_INVOKED" &&
+    /handoff_complete_probe/i.test(err)
+  ) {
+    body =
+      "ChatGPT could not call handoff_complete_probe — remote-mcp likely stale.";
+    action =
+      "<code>npm run build && gptmcp restart</code> then <em>New chat…</em> (refresh MCP in ChatGPT).";
+  }
+  return `<div class="worker-op-banner" style="border-color:${spec.border};background:${spec.bg}"><strong>${escapeHtml(spec.title)}</strong> — ${escapeHtml(body)} ${action}</div>`;
 }
 
 function workerNeedsUrlAssign(w) {
@@ -239,56 +282,49 @@ function workerNeedsUrlAssign(w) {
 }
 
 function workerOpsBlocked(w) {
-  return Boolean(w.activeOperation || w.stuckInFlightTaskId);
+  return Boolean(w.activeOperation || w.inFlightTaskId);
 }
 
-/** Which worker action buttons to show — varies by healthState / readiness. */
+/** Which worker action buttons to show — driven by operatorAction / operatorState. */
 function deriveWorkerActionBar(w, opts = {}) {
   const stuck = workerOpsBlocked(w);
-  const blocked = w.healthState === "BLOCKED";
+  const opState = w.operatorState ?? w.healthState;
+  const action = w.operatorAction;
   const sessionLost = w.status === "SESSION_LOST";
-  const needsRetry =
+
+  const showContinue =
+    action === "CONTINUE" ||
     w.recommendedAction === "RETRY_VERIFY" ||
     w.readinessReason === "CONSENT_REQUIRED" ||
     w.readinessReason === "MCP_APPROVAL_REQUIRED";
 
-  if (blocked) {
-    return {
-      clearStuck: stuck,
-      retry: needsRetry && !sessionLost,
-      recreate: sessionLost || w.recommendedAction === "RECREATE_CHAT",
-      assign: true,
-      newChat: false,
-      toggle: false,
-      remove: opts.canRemove,
-    };
-  }
+  const showRecreate =
+    action === "NEW_CHAT" ||
+    action === "RECREATE_CHAT" ||
+    sessionLost ||
+    w.recommendedAction === "RECREATE_CHAT";
 
-  const mcpDegraded =
-    w.healthState === "DEGRADED" &&
-    w.readinessReason &&
-    String(w.readinessReason).startsWith("MCP_");
+  const showAssign = action === "ASSIGN_URL" || workerNeedsUrlAssign(w);
 
-  if (mcpDegraded) {
-    return {
-      clearStuck: stuck,
-      retry: true,
-      recreate: w.recommendedAction === "RECREATE_CHAT",
-      assign: workerNeedsUrlAssign(w),
-      newChat: true,
-      toggle: true,
-      remove: opts.canRemove && !stuck,
-    };
-  }
+  const showClearStuck =
+    stuck && Boolean(w.stuckInFlightTaskId) && !showContinue && opState !== "STARTING";
+
+  const showNewChat =
+    opState === "READY" ||
+    opState === "DEGRADED" ||
+    opState === "ERROR" ||
+    action === "NEW_CHAT" ||
+    workerNeedsUrlAssign(w) ||
+    !w.pidAlive;
 
   return {
-    clearStuck: stuck,
-    retry: needsRetry,
-    recreate: sessionLost || w.recommendedAction === "RECREATE_CHAT",
-    assign: true,
-    newChat: true,
-    toggle: true,
-    remove: opts.canRemove && !stuck,
+    clearStuck: showClearStuck,
+    continue: showContinue && opState !== "STARTING",
+    recreate: showRecreate,
+    assign: showAssign,
+    newChat: showNewChat,
+    toggle: opState !== "STARTING" && opState !== "ERROR",
+    remove: (opts.canRemove && !stuck) || !w.inRegistry,
   };
 }
 
@@ -307,15 +343,18 @@ function renderWorkerActions(w, opts = {}) {
       `<button type="button" class="danger" data-worker-action="kill" data-worker-id="${id}">Recreate chat…</button>`
     );
   }
-  if (bar.retry) {
+  if (bar.continue) {
     parts.push(
-      `<button type="button" class="primary" data-worker-action="retry" data-worker-id="${id}">Retry verify</button>`
+      `<button type="button" class="primary" data-worker-action="continue" data-worker-id="${id}" title="One verification attempt after MCP approval">Continue</button>`
     );
   }
   if (bar.assign) {
     const assignPrimary = workerNeedsUrlAssign(w);
+    const assignTitle = w.activeOperation
+      ? `Cancels active ${w.activeOperation.kind} ${w.activeOperation.state} and assigns new URL`
+      : "";
     parts.push(
-      `<button type="button" data-worker-action="assign" data-worker-id="${id}"${assignPrimary ? " class=\"primary\"" : ""}>Assign URL…</button>`
+      `<button type="button" data-worker-action="assign" data-worker-id="${id}"${assignPrimary ? " class=\"primary\"" : ""}${assignTitle ? ` title="${escapeHtml(assignTitle)}"` : ""}>Assign URL…</button>`
     );
   }
   if (bar.newChat) {
@@ -337,8 +376,15 @@ function renderWorkerActions(w, opts = {}) {
   return parts.join("");
 }
 
-function formatActiveOperation(op) {
+function formatActiveOperation(op, operatorState) {
   if (!op) return "";
+  if (operatorState === "STARTING") {
+    return `<div class="worker-op-banner worker-op-banner--active">
+    <span class="worker-op-label">Status</span>
+    <strong>Connecting…</strong>
+    <span class="muted">opening CDP tab · attaching Cursor · bootstrap</span>
+  </div>`;
+  }
   const err = op.lastError
     ? `<span class="worker-op-error">${escapeHtml(op.lastError)}</span>`
     : "";
@@ -368,7 +414,7 @@ function renderWorkerAlert(workers, healthMeta) {
   if (lost.length > 0) {
     const names = lost.map((w) => w.id).join(", ");
     messages.push(
-      `<strong>Session lost</strong> on ${escapeHtml(names)} — log into ChatGPT in the CDP window, then <em>Recreate chat…</em> or <em>Retry verify</em>.`
+      `<strong>Session lost</strong> on ${escapeHtml(names)} — log into ChatGPT in the CDP window, then <em>Recreate chat…</em> or <em>Continue</em>.`
     );
   }
   const stuck = (workers ?? []).filter(
@@ -390,10 +436,17 @@ function renderWorkerAlert(workers, healthMeta) {
       `<strong>URL / binding mismatch</strong> on ${escapeHtml(urlMismatch.map((w) => w.id).join(", "))} — start broker first, then <em>Assign URL…</em> with a chat from CDP Chrome.`
     );
   }
-  if (stuck.length > 0 && healthMeta?.brokerReachable === false) {
-    messages.push(
-      `Active ops on ${escapeHtml(stuck.map((w) => w.id).join(", "))} will retry every few seconds or use <em>Cancel stuck op</em> on the worker card.`
-    );
+  if (stuck.length > 0) {
+    const names = escapeHtml(stuck.map((w) => w.id).join(", "));
+    if (healthMeta?.brokerReachable) {
+      messages.push(
+        `<strong>Worker op in flight</strong> on ${names} — <em>Assign URL…</em> cancels it automatically, or use <em>Clear stuck</em>.`
+      );
+    } else {
+      messages.push(
+        `Active ops on ${names} will retry when broker is up, or use <em>Clear stuck</em> on the worker card.`
+      );
+    }
   }
   if (messages.length === 0) {
     workerAlert.classList.add("hidden");
@@ -412,9 +465,14 @@ async function beginWorkerAssign(workerId) {
   const row = (state.workers ?? []).find((w) => w.id === workerId);
   const currentUrl =
     row?.chatUrl ?? row?.workerUrl ?? "https://chatgpt.com/c/";
+  const activeOp = row?.activeOperation;
+  const supersedeNote = activeOp
+    ? `Active worker op (${activeOp.kind} ${activeOp.state}) will be cancelled automatically.\n`
+    : "";
   openOpsModal({
     title: `Assign URL · ${workerId}`,
     preview:
+      supersedeNote +
       "Updates workers.json, binds the broker tab, and runs SYSTEM_PROBE until READY.",
     typedConfirm: false,
     showUrlField: true,
@@ -433,9 +491,10 @@ async function beginWorkerCreate(workerId) {
   openOpsModal({
     title: `Create chat · ${workerId}`,
     preview:
-      "Broker opens a new tab in CDP Chrome, switches to Chat, attaches Cursor from + menu, sends bootstrap → /c/ URL → probe.\n" +
-      "Any stuck handoff or prior worker op on this card is cleared automatically.\n" +
-      "If + menu does not list Cursor: attach manually in CDP, then use Assign URL instead.",
+      "Opens a new CDP tab, types <code>@Cursor</code> → Enter, sends bootstrap OK.\n" +
+      "Bootstrap OK often gets only a 👍 — that is normal. Worker then dispatches connector handshake (<code>TASK_ID=…</code>).\n" +
+      "Click <strong>Always allow</strong> when ChatGPT asks to use Cursor MCP write tools.\n" +
+      "Stuck handoff / prior worker op on this card is cleared automatically.",
     typedConfirm: false,
     pending: { kind: "worker-create", typedConfirm: false, workerId },
   });
@@ -495,7 +554,10 @@ async function beginAddWorker() {
   openOpsModal({
     title: "Add worker",
     preview:
-      "Append a new worker id to workers.json with placeholder URL; assign real chat URL afterward.",
+      "Registers a new worker in the DB, then automatically runs <strong>New chat…</strong> " +
+      "(opens a CDP Chrome tab, attaches Cursor, bootstrap OK).\n" +
+      "Watch the worker card — status becomes <em>Connecting…</em> while the tab opens.\n" +
+      "Then click <strong>Always allow</strong> when ChatGPT prompts for the Cursor connector.",
     typedConfirm: false,
     pending: { kind: "worker-add", typedConfirm: false },
   });
@@ -545,11 +607,11 @@ async function runWorkerCancel(workerId) {
   }
 }
 
-async function runWorkerRetry(workerId) {
+async function runWorkerContinue(workerId) {
   if (opsInFlight) return;
   opsInFlight = true;
   try {
-    const result = await postOps("/ops/workers/retry-verify", { workerId });
+    const result = await postOps("/ops/workers/continue-connection", { workerId });
     showOpsResult(result);
     await tick();
   } catch (err) {
@@ -557,6 +619,10 @@ async function runWorkerRetry(workerId) {
   } finally {
     opsInFlight = false;
   }
+}
+
+async function runWorkerRetry(workerId) {
+  return runWorkerContinue(workerId);
 }
 
 function pillClass(status, healthy) {
@@ -882,7 +948,12 @@ async function executePendingOps() {
     } else if (pendingOps.kind === "worker-add") {
       const result = await postOps("/ops/workers/add", {});
       closeOpsModal();
-      showOpsResult(result);
+      const note = result.autoCreateChat
+        ? `Auto New chat started (op ${result.operationId ?? "—"}). Watch CDP Chrome and this card.`
+        : result.autoCreateChatError
+          ? `Worker added but New chat did not start: ${result.autoCreateChatError}`
+          : "Worker added — click New chat… on the card if no tab opens.";
+      showOpsResult({ ...result, note });
       await loadTopology();
       await tick();
     } else if (pendingOps.kind === "worker-remove") {
@@ -1110,21 +1181,34 @@ function renderWorkers(workers, showReference) {
           })}
         </div>`
         : `<div class="row"><span class="muted">Tokens 24h</span><span class="mono">${escapeHtml(formatEstimatedTokens(w.usage?.last24h?.estimatedTokens) || "—")}</span></div>`;
-      return `<article class="card ${kind}">
+      const opState = w.operatorState ?? w.healthState;
+      const opClass = operatorStateClass(opState);
+      const opBusy =
+        opState === "STARTING" ||
+        (w.activeOperation &&
+          w.activeOperation.state !== "SUCCEEDED" &&
+          w.activeOperation.state !== "FAILED");
+      return `<article class="card ${kind}${opBusy ? " worker-card-busy" : ""}">
         <div class="card-head">
           <h3>${escapeHtml(w.id)}</h3>
-          <span class="pill ${kind}">${escapeHtml(w.status)}</span>
+          ${opState ? `<span class="pill ${opClass} health-state">${escapeHtml(opState)}</span>` : `<span class="pill ${kind}">${escapeHtml(w.status)}</span>`}
         </div>
-        ${w.healthState ? `<div class="row"><span class="muted">Ops health</span><span class="pill ${healthStateClass(w.healthState)} health-state">${escapeHtml(w.healthState)}</span></div>` : ""}
-        ${formatActiveOperation(w.activeOperation)}
-        ${w.stuckInFlightTaskId ? `<div class="worker-op-banner worker-stuck-banner"><strong>Handoff stuck</strong> — <code>${escapeHtml(w.stuckInFlightTaskId)}</code>${w.activeOperation ? " · worker op in flight" : ""}. Click <em>Clear stuck</em>.</div>` : ""}
+        ${w.operatorDetail && opState !== "READY" ? `<div class="row"><span class="muted">Detail</span><span class="muted" style="font-size:12px">${escapeHtml(w.operatorDetail)}</span></div>` : ""}
+        ${formatActiveOperation(w.activeOperation, opState)}
+        ${w.inRegistry === false ? `<div class="worker-op-banner" style="border-color:rgba(200,72,48,.45);background:rgba(200,72,48,.08)"><strong>Not in workers registry</strong> — ghost row in DB only. Use <em>Remove…</em> to purge.</div>` : ""}
+        ${w.stuckInFlightTaskId ? `<div class="worker-op-banner worker-stuck-banner"><strong>Handoff stuck</strong> — <code>${escapeHtml(w.stuckInFlightTaskId)}</code>${w.activeOperation ? " · worker op in flight" : ""}. Use <em>Clear stuck</em> if Continue does not help.</div>` : w.inFlightTaskId ? `<div class="worker-op-banner" style="border-color:rgba(80,160,220,.35);background:rgba(80,160,220,.08)"><strong>Handoff in progress</strong> — <code>${escapeHtml(w.inFlightTaskId)}</code></div>` : ""}
         ${w.chatAccessDenied ? `<div class="worker-op-banner" style="border-color:rgba(200,72,48,.45);background:rgba(200,72,48,.08)"><strong>Chat access denied</strong> — use <em>Assign URL…</em> with a chat from CDP Chrome.</div>` : ""}
         ${w.readinessReason === "ROTATION_PENDING" ? `<div class="worker-op-banner" style="border-color:rgba(200,72,48,.45);background:rgba(200,72,48,.08)"><strong>Rotation in progress</strong> — wait for the op banner or <em>Cancel stuck op</em>.</div>` : ""}
         ${w.readinessReason === "ROTATION_FAILED" ? `<div class="worker-op-banner" style="border-color:rgba(200,120,48,.45);background:rgba(200,120,48,.08)"><strong>Rotation failed</strong> — binding or registry step failed; retry <em>Assign URL…</em> or <em>New chat…</em>.</div>` : ""}
+        ${w.operatorState === "DEGRADED" && w.operatorAction === "NEW_CHAT" ? `<div class="worker-op-banner" style="border-color:rgba(200,120,48,.45);background:rgba(200,120,48,.08)"><strong>Tab unbound or drifted</strong> — use <em>New chat…</em> on this card (same <code>@Cursor</code> flow as <code>e2e:create-chat</code>).</div>` : ""}
+        ${renderMcpConnectorBanner(w)}
+        ${renderMcpWriteBanner(w)}
         ${renderMcpProbeBanner(w)}
         <div class="row"><span class="muted">Health</span><span>${w.healthy ? "Healthy" : "Unhealthy"}</span></div>
         <div class="row"><span class="muted">PID</span><span>${w.pidAlive ? `${w.pid ?? "—"} · alive` : "dead"}</span></div>
         <div class="row"><span class="muted">Heartbeat</span><span>${w.heartbeatStale ? "stale" : "fresh"} · ${age(w.lastSeenAt)}</span></div>
+        <div class="row"><span class="muted">MCP read</span><span>${w.mcpReadVerifiedAt ? escapeHtml(age(w.mcpReadVerifiedAt)) + " ago" : "unverified"}</span></div>
+        <div class="row"><span class="muted">MCP write</span><span>${w.mcpWriteVerifiedAt ? escapeHtml(age(w.mcpWriteVerifiedAt)) + " ago" : w.mcpWriteStatus === "DEGRADED" ? "degraded" : "unverified"}</span></div>
         <div class="row"><span class="muted">Current task</span><span class="mono" title="${escapeHtml(w.currentTaskId ?? "")}">${escapeHtml(task)}</span></div>
         <div class="row"><span class="muted">Chat budget</span><span class="mono">${w.tasksOnChat ?? 0}/${w.maxTasksPerChat ?? "—"}</span></div>
         <div class="row"><span class="muted">Completed 24h</span><span>${w.completedLast24h ?? 0}</span></div>
@@ -1215,6 +1299,7 @@ function renderHints(workers, health) {
 
   const blocked = live.filter(
     (w) =>
+      w.operatorState === "ACTION_REQUIRED" ||
       w.healthState === "BLOCKED" ||
       w.readinessReason === "CONSENT_REQUIRED" ||
       w.readinessReason === "MCP_APPROVAL_REQUIRED" ||
@@ -1223,12 +1308,12 @@ function renderHints(workers, health) {
   if (blocked.length > 0) {
     hints.push({
       kind: "warn",
-      text: `Worker ops: ${blocked.map((w) => w.id).join(", ")} need dashboard action (consent / session / bind)`,
+      text: `Worker ops: ${blocked.map((w) => w.id).join(", ")} need dashboard action — use Continue after MCP approval`,
     });
   }
 
   const mcpDegraded = live.filter((w) =>
-    w.healthState === "DEGRADED" &&
+    w.operatorState === "DEGRADED" &&
     w.readinessReason &&
     String(w.readinessReason).startsWith("MCP_")
   );
@@ -1239,7 +1324,9 @@ function renderHints(workers, health) {
     });
   }
 
-  const readyN = live.filter((w) => w.healthState === "READY").length;
+  const readyN = live.filter(
+    (w) => w.operatorState === "READY" || w.healthState === "READY"
+  ).length;
   if (readyN > 0 && readyN === live.length) {
     hints.push({
       kind: "ok",
@@ -1536,7 +1623,7 @@ workersEl.addEventListener("click", (ev) => {
   else if (action === "clear-stuck") void runWorkerClearStuck(workerId);
   else if (action === "cancel") void runWorkerClearStuck(workerId);
   else if (action === "fail-stuck") void runWorkerClearStuck(workerId);
-  else if (action === "retry") void runWorkerRetry(workerId);
+  else if (action === "continue" || action === "retry") void runWorkerContinue(workerId);
   else if (action === "toggle") {
     const enable = btn.getAttribute("data-enabled") === "1";
     void beginWorkerToggle(workerId, enable);

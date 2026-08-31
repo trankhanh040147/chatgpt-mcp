@@ -89,6 +89,10 @@ interface WorkerRow {
   previous_worker_url: string | null;
   chat_rotated_at: string | null;
   readiness_reason: string | null;
+  mcp_read_verified_at: string | null;
+  mcp_write_verified_at: string | null;
+  mcp_write_status: string | null;
+  mcp_write_status_reason: string | null;
 }
 
 const MAX_DISPATCH_RETRIES = 3;
@@ -145,6 +149,11 @@ function rowToWorker(row: WorkerRow): WorkerStateRow {
     chatRotatedAt: row.chat_rotated_at ?? undefined,
     readinessReason: (row.readiness_reason as WorkerStateRow["readinessReason"]) ??
       undefined,
+    mcpReadVerifiedAt: row.mcp_read_verified_at ?? undefined,
+    mcpWriteVerifiedAt: row.mcp_write_verified_at ?? undefined,
+    mcpWriteStatus: (row.mcp_write_status as WorkerStateRow["mcpWriteStatus"]) ??
+      undefined,
+    mcpWriteStatusReason: row.mcp_write_status_reason ?? undefined,
   };
 }
 
@@ -241,6 +250,45 @@ export class TaskRepository {
       .all(id) as unknown as TaskFileRow[];
     task.files = fileRows.map(rowToTaskFile);
     return task;
+  }
+
+  /** Server-side probe token (never sent to ChatGPT in get_task). */
+  setProbeToken(taskId: string, token: string): void {
+    const row = this.db
+      .prepare(`SELECT context_json FROM handoff_tasks WHERE id = ?`)
+      .get(taskId) as { context_json: string | null } | undefined;
+    if (!row) return;
+    const ctx = row.context_json
+      ? (JSON.parse(row.context_json) as Record<string, unknown>)
+      : {};
+    ctx._probeToken = token;
+    this.db
+      .prepare(`UPDATE handoff_tasks SET context_json = ? WHERE id = ?`)
+      .run(JSON.stringify(ctx), taskId);
+  }
+
+  getProbeToken(taskId: string): string | null {
+    const row = this.db
+      .prepare(`SELECT context_json FROM handoff_tasks WHERE id = ?`)
+      .get(taskId) as { context_json: string | null } | undefined;
+    if (!row?.context_json) return null;
+    const ctx = JSON.parse(row.context_json) as { _probeToken?: string };
+    return ctx._probeToken ?? null;
+  }
+
+  findPendingConnectorHandshake(workerId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT id FROM handoff_tasks
+         WHERE target_worker_id = ?
+           AND status IN (
+             'QUEUED', 'DISPATCHING', 'DISPATCHED', 'PROCESSING', 'WAITING_APPROVAL'
+           )
+           AND prompt LIKE 'Connector handshake%'
+         LIMIT 1`
+      )
+      .get(workerId) as { id: string } | undefined;
+    return row?.id ?? null;
   }
 
   /** Frozen lookup: always keyed by (task_id, file_id) together — never a global file_id lookup. */
@@ -1169,8 +1217,52 @@ export class TaskRepository {
     return rows.map(rowToWorker);
   }
 
+  /** Read worker row without auto-insert (fleet registry from DB). */
+  findWorkerRegistryRow(workerId: string): WorkerStateRow | null {
+    const row = this.db
+      .prepare(`SELECT * FROM worker_state WHERE id = ?`)
+      .get(workerId) as WorkerRow | undefined;
+    return row ? rowToWorker(row) : null;
+  }
+
+  setWorkerChatUrl(workerId: string, workerUrl: string): void {
+    const row = this.findWorkerRegistryRow(workerId);
+    const prev = row?.workerUrl?.trim();
+    const next = workerUrl.trim();
+    if (prev && prev !== next) {
+      this.db
+        .prepare(
+          `UPDATE worker_state
+           SET worker_url = ?,
+               mcp_write_verified_at = NULL,
+               mcp_write_status = NULL,
+               mcp_write_status_reason = NULL,
+               readiness_reason = CASE
+                 WHEN readiness_reason IN (
+                   'RESTART_REQUIRED',
+                   'ROTATION_FAILED',
+                   'MCP_SAFETY_BLOCKED',
+                   'MCP_TOOL_NOT_INVOKED',
+                   'MCP_SUBMIT_TIMEOUT',
+                   'PROBE_RESULT_MISMATCH'
+                 ) THEN readiness_reason
+                 ELSE 'MCP_APPROVAL_REQUIRED'
+               END
+           WHERE id = ?`
+        )
+        .run(next, workerId);
+      return;
+    }
+    this.db
+      .prepare(`UPDATE worker_state SET worker_url = ? WHERE id = ?`)
+      .run(next, workerId);
+  }
+
   /** Remove runtime row after registry entry deleted (v0.6 fleet ops). */
   deleteWorkerState(workerId: string): boolean {
+    this.db
+      .prepare(`DELETE FROM worker_operations WHERE worker_id = ?`)
+      .run(workerId);
     const info = this.db
       .prepare(`DELETE FROM worker_state WHERE id = ?`)
       .run(workerId);
@@ -1646,6 +1738,102 @@ export class TaskRepository {
       .run(workerId);
   }
 
+  /** Clear restart-recovery blockers after broker re-bind (not real runtime faults). */
+  clearWorkerRecoveryBlockers(workerId: string): void {
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET readiness_reason = NULL, error = NULL
+         WHERE id = ?
+           AND (
+             readiness_reason IN (
+               'CONSENT_REQUIRED',
+               'ROTATION_FAILED',
+               'RESTART_REQUIRED',
+               'ROTATION_PENDING'
+             )
+             OR error LIKE 'PENDING_SETUP%'
+             OR error LIKE 'worker-op failed%'
+           )`
+      )
+      .run(workerId);
+  }
+
+  /** Drop stale CONSENT_REQUIRED once MCP read+write are already verified. */
+  sweepStaleConsentRequired(workerId?: string): void {
+    const sql = workerId
+      ? `UPDATE worker_state
+         SET readiness_reason = NULL, error = NULL
+         WHERE id = ?
+           AND readiness_reason = 'CONSENT_REQUIRED'
+           AND mcp_read_verified_at IS NOT NULL
+           AND mcp_write_verified_at IS NOT NULL`
+      : `UPDATE worker_state
+         SET readiness_reason = NULL, error = NULL
+         WHERE readiness_reason = 'CONSENT_REQUIRED'
+           AND mcp_read_verified_at IS NOT NULL
+           AND mcp_write_verified_at IS NOT NULL`;
+    this.db.prepare(sql).run(...(workerId ? [workerId] : []));
+  }
+
+  recordMcpReadVerified(workerId: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET mcp_read_verified_at = ?
+         WHERE id = ?`
+      )
+      .run(now, workerId);
+  }
+
+  recordMcpWriteVerified(workerId: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET mcp_write_verified_at = ?,
+             mcp_write_status = 'VERIFIED',
+             mcp_write_status_reason = NULL,
+             readiness_reason = CASE
+               WHEN readiness_reason IN ('MCP_APPROVAL_REQUIRED', 'CONSENT_REQUIRED')
+                 THEN NULL
+               ELSE readiness_reason
+             END,
+             error = CASE
+               WHEN readiness_reason IN ('MCP_APPROVAL_REQUIRED', 'CONSENT_REQUIRED')
+                 THEN NULL
+               ELSE error
+             END
+         WHERE id = ?`
+      )
+      .run(now, workerId);
+  }
+
+  recordMcpWriteDegraded(workerId: string, reason: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET mcp_write_status = 'DEGRADED',
+             mcp_write_status_reason = ?,
+             mcp_write_verified_at = NULL
+         WHERE id = ?`
+      )
+      .run(`${reason} @ ${now}`.slice(0, 500), workerId);
+  }
+
+  clearMcpWriteDegraded(workerId: string): void {
+    this.db
+      .prepare(
+        `UPDATE worker_state
+         SET mcp_write_status = NULL,
+             mcp_write_status_reason = NULL
+         WHERE id = ? AND mcp_write_status = 'DEGRADED'`
+      )
+      .run(workerId);
+  }
+
   setWorkerDisabled(workerId: string, disabled: boolean): void {
     if (disabled) {
       this.db
@@ -1687,6 +1875,55 @@ export class TaskRepository {
          WHERE id = ?`
       )
       .run(reason, error ?? null, workerId);
+  }
+
+  /**
+   * Update worker URL during an active worker-op (keeps ROTATION_PENDING).
+   */
+  commitWorkerUrlDuringOp(input: {
+    workerId: string;
+    newWorkerUrl: string;
+    previousWorkerUrl: string;
+  }): void {
+    const now = new Date().toISOString();
+    const info = this.db
+      .prepare(
+        `UPDATE worker_state
+         SET worker_url = ?,
+             tasks_on_chat = 0,
+             tasks_on_chat_url = ?,
+             previous_worker_url = ?,
+             chat_rotated_at = ?,
+             current_task_id = NULL,
+             mcp_write_verified_at = NULL,
+             mcp_write_status = NULL,
+             mcp_write_status_reason = NULL,
+             readiness_reason = CASE
+               WHEN readiness_reason IN (
+                 'RESTART_REQUIRED',
+                 'ROTATION_FAILED',
+                 'MCP_SAFETY_BLOCKED',
+                 'MCP_TOOL_NOT_INVOKED',
+                 'MCP_SUBMIT_TIMEOUT',
+                 'PROBE_RESULT_MISMATCH'
+               ) THEN readiness_reason
+               ELSE 'MCP_APPROVAL_REQUIRED'
+             END
+         WHERE id = ?
+           AND readiness_reason = 'ROTATION_PENDING'`
+      )
+      .run(
+        input.newWorkerUrl,
+        input.newWorkerUrl,
+        input.previousWorkerUrl,
+        now,
+        input.workerId
+      );
+    if (Number(info.changes ?? 0) !== 1) {
+      throw new Error(
+        `commitWorkerUrlDuringOp: worker ${input.workerId} is not ROTATION_PENDING`
+      );
+    }
   }
 
   /**
@@ -1765,6 +2002,9 @@ export class TaskRepository {
       .get(workerId) as WorkerRow | undefined;
 
     if (!row) {
+      if (workerId !== DEFAULT_WORKER_ID) {
+        throw new Error(`Worker ${workerId} not found`);
+      }
       const now = new Date().toISOString();
       this.db
         .prepare(
@@ -1795,6 +2035,9 @@ export class TaskRepository {
     const now = new Date().toISOString();
 
     if (!existing) {
+      if (workerId !== DEFAULT_WORKER_ID) {
+        return;
+      }
       this.db
         .prepare(
           `INSERT INTO worker_state (

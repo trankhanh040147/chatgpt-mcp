@@ -122,6 +122,10 @@ export interface WorkerStateRow {
   previousWorkerUrl?: string;
   chatRotatedAt?: string;
   readinessReason?: WorkerReadinessReason;
+  mcpReadVerifiedAt?: string;
+  mcpWriteVerifiedAt?: string;
+  mcpWriteStatus?: "VERIFIED" | "DEGRADED" | null;
+  mcpWriteStatusReason?: string;
 }
 
 /** Statuses that hold a lease_owner (partial unique index). */

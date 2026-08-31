@@ -513,6 +513,27 @@ h2 {
   line-height: 1.45;
 }
 
+.worker-op-banner--active {
+  border-color: rgba(80, 160, 220, 0.55);
+  background: rgba(80, 160, 220, 0.12);
+  animation: worker-op-pulse 1.6s ease-in-out infinite;
+}
+
+.worker-card-busy {
+  outline: 2px solid rgba(80, 160, 220, 0.35);
+  outline-offset: -1px;
+}
+
+@keyframes worker-op-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+
 .worker-op-banner .worker-op-label {
   display: block;
   font-size: 10px;

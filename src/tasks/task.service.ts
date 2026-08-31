@@ -21,6 +21,9 @@ import {
   type HandoffResultMetadata,
   type SubmitResultInput,
 } from "./task.types.js";
+import {
+  classifyCompletedProbeResult,
+} from "../mcp/probe-failure.js";
 import { estimateTaskUsage, loadCostConfig } from "../usage/pricing.js";
 import {
   getTaskUsage,
@@ -80,16 +83,73 @@ export class TaskService {
     const { taskId } = this.createTask({
       type: "second_opinion",
       prompt:
-        `Worker connectivity check.\n` +
-        `Call handoff_complete_probe with:\n` +
-        `taskId: (the TASK_ID dispatched in this chat)\n` +
-        `canary: ${input.token}\n` +
-        "Do not reply with the canary in chat.",
+        "System connectivity check.\n" +
+        "Use handoff_ack with the task ID from this chat.",
       cursorConversationId: `probe-${input.operationId}`,
       taskClass: "SYSTEM_PROBE",
       targetWorkerId: input.workerId,
     });
+    // Store server-side token for ack validation (not exposed in get_task prompt).
+    this.repo.setProbeToken(taskId, input.token);
     return { taskId };
+  }
+
+  /**
+   * After New chat / URL bind: queue a minimal task so the worker dispatches TASK_ID
+   * and ChatGPT shows the connector "Always allow" prompt (write path).
+   * Does not gate READY — passive MCP write verification.
+   */
+  createConnectorHandshake(input: { workerId: string }): {
+    taskId: string;
+    skipped?: boolean;
+  } {
+    const worker = this.repo.findWorkerRegistryRow(input.workerId);
+    if (worker?.mcpWriteVerifiedAt) {
+      return { taskId: "", skipped: true };
+    }
+    const pending = this.repo.findPendingConnectorHandshake(input.workerId);
+    if (pending) {
+      return { taskId: pending, skipped: true };
+    }
+    const { taskId } = this.createTask({
+      type: "second_opinion",
+      prompt:
+        "Connector handshake.\n" +
+        "1. handoff_get_task\n" +
+        "2. handoff_submit_result with result OK",
+      cursorConversationId: `connector-${input.workerId}`,
+      targetWorkerId: input.workerId,
+    });
+    log({
+      event: "INFO",
+      component: "task-service",
+      taskId,
+      message: `connector handshake queued worker=${input.workerId}`,
+    });
+    return { taskId };
+  }
+
+  /** SYSTEM_PROBE ack — canary resolved server-side. */
+  completeProbeAck(taskId: string): {
+    success: boolean;
+    status: "COMPLETED";
+    idempotent?: boolean;
+    lateSubmit?: boolean;
+  } {
+    const task = this.repo.getTaskById(taskId);
+    if (!task) {
+      throw new Error(`Task not found: ${taskId}`);
+    }
+    if (task.taskClass !== "SYSTEM_PROBE") {
+      throw new Error(
+        `handoff_ack is only for SYSTEM_PROBE tasks (got ${task.taskClass ?? "USER"})`
+      );
+    }
+    const canary = this.repo.getProbeToken(taskId);
+    if (!canary) {
+      throw new Error(`Probe token missing for task ${taskId}`);
+    }
+    return this.completeProbe({ taskId, canary });
   }
 
   /** SYSTEM_PROBE completion via minimal MCP tool (maps to canary submit). */
@@ -116,6 +176,22 @@ export class TaskService {
       taskId: input.taskId,
       result: `CREATE_WORKER_CANARY=${canary}`,
     });
+  }
+
+  /** Record platform MCP write degradation without blocking worker READY. */
+  markMcpWriteDegraded(taskId: string, reason: string): void {
+    const task = this.repo.getTaskById(taskId);
+    const workerId = task?.targetWorkerId ?? task?.leaseOwner;
+    if (workerId && workerId !== "default") {
+      this.repo.recordMcpWriteDegraded(workerId, reason);
+    }
+    if (task?.taskClass === "SYSTEM_PROBE") {
+      this.failProbeClassified(
+        taskId,
+        "MCP_SAFETY_BLOCKED",
+        reason.slice(0, 200)
+      );
+    }
   }
 
   /** Fail a probe with a classified MCP failure (binding may still be OK). */
@@ -245,10 +321,26 @@ export class TaskService {
       this.repo.updateTaskStatus(taskId, "PROCESSING", { processingAt: now });
       logTransition("task-service", taskId, "DISPATCHED", "PROCESSING");
       log({ event: "CHATGPT_PROCESSING", component: "task-service", taskId });
+      this.recordMcpReadForTask(taskId);
       return { ...task, status: "PROCESSING", processingAt: now };
     }
 
+    this.recordMcpReadForTask(taskId);
     return task;
+  }
+
+  private recordMcpReadForTask(taskId: string): void {
+    const task = this.repo.getTaskById(taskId);
+    const workerId = task?.targetWorkerId ?? task?.leaseOwner;
+    if (!workerId || workerId === "default") return;
+    this.repo.recordMcpReadVerified(workerId);
+  }
+
+  private recordMcpWriteVerifiedForTask(taskId: string): void {
+    const task = this.repo.getTaskById(taskId);
+    const workerId = task?.targetWorkerId ?? task?.leaseOwner;
+    if (!workerId || workerId === "default") return;
+    this.repo.recordMcpWriteVerified(workerId);
   }
 
   submitResult(input: SubmitResultInput): {
@@ -294,6 +386,21 @@ export class TaskService {
       );
     }
 
+    if (task.taskClass === "SYSTEM_PROBE") {
+      const hasCanaryFormat = /CREATE_WORKER_CANARY=[a-f0-9]+/i.test(
+        sanitizedResult
+      );
+      if (!hasCanaryFormat) {
+        const classified = classifyCompletedProbeResult(sanitizedResult);
+        const hint =
+          classified === "MCP_TOOL_NOT_INVOKED" &&
+          sanitizedResult.toLowerCase().includes("handoff_complete_probe")
+            ? " Restart remote-mcp (npm run build && gptmcp restart) so ChatGPT sees handoff_complete_probe."
+            : " Use handoff_complete_probe with the canary from the task prompt — not handoff_submit_result prose.";
+        throw new Error(`SYSTEM_PROBE ${classified}: invalid probe submit.${hint}`);
+      }
+    }
+
     const fromTimedOut = task.status === "TIMED_OUT";
     const changed = this.repo.saveResultIfOpen(
       input.taskId,
@@ -311,6 +418,7 @@ export class TaskService {
           : undefined,
       });
       this.recordUsageBestEffort(input.taskId, task.prompt, sanitizedResult);
+      this.recordMcpWriteVerifiedForTask(input.taskId);
       return {
         success: true,
         status: "COMPLETED",

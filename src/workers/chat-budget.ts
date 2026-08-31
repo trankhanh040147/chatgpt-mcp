@@ -16,12 +16,6 @@ const BLOCKING = new Set<WorkerReadinessReason>([
   "ROTATION_PENDING",
   "ROTATION_FAILED",
   "RESTART_REQUIRED",
-  "CONSENT_REQUIRED",
-  "MCP_SAFETY_BLOCKED",
-  "MCP_APPROVAL_REQUIRED",
-  "MCP_TOOL_NOT_INVOKED",
-  "MCP_SUBMIT_TIMEOUT",
-  "PROBE_RESULT_MISMATCH",
 ]);
 
 export function parseMaxTasksPerChat(raw: string | undefined): number {

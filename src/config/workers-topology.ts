@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { initDatabase, getDatabase } from "../db/sqlite.js";
+import { TaskRepository } from "../tasks/task.repository.js";
 
 export interface WorkerRegistryEntry {
   id: string;
@@ -12,8 +14,42 @@ export interface WorkerRegistryEntry {
 
 export interface ResolvedTopology {
   workers: WorkerRegistryEntry[];
-  source: "file" | "env-single" | "empty";
+  source: "db" | "file" | "env-single" | "empty";
   filePath?: string;
+  dbPath?: string;
+}
+
+/** Default: SQLite worker_state. Set HANDOFF_WORKERS_SOURCE=file or HANDOFF_WORKERS_FILE for legacy JSON. */
+export function workersTopologySource(): "db" | "file" {
+  const explicit = process.env.HANDOFF_WORKERS_SOURCE?.trim().toLowerCase();
+  if (explicit === "file") return "file";
+  if (explicit === "db") return "db";
+  if (process.env.HANDOFF_WORKERS_FILE?.trim()) return "file";
+  return "db";
+}
+
+export function loadTopologyFromDatabase(dbPath: string): ResolvedTopology {
+  initDatabase(dbPath);
+  const repo = new TaskRepository(getDatabase());
+  const rows = repo.listWorkers().filter((w) => w.id !== "default");
+  const workers: WorkerRegistryEntry[] = [];
+  for (const w of rows) {
+    const workerUrl = (w.workerUrl ?? "").trim();
+    const cdpEndpoint = (w.cdpEndpoint ?? "").trim();
+    if (!workerUrl || !cdpEndpoint) continue;
+    workers.push({
+      id: w.id,
+      workerUrl,
+      cdpEndpoint,
+      httpPort: w.httpPort,
+      enabled: w.error !== "DISABLED",
+    });
+  }
+  return {
+    source: "db",
+    dbPath: resolve(dbPath),
+    workers,
+  };
 }
 
 function isHttpUrl(value: string): boolean {
@@ -25,12 +61,30 @@ function isHttpUrl(value: string): boolean {
  * Env fields for the current process override matching file entry by id.
  */
 export function loadWorkersTopology(opts: {
+  dbPath?: string;
   workersFile?: string;
   workerId: string;
   workerUrl: string;
   cdpEndpoint: string;
   httpPort?: number;
 }): ResolvedTopology {
+  const dbPath = opts.dbPath?.trim();
+  if (workersTopologySource() === "db" && dbPath) {
+    const fromDb = loadTopologyFromDatabase(dbPath);
+    if (fromDb.workers.length > 0) {
+      const workers = fromDb.workers.map((w) => {
+        if (w.id !== opts.workerId) return w;
+        return {
+          ...w,
+          workerUrl: opts.workerUrl || w.workerUrl,
+          cdpEndpoint: opts.cdpEndpoint || w.cdpEndpoint,
+          httpPort: opts.httpPort ?? w.httpPort,
+        };
+      });
+      return { ...fromDb, workers };
+    }
+  }
+
   const filePath =
     opts.workersFile?.trim() ||
     process.env.HANDOFF_WORKERS_FILE?.trim() ||

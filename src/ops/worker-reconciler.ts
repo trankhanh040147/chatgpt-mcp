@@ -1,14 +1,10 @@
-import { createHash, randomBytes } from "node:crypto";
-import type { WorkerRegistryEntry } from "../config/workers-topology.js";
-import { loadWorkersTopology } from "../config/workers-topology.js";
-import { upsertWorkerRegistryEntry } from "../config/write-workers-topology.js";
 import { sanitizeChatUrl } from "../dashboard/observability.js";
 import { chatIdFromUrl } from "../browser/chat-url.js";
 import { log } from "../logging/logger.js";
 import {
   classifyProbeFailure,
+  classifyCompletedProbeResult,
   probeFailureOperatorMessage,
-  probeFailureToReadiness,
 } from "../mcp/probe-failure.js";
 import type { TaskRepository } from "../tasks/task.repository.js";
 import type { TaskService } from "../tasks/task.service.js";
@@ -23,30 +19,21 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function probeToken(): string {
-  return randomBytes(16).toString("hex");
-}
-
-function shortHash(value: string): string {
-  return createHash("sha256").update(value).digest("hex").slice(0, 8);
-}
-
-function probeCanaryMatches(result: string, token: string): boolean {
-  const trimmed = result.trim();
-  const expected = `CREATE_WORKER_CANARY=${token}`;
-  if (trimmed === expected) return true;
-  // ChatGPT often wraps the canary in prose; token must still appear verbatim.
-  return new RegExp(`CREATE_WORKER_CANARY=${token}(?:\\b|[^a-zA-Z0-9])`).test(
-    trimmed
-  );
-}
-
 function isTerminalOpState(state: WorkerOperation["state"]): boolean {
   return state === "SUCCEEDED" || state === "FAILED";
 }
 
 function isCancelledError(message: string): boolean {
   return message.includes("worker-op cancelled");
+}
+
+function isProbePhaseFailure(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("probe ") ||
+    lower.includes("mcp_") ||
+    lower.includes("probe mismatch")
+  );
 }
 
 export class WorkerReconciler {
@@ -62,7 +49,14 @@ export class WorkerReconciler {
 
   async reconcileAll(): Promise<void> {
     for (const op of this.opsRepo.listActive()) {
-      const worker = this.taskRepo.getWorkerState(op.workerId);
+      const worker = this.taskRepo.findWorkerRegistryRow(op.workerId);
+      if (!worker) {
+        this.opsRepo.update(op.id, {
+          state: "FAILED",
+          lastError: "worker removed",
+        });
+        continue;
+      }
       if (worker.error === "DISABLED") {
         this.opsRepo.update(op.id, {
           state: "FAILED",
@@ -89,8 +83,15 @@ export class WorkerReconciler {
     const op = this.opsRepo.getById(operationId);
     if (!op || isTerminalOpState(op.state)) return;
 
-    const workerState = this.taskRepo.getWorkerState(op.workerId);
-    if (workerState.error === "DISABLED") {
+    const workerRow = this.taskRepo.findWorkerRegistryRow(op.workerId);
+    if (!workerRow) {
+      this.opsRepo.update(operationId, {
+        state: "FAILED",
+        lastError: "worker removed",
+      });
+      return;
+    }
+    if (workerRow.error === "DISABLED") {
       this.opsRepo.update(operationId, {
         state: "FAILED",
         lastError: "worker disabled",
@@ -126,14 +127,6 @@ export class WorkerReconciler {
           (current.kind === "KILL_RECREATE" && payload.createMode === "create")) &&
         !payload.desiredWorkerUrl
       ) {
-        if (payload.createChatAttempted) {
-          throw new Error(
-            current.lastError ??
-              "create-chat already failed — cancel op, use Assign URL with an existing /c/ chat, or attach Cursor manually in CDP Chrome"
-          );
-        }
-        payload.createChatAttempted = true;
-        this.opsRepo.update(current.id, { payload });
         const created = await this.broker.createChat(
           current.workerId,
           payload.bootstrapMessage
@@ -141,9 +134,10 @@ export class WorkerReconciler {
         const afterCreate = this.opsRepo.getById(op.id);
         if (!afterCreate || isTerminalOpState(afterCreate.state)) return;
         payload.desiredWorkerUrl = created.workerUrl;
+        payload.createChatAttempted = true;
         payload.previousWorkerUrl =
           payload.previousWorkerUrl ??
-          this.taskRepo.getWorkerState(current.workerId).workerUrl ??
+          this.taskRepo.findWorkerRegistryRow(current.workerId)?.workerUrl ??
           "";
         this.opsRepo.update(current.id, { payload });
       }
@@ -159,20 +153,34 @@ export class WorkerReconciler {
       await this.ensureBroker(afterDb);
       const afterBroker = this.opsRepo.getById(op.id);
       if (!afterBroker || isTerminalOpState(afterBroker.state)) return;
-      await this.ensureVerification(afterBroker);
+      await this.markBindingReady(afterBroker);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const current = this.opsRepo.getById(operationId);
       if (!current || isTerminalOpState(current.state)) return;
       if (isCancelledError(message)) return;
 
+      if (
+        current.kind === "CREATE_CHAT" ||
+        (current.kind === "KILL_RECREATE" && current.payload.createMode === "create")
+      ) {
+        void this.broker.cancelUi(current.workerId).catch(() => undefined);
+      }
+
       const attempt = current.attempt + 1;
       const isCreateAutomation =
         current.kind === "CREATE_CHAT" ||
         (current.kind === "KILL_RECREATE" && current.payload.createMode === "create");
+      const inProbePhase =
+        current.state === "VERIFYING" || Boolean(current.payload.probeTaskId);
+      const defaultProbeAttempts = Number(
+        process.env.HANDOFF_WORKER_OPS_PROBE_ATTEMPTS ?? 12
+      );
       const maxAttempts = isCreateAutomation
         ? 1
-        : Number(process.env.HANDOFF_WORKER_OPS_PROBE_ATTEMPTS ?? 12);
+        : inProbePhase && isProbePhaseFailure(message)
+          ? 1
+          : defaultProbeAttempts;
       if (attempt >= maxAttempts) {
         this.opsRepo.update(operationId, {
           state: "FAILED",
@@ -212,20 +220,21 @@ export class WorkerReconciler {
           taskStatus: task.status,
           taskError: task.error ?? message,
         });
-        const readiness = probeFailureToReadiness(classified);
-        this.taskRepo.setReadinessReason(
+        this.taskRepo.recordMcpWriteDegraded(
           workerId,
-          readiness,
-          probeFailureOperatorMessage(classified)
+          `${classified}: ${probeFailureOperatorMessage(classified, task.result ?? task.error ?? message)}`
         );
         return;
       }
     }
     if (bindingOk && message.includes("probe mismatch")) {
-      this.taskRepo.setReadinessReason(
+      const task = payload.probeTaskId
+        ? this.taskRepo.getTaskById(payload.probeTaskId)
+        : null;
+      const classified = classifyCompletedProbeResult(task?.result ?? message);
+      this.taskRepo.recordMcpWriteDegraded(
         workerId,
-        "PROBE_RESULT_MISMATCH",
-        probeFailureOperatorMessage("PROBE_RESULT_MISMATCH")
+        `${classified}: ${probeFailureOperatorMessage(classified, task?.result ?? message)}`
       );
       return;
     }
@@ -236,14 +245,18 @@ export class WorkerReconciler {
     );
   }
 
-  private getRegistryEntry(workerId: string): WorkerRegistryEntry | null {
-    const topo = loadWorkersTopology({
-      workersFile: this.workersFile,
-      workerId,
-      workerUrl: "",
-      cdpEndpoint: "",
-    });
-    return topo.workers.find((w) => w.id === workerId) ?? null;
+  private getRegistryEntry(workerId: string): {
+    id: string;
+    workerUrl: string;
+    cdpEndpoint: string;
+  } | null {
+    const row = this.taskRepo.findWorkerRegistryRow(workerId);
+    if (!row?.workerUrl || !row.cdpEndpoint) return null;
+    return {
+      id: workerId,
+      workerUrl: row.workerUrl,
+      cdpEndpoint: row.cdpEndpoint,
+    };
   }
 
   private async ensureRegistry(op: WorkerOperation): Promise<void> {
@@ -254,27 +267,24 @@ export class WorkerReconciler {
     }
     const existing = this.getRegistryEntry(op.workerId);
     if (!existing) {
-      throw new Error(`Worker ${op.workerId} not in registry`);
+      throw new Error(`Worker ${op.workerId} not in worker registry (DB)`);
     }
-    if (existing.workerUrl === desired) {
+    if (sanitizeChatUrl(existing.workerUrl) === desired) {
       if (!payload.registryEnsured) {
         payload.registryEnsured = true;
         this.opsRepo.update(op.id, { payload });
       }
       return;
     }
-    upsertWorkerRegistryEntry({
-      filePath: this.workersFile,
-      entry: { ...existing, workerUrl: desired },
-      replace: true,
-    });
+    this.taskRepo.setWorkerChatUrl(op.workerId, desired);
     payload.registryEnsured = true;
-    payload.previousWorkerUrl = payload.previousWorkerUrl ?? existing.workerUrl;
+    payload.previousWorkerUrl =
+      payload.previousWorkerUrl ?? existing.workerUrl;
     this.opsRepo.update(op.id, { payload });
     log({
       event: "INFO",
       component: "worker-controller",
-      message: `WORKER_OP_STEP registry ensured worker=${op.workerId}`,
+      message: `WORKER_OP_STEP registry ensured (db) worker=${op.workerId}`,
       data: { operationId: op.id },
     });
   }
@@ -286,22 +296,21 @@ export class WorkerReconciler {
     const desired = sanitizeChatUrl(payload.desiredWorkerUrl ?? "");
     if (!desired) throw new Error("ensureDb: missing desiredWorkerUrl");
 
-    const state = this.taskRepo.getWorkerState(op.workerId);
+    const state = this.taskRepo.findWorkerRegistryRow(op.workerId);
+    if (!state) throw new Error(`Worker ${op.workerId} not found`);
     const previous =
       payload.previousWorkerUrl ?? state.workerUrl ?? desired;
 
-    if (state.workerUrl === desired && state.readinessReason === "CONSENT_REQUIRED") {
+    if (state.workerUrl === desired) {
       payload.dbEnsured = true;
       this.opsRepo.update(op.id, { payload });
       return;
     }
 
-    this.taskRepo.commitChatRotation({
+    this.taskRepo.commitWorkerUrlDuringOp({
       workerId: op.workerId,
       newWorkerUrl: desired,
       previousWorkerUrl: previous,
-      readinessReason: "CONSENT_REQUIRED",
-      error: "CONSENT_REQUIRED: worker-ops URL mutation",
     });
     payload.dbEnsured = true;
     this.opsRepo.update(op.id, { payload });
@@ -338,72 +347,38 @@ export class WorkerReconciler {
     });
   }
 
-  private async ensureVerification(op: WorkerOperation): Promise<void> {
-    const payload = op.payload;
-    this.opsRepo.update(op.id, { state: "VERIFYING" });
+  private async markBindingReady(op: WorkerOperation): Promise<void> {
+    const live = this.opsRepo.getById(op.id);
+    if (!live || isTerminalOpState(live.state)) return;
+    this.taskRepo.clearWorkerError(op.workerId);
+    this.taskRepo.clearMcpWriteDegraded(op.workerId);
+    this.opsRepo.update(op.id, {
+      state: "SUCCEEDED",
+      lastError: null,
+    });
+    this.scheduleConnectorHandshake(op.workerId);
+    log({
+      event: "INFO",
+      component: "worker-controller",
+      message: `WORKER_BINDING_OK op=${op.id} worker=${op.workerId} (MCP write not gated on READY)`,
+      data: { operationId: op.id, workerId: op.workerId },
+    });
+  }
 
-    if (!payload.probeToken) {
-      payload.probeToken = probeToken();
-    }
-    if (!payload.probeTaskId) {
-      const { taskId } = this.taskService.createSystemProbe({
-        workerId: op.workerId,
-        operationId: op.id,
-        token: payload.probeToken,
+  private scheduleConnectorHandshake(workerId: string): void {
+    const row = this.taskRepo.findWorkerRegistryRow(workerId);
+    if (!row?.mcpWriteVerifiedAt) {
+      const { taskId, skipped } = this.taskService.createConnectorHandshake({
+        workerId,
       });
-      payload.probeTaskId = taskId;
-      this.opsRepo.update(op.id, { payload });
-      log({
-        event: "INFO",
-        component: "worker-controller",
-        message: `WORKER_PROBE_SCHEDULED op=${op.id} task=${taskId}`,
-        data: { operationId: op.id, taskId },
-      });
-      return;
-    }
-
-    const task = this.taskRepo.getTaskById(payload.probeTaskId);
-    if (!task) {
-      throw new Error(`probe task missing: ${payload.probeTaskId}`);
-    }
-
-    const expected = `CREATE_WORKER_CANARY=${payload.probeToken}`;
-    if (task.status === "COMPLETED") {
-      if (!probeCanaryMatches(task.result ?? "", payload.probeToken!)) {
-        throw new Error(
-          `probe mismatch: got ${JSON.stringify(task.result)} want ${expected}`
-        );
+      if (!skipped && taskId) {
+        log({
+          event: "INFO",
+          component: "worker-controller",
+          message: `CONNECTOR_HANDSHAKE_QUEUED worker=${workerId} task=${taskId}`,
+          data: { workerId, taskId },
+        });
       }
-      const live = this.opsRepo.getById(op.id);
-      if (!live || isTerminalOpState(live.state)) return;
-      this.taskRepo.clearWorkerError(op.workerId);
-      this.opsRepo.update(op.id, {
-        state: "SUCCEEDED",
-        lastError: null,
-      });
-      log({
-        event: "INFO",
-        component: "worker-controller",
-        message: `WORKER_PROBE_OK op=${op.id} hash=${shortHash(payload.probeToken)}`,
-        data: { operationId: op.id },
-      });
-      return;
     }
-
-    if (
-      task.status === "FAILED" ||
-      task.status === "TIMED_OUT" ||
-      task.status === "CANCELLED"
-    ) {
-      throw new Error(`probe ${task.status}: ${task.error ?? ""}`);
-    }
-
-    const timeoutMs = Number(process.env.CREATE_WORKER_CANARY_MS ?? 300_000);
-    const createdAt = Date.parse(task.createdAt);
-    if (Date.now() - createdAt > timeoutMs) {
-      throw new Error(`probe timeout after ${timeoutMs}ms`);
-    }
-
-    // Still in flight — reconciler will poll again
   }
 }

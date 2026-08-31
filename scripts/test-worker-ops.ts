@@ -72,6 +72,10 @@ class MockBroker implements BrokerOpsClient {
     this.cancelUiCalls += 1;
   }
 
+  async despawnActor(_workerId: string): Promise<void> {
+    /* mock */
+  }
+
   async createChat(
     workerId: string,
     _bootstrapMessage?: string
@@ -253,9 +257,9 @@ async function main(): Promise<void> {
     teardown(dbPath);
   }
 
-  // T3 — verification completion → SUCCEEDED + readiness cleared
+  // T3 — binding ready → SUCCEEDED without write probe gate
   {
-    const { repo, service, opsRepo, reconciler, dbPath } = freshEnv(workersFile);
+    const { repo, opsRepo, reconciler, dbPath } = freshEnv(workersFile);
     const desired =
       "https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-111111111111";
     const op = opsRepo.enqueueWithReservation({
@@ -271,93 +275,65 @@ async function main(): Promise<void> {
       },
     });
     await reconciler.reconcileOne(op.id);
-    const mid = opsRepo.getById(op.id)!;
-    assert(mid.state === "VERIFYING", "T3 reached VERIFYING");
-    await driveProbeToCompleted(
-      service,
-      "w1",
-      "inst-test",
-      mid.payload.probeTaskId!,
-      mid.payload.probeToken!
-    );
-    await reconciler.reconcileOne(op.id);
     const final = opsRepo.getById(op.id)!;
-    assert(final.state === "SUCCEEDED", "T3 operation SUCCEEDED");
+    assert(final.state === "SUCCEEDED", "T3 operation SUCCEEDED without write probe");
     const w = repo.getWorkerState("w1");
     assert(
       !w.readinessReason && !w.error,
-      "T3 worker readiness cleared after probe"
+      "T3 worker readiness cleared after binding"
     );
     teardown(dbPath);
   }
 
-  // T4 — bad probe nonce → operation not succeeded, readiness not cleared
+  // T4 — handoff_ack validates server-side probe token
   {
-    const { repo, service, opsRepo, reconciler, dbPath } = freshEnv(workersFile);
-    const op = opsRepo.enqueueWithReservation({
+    const { service, dbPath } = freshEnv(workersFile);
+    const { taskId } = service.createSystemProbe({
       workerId: "w1",
-      kind: "ASSIGN_URL",
-      payload: {
-        desiredWorkerUrl:
-          "https://chatgpt.com/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
-        previousWorkerUrl:
-          "https://chatgpt.com/c/11111111-2222-3333-4444-555555555555",
-        registryEnsured: true,
-        dbEnsured: true,
-        brokerEnsured: true,
-      },
+      operationId: "wop_t4",
+      token: "abcdef0000000001",
     });
-    await reconciler.reconcileOne(op.id);
-    const mid = opsRepo.getById(op.id)!;
-    await driveProbeToCompleted(
-      service,
+    const claimed = service.claimNextQueued("w1", "inst-test", 30_000, 120_000);
+    assert(claimed?.task.id === taskId, "T4 probe claimed");
+    service.markDispatchStarted(
+      taskId,
       "w1",
+      claimed!.leaseToken,
       "inst-test",
-      mid.payload.probeTaskId!,
-      "wrong-token"
+      30_000,
+      120_000
     );
-    await reconciler.reconcileOne(op.id);
-    const after = opsRepo.getById(op.id)!;
-    assert(after.state !== "SUCCEEDED", "T4 not SUCCEEDED on bad nonce");
-    const w = repo.getWorkerState("w1");
-    assert(
-      w.readinessReason === "CONSENT_REQUIRED" ||
-        w.readinessReason === "ROTATION_PENDING",
-      "T4 readiness not cleared on bad nonce"
-    );
+    service.completeProbeAck(taskId);
+    const row = service.getTask(taskId)!;
+    assert(row.status === "COMPLETED", "T4 ack completes probe");
     teardown(dbPath);
   }
 
-  // T9 — probe accepts canary embedded in prose (ChatGPT often adds words)
+  // T9 — completeProbe still accepts canary embedded in prose
   {
-    const { opsRepo, reconciler, service, dbPath } = freshEnv(workersFile);
-    const op = opsRepo.enqueueWithReservation({
+    const { service, dbPath } = freshEnv(workersFile);
+    const token = "deadbeef00000002";
+    const { taskId } = service.createSystemProbe({
       workerId: "w1",
-      kind: "ASSIGN_URL",
-      payload: {
-        desiredWorkerUrl:
-          "https://chatgpt.com/c/eeeeeeee-ffff-0000-1111-222222222222",
-        previousWorkerUrl:
-          "https://chatgpt.com/c/11111111-2222-3333-4444-555555555555",
-        registryEnsured: true,
-        dbEnsured: true,
-        brokerEnsured: true,
-      },
-    });
-    await reconciler.reconcileOne(op.id);
-    const mid = opsRepo.getById(op.id)!;
-    const token = mid.payload.probeToken!;
-    await driveProbeToCompleted(
-      service,
-      "w1",
-      "inst-test",
-      mid.payload.probeTaskId!,
+      operationId: "wop_t9",
       token,
-      `Worker canary received and processed successfully: CREATE_WORKER_CANARY=${token}`
+    });
+    const claimed = service.claimNextQueued("w1", "inst-test", 30_000, 120_000);
+    assert(claimed?.task.id === taskId, "T9 probe claimed");
+    service.markDispatchStarted(
+      taskId,
+      "w1",
+      claimed!.leaseToken,
+      "inst-test",
+      30_000,
+      120_000
     );
-    await reconciler.reconcileOne(op.id);
+    service.submitResult({
+      taskId,
+      result: `OK CREATE_WORKER_CANARY=${token}`,
+    });
     assert(
-      opsRepo.getById(op.id)?.state === "SUCCEEDED",
+      service.getTask(taskId)?.status === "COMPLETED",
       "T9 probe succeeds when canary embedded in prose"
     );
     teardown(dbPath);
@@ -392,6 +368,40 @@ async function main(): Promise<void> {
       "T10 create chat enqueued despite prior busy"
     );
     assert(repo.getInFlightTaskId("w1") === null, "T10 stuck handoff cleared");
+    teardown(dbPath);
+  }
+
+  // T11 — assign URL supersedes active worker op (handoff queue unchanged)
+  {
+    const { repo, service, opsRepo, broker, dbPath } = freshEnv(workersFile);
+    const controller = WorkerController.create({
+      taskRepo: repo,
+      taskService: service,
+      broker,
+      workersFile,
+    });
+    const stuck = opsRepo.enqueueWithReservation({
+      workerId: "w1",
+      kind: "CREATE_CHAT",
+      payload: {
+        previousWorkerUrl:
+          "https://chatgpt.com/c/11111111-2222-3333-4444-555555555555",
+      },
+    });
+    opsRepo.update(stuck.id, { state: "VERIFYING" });
+    const { operationId } = controller.assignUrl(
+      "w1",
+      "https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    );
+    assert(operationId !== stuck.id, "T11 new assign op enqueued");
+    assert(
+      opsRepo.getById(stuck.id)?.state === "FAILED",
+      "T11 prior op cancelled"
+    );
+    assert(
+      opsRepo.listActiveForWorker("w1").length === 1,
+      "T11 one active op after assign"
+    );
     teardown(dbPath);
   }
 
