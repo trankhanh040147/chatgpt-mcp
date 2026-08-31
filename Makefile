@@ -108,7 +108,7 @@ open: ## [gptmcp] Open dashboard
 chrome: ## Start dedicated CDP Chrome (idempotent)
 	npm run chrome-cdp
 
-chrome-if-needed: ## Start CDP Chrome only when :9222 is down
+chrome-if-needed: ## Start CDP Chrome only when :9222 is down (idempotent)
 	@curl -sf http://127.0.0.1:9222/json/version >/dev/null 2>&1 \
 		&& echo "CDP already listening on :9222" \
 		|| npm run chrome-cdp
@@ -151,7 +151,7 @@ dashboard: ## Print ops dashboard URL
 	@echo "Open http://127.0.0.1:$(HTTP_PORT)/dashboard/"
 	@echo "(start: gptmcp start)"
 
-dashboard-up: build chrome-if-needed ## Internal: start-broker-stack.sh
+dashboard-up: build chrome-if-needed ## Start A1-S stack for dashboard (supervised status-api + remote-mcp + broker)
 	@chmod +x scripts/start-broker-stack.sh
 	HANDOFF_WORKERS_FILE=$${HANDOFF_WORKERS_FILE:-$${CHATGPT_MCP_HOME:-$$HOME/.chatgpt-mcp}/data/workers.json} \
 		./scripts/start-broker-stack.sh
