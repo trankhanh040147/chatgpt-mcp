@@ -26,7 +26,8 @@
   ],
   "scripts": {
     "test": "npm run test:unit",
-    "test:unit": "npm run test:leases && npm run test:ops && npm run test:hook-ack && npm run test:usage && npm run test:create-worker && npm run test:agent-policy && npm run test:files && npm run test:rotation && npm run test:worker-ops && npm run test:chrome-cdp && npm run test:gptmcp-args",
+    "test:unit": "npm run test:dashboard && npm run test:leases && npm run test:ops && npm run test:hook-ack && npm run test:usage && npm run test:create-worker && npm run test:agent-policy && npm run test:files && npm run test:rotation && npm run test:worker-ops && npm run test:chrome-cdp && npm run test:gptmcp-args",
+    "test:dashboard": "tsx scripts/test-dashboard-pr1.ts",
     "test:gptmcp-args": "tsx scripts/test-gptmcp-args.ts",
     "check:unit": "npm run typecheck && npm run test:unit",
     "verify": "npm run check:unit && npm run build",
