@@ -1094,13 +1094,14 @@ async function beginWorkerAssign(workerId) {
     row?.chatUrl ?? row?.workerUrl ?? "https://chatgpt.com/c/";
   const activeOp = row?.activeOperation;
   const supersedeNote = activeOp
-    ? `Active worker op (${activeOp.kind} ${activeOp.state}) will be cancelled automatically.\n`
+    ? `<p><strong>Note:</strong> A previous operation on this worker (${escapeHtml(activeOp.kind)} · ${escapeHtml(activeOp.state)}) will be cancelled.</p>`
     : "";
   openOpsModal({
     title: `Assign URL · ${workerId}`,
     preview:
       supersedeNote +
-      "Updates workers.json, binds the broker tab, and runs SYSTEM_PROBE until READY.",
+      `<p>Save which ChatGPT chat this worker should use. We'll open that chat in the automation Chrome window and verify Cursor can connect.</p>`,
+    previewMode: "html",
     typedConfirm: false,
     showUrlField: true,
     initialUrl: currentUrl.startsWith("http") ? currentUrl : "https://chatgpt.com/c/",
@@ -1118,10 +1119,15 @@ async function beginWorkerCreate(workerId) {
   openOpsModal({
     title: `Create chat · ${workerId}`,
     preview:
-      "Opens a new CDP tab, types <code>@Cursor</code> → Enter, sends bootstrap OK.\n" +
-      "Bootstrap OK often gets only a 👍 — that is normal. Worker then dispatches connector handshake (<code>TASK_ID=…</code>).\n" +
-      "Click <strong>Always allow</strong> when ChatGPT asks to use Cursor MCP write tools.\n" +
-      "Stuck handoff / prior worker op on this card is cleared automatically.",
+      `<p><strong>What happens next</strong></p>` +
+      `<ol>` +
+      `<li>A new ChatGPT chat opens in the automation Chrome window.</li>` +
+      `<li>The worker sends <code>@Cursor</code> and a short test message.</li>` +
+      `<li>If ChatGPT asks to use Cursor tools, click <strong>Always allow</strong>.</li>` +
+      `<li>The card shows <strong>Connecting…</strong> for up to ~30s — that's normal.</li>` +
+      `</ol>` +
+      `<p>Any stuck task or earlier operation on this worker is cleared first.</p>`,
+    previewMode: "html",
     typedConfirm: false,
     pending: { kind: "worker-create", typedConfirm: false, workerId },
   });
@@ -1132,7 +1138,7 @@ async function beginWorkerKill(workerId) {
   openOpsModal({
     title: `Kill + recreate · ${workerId}`,
     preview:
-      "Unbind tab, create a fresh worker chat, update registry, probe until READY.",
+      "Close the current chat tab, open a brand-new ChatGPT chat, and reconnect this worker from scratch.",
     typedConfirm: false,
     pending: {
       kind: "worker-kill",
@@ -1148,8 +1154,8 @@ async function beginWorkerToggle(workerId, enable) {
   openOpsModal({
     title: enable ? `Enable ${workerId}` : `Disable ${workerId}`,
     preview: enable
-      ? "Worker returns to dispatch pool after reconcile."
-      : "Worker stops claiming tasks; broker binding unchanged.",
+      ? `${workerId} can claim handoff tasks again after you confirm.`
+      : `${workerId} stops claiming new tasks. Its browser tab stays open.`,
     typedConfirm: false,
     pending: {
       kind: "worker-toggle",
@@ -1165,8 +1171,9 @@ async function beginWorkerRemove(workerId) {
   openOpsModal({
     title: `Remove worker · ${workerId}`,
     preview:
-      `Delete ${workerId} from workers registry, unbind CDP tab, and clear worker_state.\n` +
-      "Task history is kept. Run make restart so browser-broker drops page actors for removed ids.",
+      `Remove ${workerId} from the fleet and close its browser tab.\n` +
+      "Past handoff tasks stay in history.\n\n" +
+      "After removing, run: make restart",
     typedConfirm: false,
     pending: {
       kind: "worker-remove",
@@ -1181,10 +1188,12 @@ async function beginAddWorker() {
   openOpsModal({
     title: "Add worker",
     preview:
-      "Registers a new worker in the DB, then automatically runs <strong>New chat…</strong> " +
-      "(opens a CDP Chrome tab, attaches Cursor, bootstrap OK).\n" +
-      "Watch the worker card — status becomes <em>Connecting…</em> while the tab opens.\n" +
-      "Then click <strong>Always allow</strong> when ChatGPT prompts for the Cursor connector.",
+      `<p>Adds a new worker slot, then runs the same setup as <strong>New chat…</strong>.</p>` +
+      `<ol>` +
+      `<li>Watch the new card — it shows <strong>Connecting…</strong> while the chat opens.</li>` +
+      `<li>Click <strong>Always allow</strong> if ChatGPT asks about Cursor tools.</li>` +
+      `</ol>`,
+    previewMode: "html",
     typedConfirm: false,
     pending: { kind: "worker-add", typedConfirm: false },
   });
@@ -1195,12 +1204,11 @@ function beginStartBroker() {
   openOpsModal({
     title: "Start browser broker",
     preview:
-      "Browser broker is unreachable.\n\n" +
-      "Start it in your terminal:\n" +
-      "  ./scripts/start-broker-stack.sh\n\n" +
-      "Or restart the full stack:\n" +
+      "The browser broker is not running, so worker actions cannot start.\n\n" +
+      "In your terminal, run one of:\n" +
+      "  ./scripts/start-broker-stack.sh\n" +
       "  make restart\n\n" +
-      `Once started (port :${lastBrokerOpsPort}), this dashboard will automatically reconnect.`,
+      `The dashboard will reconnect automatically once port :${lastBrokerOpsPort} is up.`,
     typedConfirm: false,
     pending: { kind: "info-only", typedConfirm: false },
   });
@@ -1396,9 +1404,20 @@ function syncOpsModalGoState() {
   opsConfirmGo.disabled = false;
 }
 
+function setOpsModalPreview(content, mode = "text") {
+  if (!opsModalPreview) return;
+  opsModalPreview.classList.toggle("ops-modal-preview--mono", mode === "mono");
+  if (mode === "html") {
+    opsModalPreview.innerHTML = content;
+  } else {
+    opsModalPreview.textContent = content;
+  }
+}
+
 function openOpsModal({
   title,
   preview,
+  previewMode = "text",
   phrase,
   pending,
   typedConfirm = true,
@@ -1408,7 +1427,7 @@ function openOpsModal({
   pendingOps = { ...pending, typedConfirm, showUrlField };
   setOpsModalError("");
   if (opsModalTitle) opsModalTitle.textContent = title;
-  if (opsModalPreview) opsModalPreview.textContent = preview;
+  setOpsModalPreview(preview, previewMode);
   const needTyped = typedConfirm && phrase;
   if (opsConfirmBlock) {
     opsConfirmBlock.hidden = !needTyped;
@@ -1475,6 +1494,7 @@ async function beginRecover(failQueued) {
     openOpsModal({
       title: failQueued ? "Recover + fail queued" : "Recover workers",
       preview: formatRecoverPreview(preview),
+      previewMode: "mono",
       typedConfirm: false,
       pending: {
         kind: "recover",

@@ -250,7 +250,7 @@
     <dialog id="ops-modal" class="ops-modal">
       <form method="dialog" id="ops-form">
         <h2 id="ops-modal-title">Confirm ops</h2>
-        <pre id="ops-modal-preview" class="ops-result"></pre>
+        <div id="ops-modal-preview" class="ops-modal-preview"></div>
         <p id="ops-modal-error" class="ops-modal-error hidden" hidden role="alert"></p>
         <div id="ops-url-block" class="ops-url-block hidden" hidden>
           <label class="ops-url-label" for="ops-url-input">
@@ -264,8 +264,9 @@
             spellcheck="false"
           />
           <p class="muted ops-url-hint">
-            In the <strong>CDP Chrome</strong> window: Chat → New chat → copy URL
-            from the address bar (not a shared/forbidden chat).
+            In the <strong>automation Chrome</strong> window (the one opened by
+            <code>make chrome</code>, not your daily browser): Chat → New chat →
+            copy the URL from the address bar. Use a chat you own, not a shared or blocked one.
           </p>
         </div>
         <div id="ops-confirm-block">

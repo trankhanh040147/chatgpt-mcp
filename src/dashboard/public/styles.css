@@ -1344,6 +1344,51 @@ button.danger:focus-visible {
   font-size: 1.1rem;
 }
 
+.ops-modal-preview {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
+.ops-modal-preview.ops-modal-preview--mono {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  background: #1a262c;
+  color: #d7e6e4;
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.ops-modal-preview p {
+  margin: 0 0 0.55rem;
+}
+
+.ops-modal-preview p:last-child {
+  margin-bottom: 0;
+}
+
+.ops-modal-preview ol {
+  margin: 0.35rem 0 0.55rem 1.1rem;
+  padding: 0;
+}
+
+.ops-modal-preview li {
+  margin: 0.2rem 0;
+}
+
+.ops-modal-preview strong {
+  font-weight: 600;
+}
+
+.ops-modal-preview code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 .ops-modal-error {
   margin: 0.5rem 0 0;
   padding: 0.55rem 0.7rem;
