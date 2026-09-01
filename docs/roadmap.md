@@ -30,7 +30,7 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | Ops dashboard | **0.4.0** | Dashboard **0.1–0.3** + usage at `/dashboard/` on status-api |
 | Agent UX + chat rotation | **0.5.0** | Light/Standard/Deep; `HANDOFF_MAX_TASKS_PER_CHAT=20`; idle `rotate-worker` |
 | Worker Ops & Dashboard | **0.6.0** | **Active** — control plane + **`gptmcp` CLI** — [`.planning/active/0.6-worker-ops.md`](../.planning/active/0.6-worker-ops.md) |
-| Handoff Resources (files → snapshot → native attach) | **0.7.0** | **Active** — [`.planning/active/0.7-handoff-resources.md`](../.planning/active/0.7-handoff-resources.md) |
+| Handoff Resources (dispatch materialize + native attach) | **0.7.0** | **Active** — [`.planning/active/0.7-handoff-resources.md`](../.planning/active/0.7-handoff-resources.md) |
 
 ## Sequencing principles
 
@@ -51,7 +51,7 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | **0.4.0** | Ops dashboard | Local dashboard **0.1** (health, workers, tasks, troubleshoot); status-api serve + `GET /tasks` | Dashboard 0.1 usable on localhost; diagnose stuck/idle/SESSION_LOST without log diving; tag when hardened | Cloud hosting; auth SSO; create-worker GUI; metrics history DB |
 | **0.5.0** | Agent UX + worker chat rotation | Skill/rule handoff policy (Light/Standard/Deep); **self-regulate context** — rotate worker chat over threshold | Scenario set passes; ≤1 handoff/decision; rotation fail-closed | Host-generic “chooser”; unattended login |
 | **0.6.0** | Worker Ops & Dashboard + public CLI | Health poll; assign/create URL; auto-canary; kill/recreate; SESSION_LOST heal (confirm); **`gptmcp` ops surface** | Dashboard ops without sqlite; broker registry SSOT; **`gptmcp status` exit 0** onboarding path | Claude host; transport abstraction |
-| **0.7.0** | Handoff Resources | Agent-selected files → snapshot; native CDP attach; `handoff_read_file` secondary | Multi-file E2E; fail-closed attach | ZIP; MCP resource URI; auto-routing |
+| **0.7.0** | Handoff Resources | Agent-selected files → dispatch-time materialize; native CDP buffer attach; `handoff_read_file` disabled for file tasks | Multi-file E2E; fail-closed attach | ZIP; MCP resource URI; auto-routing |
 | **0.8.0** | Claude host | Claude skill/hook; E2E by `taskId` | Documented Claude path | Marketplace / Windows |
 | **0.9.0** | Result artifacts | Symmetric ChatGPT → Cursor file artifacts | TBD | Binary artifacts |
 
@@ -214,7 +214,7 @@ Portable create semantics (`clientSessionId` optional, `taskId` authoritative) s
 
 **Spec:** [`.planning/active/0.7-handoff-resources.md`](../.planning/active/0.7-handoff-resources.md)
 
-Agent-selected files → snapshot → native CDP attach before dispatch. Implementation on `feat/0.7-handoff-resources` (PR #15). **Recommended merge after 0.6.0** for E2E CONSENT/URL recovery.
+Agent-selected files → dispatch-time materialize → native CDP buffer attach before fence. Implementation on `feat/0.7-handoff-resources` (PR #15).
 
 ### 0.8.0 — Claude host
 
@@ -233,7 +233,7 @@ Symmetric ChatGPT → Cursor artifacts on `handoff_submit_result`.
 ## Near-term queue
 
 1. **0.6.0** Worker Ops (health, URL ops, auto-canary, SESSION_LOST heal).
-2. **0.7.0** Handoff Resources (snapshot + native attach E2E).
+2. **0.7.0** Handoff Resources (dispatch materialize + native attach E2E).
 3. **0.8.0** Claude host.
 
 ## Deferred / non-goals
@@ -246,7 +246,7 @@ Symmetric ChatGPT → Cursor artifacts on `handoff_submit_result`.
 | “Works with all coding agents” claim | After each host has evidence (**0.8.0+**) |
 | Marketplace / Windows | After macOS+Cursor multi-worker bar is solid |
 | Dashboard history/charts / create-worker UI | Dash **0.3+** later |
-| Handoff Resources (snapshot + transport) | **0.7.0** |
+| Handoff Resources (dispatch materialize + native attach) | **0.7.0** |
 | Arbitrary workspace MCP (`read_file(path)`) | Never — task-scoped `handoff_read_file` only |
 
 ## Decision log

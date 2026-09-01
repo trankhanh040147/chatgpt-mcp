@@ -6,7 +6,7 @@ import {
   verifyAddedChipsMatchExpected,
 } from "./attachment-match.js";
 import { log } from "../logging/logger.js";
-import type { HandoffTaskFile } from "../tasks/task.types.js";
+import type { PreparedResource } from "../tasks/task.types.js";
 import {
   classifyPrepareFailure,
   type PrepareFailureReason,
@@ -125,6 +125,14 @@ async function removeChipByName(page: Page, displayName: string): Promise<boolea
   return false;
 }
 
+function toFilePayload(p: PreparedResource) {
+  return {
+    name: p.displayName,
+    mimeType: p.mediaType,
+    buffer: p.bytes,
+  };
+}
+
 export class ComposerAttachTransport {
   private baseline: string[] = [];
   private lastAdded: string[] = [];
@@ -132,23 +140,23 @@ export class ComposerAttachTransport {
   constructor(private readonly page: Page) {}
 
   async prepare(
-    files: readonly HandoffTaskFile[],
+    prepared: readonly PreparedResource[],
     taskId: string
   ): Promise<PrepareResult> {
-    if (files.length === 0) {
+    if (prepared.length === 0) {
       return { ok: true, expected: [], added: [] };
     }
 
-    const expected = files.map((f) => f.displayName);
+    const expected = prepared.map((f) => f.displayName);
     this.baseline = await readAttachmentChips(this.page);
     this.lastAdded = [];
 
-    for (const f of files) {
+    for (const p of prepared) {
       log({
-        event: "RESOURCE_PREPARE_STARTED",
+        event: "RESOURCE_PREPARED",
         component: "composer-attach",
         taskId,
-        message: `fileId=${f.fileId} displayName=${f.displayName} sizeBytes=${f.sizeBytes} sha256=${f.sha256}`,
+        message: `resourceId=${p.resourceId} displayName=${p.displayName} sizeBytes=${p.sizeBytes} sha256=${p.sha256}`,
       });
     }
 
@@ -164,22 +172,22 @@ export class ComposerAttachTransport {
     }
 
     const failAfter = injectFailAfter();
-    const paths = files.map((f) => f.snapshotPath);
+    const payloads = prepared.map(toFilePayload);
 
     try {
       if (failAfter === 0) {
         throw new Error("HANDOFF_ATTACH_INJECT_FAIL");
       }
 
-      if (failAfter != null && failAfter < files.length) {
-        const partial = paths.slice(0, failAfter);
+      if (failAfter != null && failAfter < prepared.length) {
+        const partial = payloads.slice(0, failAfter);
         if (partial.length > 0) {
           await fileInput.setInputFiles(partial);
         }
         throw new Error("HANDOFF_ATTACH_INJECT_FAIL");
       }
 
-      await fileInput.setInputFiles(paths);
+      await fileInput.setInputFiles(payloads);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const afterPartial = await readAttachmentChips(this.page);
@@ -207,7 +215,7 @@ export class ComposerAttachTransport {
       event: "RESOURCE_ATTACHED",
       component: "composer-attach",
       taskId,
-      message: `count=${files.length}`,
+      message: `count=${prepared.length}`,
     });
 
     const waited = await waitForAddedChips(

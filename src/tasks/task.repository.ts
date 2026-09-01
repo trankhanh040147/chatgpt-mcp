@@ -4,7 +4,7 @@ import type {
   ClaimResult,
   HandoffTask,
   HandoffTaskContext,
-  HandoffTaskFile,
+  TaskResource,
   HandoffResultMetadata,
   HandoffTaskStatus,
   WorkerStateRow,
@@ -59,17 +59,21 @@ interface TaskFileRow {
   created_at: string;
 }
 
-function rowToTaskFile(row: TaskFileRow): HandoffTaskFile {
+function rowToTaskResource(row: TaskFileRow): TaskResource {
   return {
     fileId: row.file_id,
     displayName: row.display_name,
     relativePath: row.relative_path,
-    snapshotPath: row.source_path,
-    sizeBytes: row.size_bytes,
-    sha256: row.sha256,
-    mediaType: row.media_type,
+    source: { kind: "workspace_file", relativePath: row.relative_path },
     createdAt: row.created_at,
   };
+}
+
+function loadTaskFiles(db: DatabaseSync, taskId: string): TaskResource[] {
+  const fileRows = db
+    .prepare("SELECT * FROM handoff_task_files WHERE task_id = ?")
+    .all(taskId) as unknown as TaskFileRow[];
+  return fileRows.map(rowToTaskResource);
 }
 
 interface WorkerRow {
@@ -185,7 +189,7 @@ export class TaskRepository {
   }
 
   /** Validate-all-then-insert: task row + all file rows in one transaction. */
-  insertTaskWithFiles(task: HandoffTask, files: HandoffTaskFile[]): void {
+  insertTaskWithFiles(task: HandoffTask, files: TaskResource[]): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db
@@ -225,10 +229,10 @@ export class TaskRepository {
           f.fileId,
           f.displayName,
           f.relativePath,
-          f.snapshotPath,
-          f.sizeBytes,
-          f.sha256,
-          f.mediaType,
+          "",
+          0,
+          "",
+          "text/plain",
           f.createdAt
         );
       }
@@ -245,10 +249,7 @@ export class TaskRepository {
       .get(id) as TaskRow | undefined;
     if (!row) return null;
     const task = rowToTask(row);
-    const fileRows = this.db
-      .prepare("SELECT * FROM handoff_task_files WHERE task_id = ?")
-      .all(id) as unknown as TaskFileRow[];
-    task.files = fileRows.map(rowToTaskFile);
+    task.files = loadTaskFiles(this.db, id);
     return task;
   }
 
@@ -292,13 +293,13 @@ export class TaskRepository {
   }
 
   /** Frozen lookup: always keyed by (task_id, file_id) together — never a global file_id lookup. */
-  getTaskFile(taskId: string, fileId: string): HandoffTaskFile | null {
+  getTaskFile(taskId: string, fileId: string): TaskResource | null {
     const row = this.db
       .prepare(
         "SELECT * FROM handoff_task_files WHERE task_id = ? AND file_id = ?"
       )
       .get(taskId, fileId) as TaskFileRow | undefined;
-    return row ? rowToTaskFile(row) : null;
+    return row ? rowToTaskResource(row) : null;
   }
 
   /** Newest-first task rows for ops dashboard (full rows; callers must scrub). */
@@ -623,19 +624,21 @@ export class TaskRepository {
           .run(probeRow.id, nowIso, workerId, instanceToken);
 
         this.db.exec("COMMIT");
+        const probeTask = rowToTask({
+          ...probeRow,
+          status: "DISPATCHING",
+          lease_owner: workerId,
+          lease_token: leaseToken,
+          lease_expires_at: expiresIso,
+          dispatch_started_at: null,
+          dispatch_attempt: 0,
+          nudge_started_at: null,
+          nudge_attempt: 0,
+        });
+        probeTask.files = loadTaskFiles(this.db, probeRow.id);
         return {
           leaseToken,
-          task: rowToTask({
-            ...probeRow,
-            status: "DISPATCHING",
-            lease_owner: workerId,
-            lease_token: leaseToken,
-            lease_expires_at: expiresIso,
-            dispatch_started_at: null,
-            dispatch_attempt: 0,
-            nudge_started_at: null,
-            nudge_attempt: 0,
-          }),
+          task: probeTask,
         };
       }
 
@@ -717,19 +720,21 @@ export class TaskRepository {
         .run(row.id, nowIso, workerId, instanceToken);
 
       this.db.exec("COMMIT");
+      const claimedTask = rowToTask({
+        ...row,
+        status: "DISPATCHING",
+        lease_owner: workerId,
+        lease_token: leaseToken,
+        lease_expires_at: expiresIso,
+        dispatch_started_at: null,
+        dispatch_attempt: 0,
+        nudge_started_at: null,
+        nudge_attempt: 0,
+      });
+      claimedTask.files = loadTaskFiles(this.db, row.id);
       return {
         leaseToken,
-        task: rowToTask({
-          ...row,
-          status: "DISPATCHING",
-          lease_owner: workerId,
-          lease_token: leaseToken,
-          lease_expires_at: expiresIso,
-          dispatch_started_at: null,
-          dispatch_attempt: 0,
-          nudge_started_at: null,
-          nudge_attempt: 0,
-        }),
+        task: claimedTask,
       };
     } catch (err) {
       this.db.exec("ROLLBACK");

@@ -146,9 +146,6 @@ export function registerHandoffTools(
         fileId: f.fileId,
         displayName: f.displayName,
         relativePath: f.relativePath,
-        size: f.sizeBytes,
-        sha256: f.sha256,
-        mediaType: f.mediaType,
       }));
 
       const rawContext = (task.context ?? {}) as Record<string, unknown>;
@@ -163,7 +160,7 @@ export function registerHandoffTools(
         files,
         mustReadAttachedFiles:
           files.length > 0
-            ? "Call handoff_read_file({taskId, fileId}) for each file above before answering."
+            ? "Files are attached natively in ChatGPT — read attachment chips in the composer; do NOT call handoff_read_file (disabled in v0.7)."
             : undefined,
         submitPolicy:
           task.taskClass === "SYSTEM_PROBE"
@@ -179,8 +176,8 @@ export function registerHandoffTools(
 
   server.tool(
     "handoff_read_file",
-    "Read one evidence file attached to a handoff task by taskId + fileId (never a raw path). "
-      + "Read-only; returns sanitized content with offset/maxBytes ranging.",
+    "v0.7: disabled for tasks with native file attachments — evidence is delivered via ChatGPT composer chips only. "
+      + "Returns FILE_READ_DISABLED when the task has attached files.",
     {
       taskId: taskIdSchema,
       fileId: fileIdSchema,

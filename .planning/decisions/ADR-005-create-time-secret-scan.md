@@ -18,19 +18,19 @@ would snapshot and attach raw.
 
 ## Decision
 
-Scan file **content** for secrets **before snapshot**, using the same pattern set as `sanitize.ts` (`SECRET_PATTERNS`). On match:
+Scan file **content** for secrets **at dispatch materialization**, using the same pattern set as `sanitize.ts` (`SECRET_PATTERNS`). On match:
 
 ```text
 throw HandoffFileError("FILES_SECRET_DETECTED", ...)
 ```
 
-Reject the **whole** create — no partial task, no text-only fallback.
+Reject the **whole** dispatch attempt — task may remain QUEUED for retry if retryable.
 
-Read-time `sanitizeSecrets()` remains defense-in-depth for MCP lazy read.
+Read-time `sanitizeSecrets()` remains defense-in-depth if `handoff_read_file` is revived in a future transport.
 
-## Scope (v0.6)
+## Scope (v0.7)
 
-Reuse existing patterns:
+Materialize-time scan in `materializeWorkspaceResources()` using shared `SECRET_PATTERNS`:
 
 - `sk-…`, `ghp_…`, PEM blocks, `Bearer …`, `password=`, `secret=`
 

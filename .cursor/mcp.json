@@ -5,6 +5,7 @@
       "args": ["${workspaceFolder}/dist/index.js", "mcp"],
       "env": {
         "HANDOFF_DB_PATH": "${workspaceFolder}/data/handoff.sqlite",
+        "HANDOFF_WORKSPACE_ROOT": "${workspaceFolder}",
         "LOG_DIR": "${workspaceFolder}/logs"
       }
     },

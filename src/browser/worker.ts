@@ -5,6 +5,8 @@ import { TaskService } from "../tasks/task.service.js";
 import { WorkerStateManager } from "./worker-state.js";
 import { ChatGptBrowser } from "./chatgpt.js";
 import { createNativeDeliveryTarget } from "../transport/native-delivery.js";
+import { materializeWorkspaceResources } from "../tasks/files.js";
+import { HandoffFileError } from "../tasks/task.types.js";
 import type { UiWriteMutex } from "./ui-write-mutex.js";
 import { log } from "../logging/logger.js";
 import type { WorkerStatus } from "../tasks/task.types.js";
@@ -402,9 +404,44 @@ export class BrowserWorker {
       const taskFiles = task.files ?? [];
       if (taskFiles.length > 0) {
         const transport = createNativeDeliveryTarget(browser.getPage());
+        let preparedResources;
+        try {
+          const root = task.workspaceRoot;
+          if (!root) {
+            throw new HandoffFileError(
+              "FILES_INVALID",
+              "Task missing workspace root for file materialization"
+            );
+          }
+          preparedResources = materializeWorkspaceResources(taskFiles, root);
+        } catch (err) {
+          const code =
+            err instanceof HandoffFileError ? err.code : "FILES_INVALID";
+          const errMsg = `Resource materialize failed: ${code}`;
+          const permanent =
+            code === "FILES_SECRET_DETECTED" ||
+            code === "FILE_TOO_LARGE" ||
+            code === "FILES_INVALID" ||
+            code === "RESOURCES_MCP_DEFERRED";
+          taskService.markDispatchFailed(task.id, errMsg, {
+            workerId: this.workerId,
+            leaseToken,
+            instanceToken: this.instanceToken,
+            permanent,
+          });
+          log({
+            event: "WARN",
+            component: "browser-worker",
+            taskId: task.id,
+            message: `${errMsg} (permanent=${permanent})`,
+          });
+          this.clearActiveTask(workerState);
+          return;
+        }
+
         const prepared = await this.withUiWrite(async () => {
           this.options.assertBindingFresh?.();
-          return transport.prepare(taskFiles, task.id);
+          return transport.prepare(preparedResources, task.id);
         });
 
         if (!prepared.ok) {

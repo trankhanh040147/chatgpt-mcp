@@ -1,8 +1,9 @@
 #!/usr/bin/env npx tsx
 /**
- * Task-scoped evidence file tests (0.6 D1) — no browser, no ChatGPT.
+ * Task-scoped evidence file tests (v0.7) — dispatch-time materialization, no snapshot.
  *   npx tsx scripts/test-files.ts
  */
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync, symlinkSync, unlinkSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,11 @@ import {
 } from "../src/db/sqlite.js";
 import { TaskRepository } from "../src/tasks/task.repository.js";
 import { TaskService } from "../src/tasks/task.service.js";
+import {
+  materializeWorkspaceResources,
+  registerTaskResourcePaths,
+  resolveWorkspaceRoot,
+} from "../src/tasks/files.js";
 import { HandoffFileError } from "../src/tasks/task.types.js";
 
 let passed = 0;
@@ -55,8 +61,9 @@ async function main() {
   const dbDir = mkdtempSync(join(tmpdir(), "handoff-files-db-"));
   const wsDir = mkdtempSync(join(tmpdir(), "handoff-files-ws-"));
   process.env.HANDOFF_WORKSPACE_ROOT = wsDir;
+  const now = new Date().toISOString();
 
-  // --- Happy path: single file full read ---
+  // --- Create: cheap path validation registers refs ---
   {
     const { service } = freshDb(dbDir);
     writeFileSync(join(wsDir, "a.ts"), "export const a = 1;\n");
@@ -67,57 +74,89 @@ async function main() {
       files: ["a.ts"],
     });
     const task = service.getTask(taskId)!;
-    assert(task.files?.length === 1, "happy: one file attached");
-    const fileId = task.files![0].fileId;
-    const read = service.readFile(taskId, fileId);
-    assert(read.content === "export const a = 1;\n", "happy: content matches");
-    assert(read.eof === true, "happy: eof true on full read");
-    assert(read.sha256 === task.files![0].sha256, "happy: sha256 matches create-time hash");
+    assert(task.files?.length === 1, "create: one file ref attached");
+    assert(task.files![0].relativePath === "a.ts", "create: relativePath preserved");
+    assert(task.workspaceRoot === resolveWorkspaceRoot(), "create: workspace root stored");
   }
 
-  // --- Two files; isolation by fileId ---
+  // --- read_file disabled for file tasks (Option C) ---
   {
     const { service } = freshDb(dbDir);
-    writeFileSync(join(wsDir, "b1.ts"), "b1");
-    writeFileSync(join(wsDir, "b2.ts"), "b2");
+    writeFileSync(join(wsDir, "read.ts"), "content");
     const { taskId } = service.createTask({
       type: "research",
       prompt: "p",
-      cursorConversationId: "c2",
-      files: ["b1.ts", "b2.ts"],
+      cursorConversationId: "c1b",
+      files: ["read.ts"],
     });
     const task = service.getTask(taskId)!;
-    assert(task.files?.length === 2, "two-file: both attached");
-    const f1 = task.files!.find((f) => f.relativePath === "b1.ts")!;
-    const f2 = task.files!.find((f) => f.relativePath === "b2.ts")!;
-    assert(service.readFile(taskId, f1.fileId).content === "b1", "two-file: f1 isolated");
-    assert(service.readFile(taskId, f2.fileId).content === "b2", "two-file: f2 isolated");
+    expectFileError(
+      () => service.readFile(taskId, task.files![0].fileId),
+      "FILE_READ_DISABLED",
+      "read_file: disabled for attached files"
+    );
   }
 
-  // --- Traversal / absolute / symlink reject at create ---
+  // --- Materialize: happy path ---
+  {
+    writeFileSync(join(wsDir, "mat.ts"), "export const x = 42;\n");
+    const refs = registerTaskResourcePaths(["mat.ts"], now);
+    const prepared = materializeWorkspaceResources(refs, wsDir);
+    assert(prepared.length === 1, "materialize: one prepared resource");
+    assert(prepared[0].bytes.toString("utf8") === "export const x = 42;\n", "materialize: bytes match");
+    const hash = createHash("sha256").update(prepared[0].bytes).digest("hex");
+    assert(prepared[0].sha256 === hash, "materialize: sha256 of bytes");
+  }
+
+  // --- Two files materialize independently ---
+  {
+    writeFileSync(join(wsDir, "b1.ts"), "b1");
+    writeFileSync(join(wsDir, "b2.ts"), "b2");
+    const refs = registerTaskResourcePaths(["b1.ts", "b2.ts"], now);
+    const prepared = materializeWorkspaceResources(refs, wsDir);
+    assert(prepared.length === 2, "two-file: both materialized");
+    const byName = Object.fromEntries(prepared.map((p) => [p.displayName, p.bytes.toString("utf8")]));
+    assert(byName["b1.ts"] === "b1", "two-file: b1 content");
+    assert(byName["b2.ts"] === "b2", "two-file: b2 content");
+  }
+
+  // --- Traversal / absolute reject at create ---
   {
     const { service } = freshDb(dbDir);
     expectFileError(
       () => service.createTask({ type: "research", prompt: "p", cursorConversationId: "c3", files: ["../etc/passwd"] }),
       "FILES_INVALID",
-      "reject: traversal"
+      "reject: traversal at create"
     );
     expectFileError(
       () => service.createTask({ type: "research", prompt: "p", cursorConversationId: "c3", files: ["/etc/hosts"] }),
       "FILES_INVALID",
-      "reject: absolute path"
-    );
-    const linkPath = join(wsDir, "link.ts");
-    try { unlinkSync(linkPath); } catch { /* ignore */ }
-    symlinkSync("/etc/hosts", linkPath);
-    expectFileError(
-      () => service.createTask({ type: "research", prompt: "p", cursorConversationId: "c3", files: ["link.ts"] }),
-      "FILES_INVALID",
-      "reject: symlink attachment"
+      "reject: absolute path at create"
     );
   }
 
-  // --- Unlisted / cross-task fileId ---
+  // --- Symlink reject at materialize (not create) ---
+  {
+    const { service } = freshDb(dbDir);
+    const linkPath = join(wsDir, "link.ts");
+    try { unlinkSync(linkPath); } catch { /* ignore */ }
+    symlinkSync("/etc/hosts", linkPath);
+    const { taskId } = service.createTask({
+      type: "research",
+      prompt: "p",
+      cursorConversationId: "c3b",
+      files: ["link.ts"],
+    });
+    const task = service.getTask(taskId)!;
+    assert((task.files ?? []).length === 1, "symlink: create succeeds with ref");
+    expectFileError(
+      () => materializeWorkspaceResources(task.files!, wsDir),
+      "FILES_INVALID",
+      "reject: symlink at materialize"
+    );
+  }
+
+  // --- Cross-task fileId on read_file ---
   {
     const { service } = freshDb(dbDir);
     writeFileSync(join(wsDir, "c1.ts"), "c1");
@@ -137,45 +176,30 @@ async function main() {
     );
   }
 
-  // --- Mutate workspace after create → snapshot unchanged ---
+  // --- Workspace mutation before dispatch → materialize reads current bytes ---
   {
-    const { service } = freshDb(dbDir);
     const path = join(wsDir, "mut.ts");
     writeFileSync(path, "original");
-    const { taskId } = service.createTask({ type: "research", prompt: "p", cursorConversationId: "c5", files: ["mut.ts"] });
-    const task = service.getTask(taskId)!;
+    const refs = registerTaskResourcePaths(["mut.ts"], now);
     writeFileSync(path, "mutated!!");
-    const read = service.readFile(taskId, task.files![0].fileId);
-    assert(read.content === "original", "snapshot: workspace mutation does not affect read");
+    const prepared = materializeWorkspaceResources(refs, wsDir);
+    assert(prepared[0].bytes.toString("utf8") === "mutated!!", "dispatch-time: reads current workspace bytes");
   }
 
-  // --- Delete workspace file after create → snapshot still readable ---
+  // --- Delete workspace file before dispatch → materialize fails ---
   {
-    const { service } = freshDb(dbDir);
     const path = join(wsDir, "del.ts");
     writeFileSync(path, "gone-soon");
-    const { taskId } = service.createTask({ type: "research", prompt: "p", cursorConversationId: "c6", files: ["del.ts"] });
-    const task = service.getTask(taskId)!;
+    const refs = registerTaskResourcePaths(["del.ts"], now);
     unlinkSync(path);
-    const read = service.readFile(taskId, task.files![0].fileId);
-    assert(read.content === "gone-soon", "snapshot: survives workspace file deletion");
-  }
-
-  // --- Delete snapshot file → FILE_NOT_FOUND ---
-  {
-    const { service } = freshDb(dbDir);
-    writeFileSync(join(wsDir, "snap-del.ts"), "snap");
-    const { taskId } = service.createTask({ type: "research", prompt: "p", cursorConversationId: "c6b", files: ["snap-del.ts"] });
-    const task = service.getTask(taskId)!;
-    unlinkSync(task.files![0].snapshotPath);
     expectFileError(
-      () => service.readFile(taskId, task.files![0].fileId),
-      "FILE_NOT_FOUND",
-      "reject: deleted snapshot"
+      () => materializeWorkspaceResources(refs, wsDir),
+      "FILES_INVALID",
+      "reject: missing file at materialize"
     );
   }
 
-  // --- Secret filenames ---
+  // --- Secret filenames at create ---
   {
     const { service } = freshDb(dbDir);
     writeFileSync(join(wsDir, ".env.local"), "SECRET=1");
@@ -192,7 +216,7 @@ async function main() {
     );
   }
 
-  // --- Duplicate basename (v0.6 Phase A) ---
+  // --- Duplicate basename at create ---
   {
     const { service } = freshDb(dbDir);
     mkdirSync(join(wsDir, "src"), { recursive: true });
@@ -212,35 +236,29 @@ async function main() {
     );
   }
 
-  // --- Secret content guard at create (v0.6 Phase A) ---
+  // --- Secret content at materialize ---
   {
-    const { service } = freshDb(dbDir);
     writeFileSync(join(wsDir, "secret.ts"), "const k = 'sk-123456789012345678901234';\n");
+    const refs = registerTaskResourcePaths(["secret.ts"], now);
     expectFileError(
-      () =>
-        service.createTask({
-          type: "research",
-          prompt: "p",
-          cursorConversationId: "c7c",
-          files: ["secret.ts"],
-        }),
+      () => materializeWorkspaceResources(refs, wsDir),
       "FILES_SECRET_DETECTED",
-      "reject: secret pattern in content"
+      "reject: secret pattern at materialize"
     );
   }
 
-  // --- NUL / binary content ---
+  // --- NUL / binary at materialize ---
   {
-    const { service } = freshDb(dbDir);
     writeFileSync(join(wsDir, "bin.ts"), Buffer.from([0x00, 0x01, 0x02, 0x74, 0x73]));
+    const refs = registerTaskResourcePaths(["bin.ts"], now);
     expectFileError(
-      () => service.createTask({ type: "research", prompt: "p", cursorConversationId: "c8", files: ["bin.ts"] }),
+      () => materializeWorkspaceResources(refs, wsDir),
       "FILES_INVALID",
-      "reject: binary/NUL content"
+      "reject: binary/NUL at materialize"
     );
   }
 
-  // --- 11th file / per-file oversize / sum > 1 MiB ---
+  // --- 11th file / oversize at create (path count) or materialize (size) ---
   {
     const { service } = freshDb(dbDir);
     const names: string[] = [];
@@ -252,14 +270,15 @@ async function main() {
     expectFileError(
       () => service.createTask({ type: "research", prompt: "p", cursorConversationId: "c9", files: names }),
       "FILES_INVALID",
-      "reject: 11th file"
+      "reject: 11th file at create"
     );
 
     writeFileSync(join(wsDir, "big.ts"), "x".repeat(300 * 1024));
+    const bigRefs = registerTaskResourcePaths(["big.ts"], now);
     expectFileError(
-      () => service.createTask({ type: "research", prompt: "p", cursorConversationId: "c9", files: ["big.ts"] }),
+      () => materializeWorkspaceResources(bigRefs, wsDir),
       "FILE_TOO_LARGE",
-      "reject: per-file oversize"
+      "reject: per-file oversize at materialize"
     );
 
     const sumNames: string[] = [];
@@ -268,54 +287,40 @@ async function main() {
       writeFileSync(join(wsDir, name), "y".repeat(210 * 1024));
       sumNames.push(name);
     }
+    const sumRefs = registerTaskResourcePaths(sumNames, now);
     expectFileError(
-      () => service.createTask({ type: "research", prompt: "p", cursorConversationId: "c9", files: sumNames }),
+      () => materializeWorkspaceResources(sumRefs, wsDir),
       "FILE_TOO_LARGE",
-      "reject: sum > 1 MiB (5x210KiB)"
+      "reject: sum > 1 MiB at materialize"
     );
-    const task = service.getTask(
-      service.createTask({ type: "research", prompt: "p", cursorConversationId: "c9x" }).taskId
-    );
-    assert(task !== null, "reject: no partial task row created for failed sum case (sanity: fresh unrelated task still creatable)");
   }
 
-  // --- Range on sanitized stream ---
+  // --- Secret at 64 KiB boundary at materialize ---
   {
-    const { service } = freshDb(dbDir);
-    writeFileSync(join(wsDir, "range.ts"), "0123456789");
-    const { taskId } = service.createTask({ type: "research", prompt: "p", cursorConversationId: "c10", files: ["range.ts"] });
-    const task = service.getTask(taskId)!;
-    const fileId = task.files![0].fileId;
-    const r1 = service.readFile(taskId, fileId, 0, 4);
-    assert(r1.content === "0123", "range: first 4 bytes");
-    assert(r1.eof === false, "range: not eof mid-stream");
-    assert(r1.totalBytes === 10, "range: totalBytes correct");
-    const r2 = service.readFile(taskId, fileId, 4, 100);
-    assert(r2.content === "456789", "range: remainder");
-    assert(r2.eof === true, "range: eof at end");
-  }
-
-  // --- Secret at 64 KiB boundary — create-time guard (v0.6) ---
-  {
-    const { service } = freshDb(dbDir);
     const secret = "sk-" + "A".repeat(40);
     const prefixLen = 65536 - 10;
     const content = "x".repeat(prefixLen) + secret + "y".repeat(100);
     writeFileSync(join(wsDir, "boundary.ts"), content);
+    const refs = registerTaskResourcePaths(["boundary.ts"], now);
     expectFileError(
-      () =>
-        service.createTask({
-          type: "research",
-          prompt: "p",
-          cursorConversationId: "c11",
-          files: ["boundary.ts"],
-        }),
+      () => materializeWorkspaceResources(refs, wsDir),
       "FILES_SECRET_DETECTED",
-      "boundary: secret at 64k caught at create"
+      "boundary: secret at 64k caught at materialize"
     );
   }
 
-  // --- get_task / errors / logs: no source_path or workspace_root leakage ---
+  // --- Second materialize after change → different sha256 ---
+  {
+    const path = join(wsDir, "rehash.ts");
+    writeFileSync(path, "v1");
+    const refs = registerTaskResourcePaths(["rehash.ts"], now);
+    const first = materializeWorkspaceResources(refs, wsDir);
+    writeFileSync(path, "v2-longer");
+    const second = materializeWorkspaceResources(refs, wsDir);
+    assert(first[0].sha256 !== second[0].sha256, "rehash: dispatch-time hash reflects current bytes");
+  }
+
+  // --- get_task manifest: no path leakage ---
   {
     const { service } = freshDb(dbDir);
     writeFileSync(join(wsDir, "leak.ts"), "leak-check");
@@ -323,22 +328,15 @@ async function main() {
     const task = service.getTask(taskId)!;
     const serialized = JSON.stringify({
       taskId: task.id,
-      type: task.type,
-      prompt: task.prompt,
-      context: task.context ?? {},
-      status: task.status,
       files: (task.files ?? []).map((f) => ({
         fileId: f.fileId,
         displayName: f.displayName,
         relativePath: f.relativePath,
-        size: f.sizeBytes,
-        sha256: f.sha256,
-        mediaType: f.mediaType,
       })),
     });
-    assert(!serialized.includes(wsDir), "leakage: get_task manifest excludes workspace_root");
-    assert(!serialized.includes("snapshot_path"), "leakage: get_task manifest excludes snapshot_path key");
-    assert(!serialized.includes("source_path"), "leakage: get_task manifest excludes source_path key");
+    assert(!serialized.includes(wsDir), "leakage: manifest excludes workspace_root");
+    assert(!serialized.includes("snapshot_path"), "leakage: no snapshot_path key");
+    assert(!serialized.includes("source_path"), "leakage: no source_path key");
 
     try {
       service.readFile(taskId, "f_bogus");
@@ -349,25 +347,7 @@ async function main() {
     }
   }
 
-  // --- HANDOFF_WORKSPACE_ROOT change after create has no effect on existing task ---
-  {
-    const { service } = freshDb(dbDir);
-    writeFileSync(join(wsDir, "persist.ts"), "persisted");
-    const { taskId } = service.createTask({ type: "research", prompt: "p", cursorConversationId: "c13", files: ["persist.ts"] });
-    const task = service.getTask(taskId)!;
-    const otherRoot = mkdtempSync(join(tmpdir(), "handoff-files-other-ws-"));
-    const prevEnv = process.env.HANDOFF_WORKSPACE_ROOT;
-    process.env.HANDOFF_WORKSPACE_ROOT = otherRoot;
-    try {
-      const read = service.readFile(taskId, task.files![0].fileId);
-      assert(read.content === "persisted", "persist: read still uses persisted root after env change");
-    } finally {
-      process.env.HANDOFF_WORKSPACE_ROOT = prevEnv;
-      rmSync(otherRoot, { recursive: true, force: true });
-    }
-  }
-
-  // --- relevantFiles only (no `files`) -> no file rows; read fails ---
+  // --- relevantFiles only (no files) → no file rows ---
   {
     const { service } = freshDb(dbDir);
     const { taskId } = service.createTask({

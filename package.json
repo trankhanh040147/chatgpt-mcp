@@ -68,6 +68,7 @@
     "test:files": "tsx scripts/test-files.ts",
     "test:attachment-match": "tsx scripts/test-attachment-match.ts",
     "e2e:files-attach": "tsx scripts/e2e-files-attach.ts",
+    "e2e:files-mcp-create": "tsx scripts/e2e-files-mcp-create.ts",
     "test:rotation": "tsx scripts/test-rotation.ts",
     "test:worker-ops": "tsx scripts/test-worker-ops.ts",
     "test:chrome-cdp": "node scripts/test-chrome-cdp.mjs",

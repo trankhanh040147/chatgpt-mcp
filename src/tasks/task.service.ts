@@ -1,16 +1,11 @@
-import { createHash } from "node:crypto";
-import { closeSync, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { ulid } from "ulid";
 import type { TaskRepository } from "./task.repository.js";
 import { sanitizeContext, sanitizeSecrets } from "./sanitize.js";
 import { assertTransition } from "./task-state.js";
 import { log, logTransition } from "../logging/logger.js";
 import {
-  DEFAULT_READ_BYTES,
-  MAX_BYTES_PER_FILE,
-  MAX_READ_BYTES,
+  registerTaskResourcePaths,
   resolveWorkspaceRoot,
-  validateAndSnapshotFiles,
 } from "./files.js";
 import {
   HandoffFileError,
@@ -41,7 +36,7 @@ export class TaskService {
     let files: HandoffTask["files"] = [];
     if (input.files && input.files.length > 0) {
       workspaceRoot = resolveWorkspaceRoot();
-      files = validateAndSnapshotFiles(input.files, workspaceRoot, id, now);
+      files = registerTaskResourcePaths(input.files, now);
     }
 
     const task: HandoffTask = {
@@ -226,80 +221,28 @@ export class TaskService {
     });
   }
 
-  /** Read one snapshotted resource; sanitize-on-read for defence in depth. */
+  /** v0.7: file evidence is delivered via native attachment only. */
   readFile(
     taskId: string,
     fileId: string,
-    offset = 0,
-    maxBytes = DEFAULT_READ_BYTES
-  ): {
-    fileId: string;
-    displayName: string;
-    relativePath: string;
-    sha256: string;
-    offset: number;
-    returnedBytes: number;
-    totalBytes: number;
-    eof: boolean;
-    content: string;
-  } {
+    _offset = 0,
+    _maxBytes?: number
+  ): never {
+    const task = this.repo.getTaskById(taskId);
+    if (!task) {
+      throw new HandoffFileError("FILE_NOT_ON_TASK", "File not attached to task");
+    }
     const fileRow = this.repo.getTaskFile(taskId, fileId);
     if (!fileRow) {
       throw new HandoffFileError("FILE_NOT_ON_TASK", "File not attached to task");
     }
-
-    let lst;
-    try {
-      lst = lstatSync(fileRow.snapshotPath);
-    } catch {
-      throw new HandoffFileError("FILE_NOT_FOUND", "Snapshot missing");
-    }
-    if (lst.isSymbolicLink() || !lst.isFile()) {
-      throw new HandoffFileError("FILE_NOT_ALLOWED", "Not a regular file");
-    }
-    if (lst.size > MAX_BYTES_PER_FILE) {
-      throw new HandoffFileError("FILE_TOO_LARGE", "File exceeds cap");
-    }
-
-    const fd = openSync(fileRow.snapshotPath, "r");
-    let raw: Buffer;
-    try {
-      const st = fstatSync(fd);
-      if (!st.isFile()) {
-        throw new HandoffFileError("FILE_NOT_ALLOWED", "Not a regular file");
-      }
-      raw = Buffer.alloc(st.size);
-      if (st.size > 0) readSync(fd, raw, 0, st.size, 0);
-    } finally {
-      closeSync(fd);
-    }
-
-    const actualHash = createHash("sha256").update(raw).digest("hex");
-    if (actualHash !== fileRow.sha256) {
+    if ((task.files ?? []).length > 0) {
       throw new HandoffFileError(
-        "FILE_NOT_FOUND",
-        "Snapshot integrity check failed"
+        "FILE_READ_DISABLED",
+        "File evidence is delivered via native ChatGPT attachment in v0.7; handoff_read_file is not available for attached files"
       );
     }
-
-    const sanitizedBuf = Buffer.from(sanitizeSecrets(raw.toString("utf-8")), "utf-8");
-    const totalBytes = sanitizedBuf.length;
-    const clampedMax = Math.min(Math.max(0, maxBytes ?? DEFAULT_READ_BYTES), MAX_READ_BYTES);
-    const start = Math.min(Math.max(0, offset ?? 0), totalBytes);
-    const end = Math.min(start + clampedMax, totalBytes);
-    const slice = sanitizedBuf.subarray(start, end);
-
-    return {
-      fileId: fileRow.fileId,
-      displayName: fileRow.displayName,
-      relativePath: fileRow.relativePath,
-      sha256: fileRow.sha256,
-      offset: start,
-      returnedBytes: slice.length,
-      totalBytes,
-      eof: start + slice.length >= totalBytes,
-      content: slice.toString("utf-8"),
-    };
+    throw new HandoffFileError("FILE_NOT_ON_TASK", "File not attached to task");
   }
 
   getTask(taskId: string): HandoffTask | null {

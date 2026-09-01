@@ -1,4 +1,4 @@
-import type { HandoffTaskFile } from "../tasks/task.types.js";
+import type { PreparedResource } from "../tasks/task.types.js";
 
 export type PrepareFailureReason =
   | "INPUT_NOT_FOUND"
@@ -25,7 +25,7 @@ export type PrepareResult = PrepareSuccess | PrepareFailure;
 
 export interface ResourceDeliveryTarget {
   prepare(
-    files: readonly HandoffTaskFile[],
+    prepared: readonly PreparedResource[],
     taskId: string
   ): Promise<PrepareResult>;
   cleanup(): Promise<void>;

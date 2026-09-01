@@ -101,6 +101,19 @@ QUEUED → DISPATCHING → [fence] DISPATCHED → PROCESSING → COMPLETED
 
 Worker only claims work when its own state is **READY**. If stuck at `QUEUED`, the HTTP API may still be up while the dispatcher is not READY (e.g. `STARTING`).
 
+## File evidence (0.7)
+
+```text
+handoff_create_task(files[])  → TaskResource refs + workspace_root (no byte copy)
+claimNextQueued               → task.files loaded for worker
+dispatch:
+  materializeWorkspaceResources → PreparedResource buffers (RAM)
+  native setInputFiles(buffer)  → chip multiset verify
+  markDispatchStarted (fence)   → TASK_ID in chat
+```
+
+`handoff_read_file` returns `FILE_READ_DISABLED` when the task has file refs — ChatGPT reads composer attachment chips. Accepted race: workspace file may change or disappear between create and dispatch.
+
 **0.5.0 chat budget:** each successful `TASK_ID` send increments `tasks_on_chat` (once per task, including later FAILED/TIMED_OUT). At `HANDOFF_MAX_TASKS_PER_CHAT` (default 20) the worker cannot claim until idle `rotate-worker` commits a new Chat+Cursor URL. Operator then approves MCP writes if needed and restarts the broker. Details: [rotation.md](rotation.md).
 
 ## Usage estimates (ops dashboard)
@@ -136,6 +149,7 @@ CDP Chrome (debug dir)     ← worker attaches here — login Pro again once
 | CDP attach | `src/browser/chatgpt.ts` |
 | Config / modes | `src/index.ts` (`mcp` \| `status-api` \| `worker` \| `browser-worker` \| `remote-mcp`) |
 | Leases / fencing | `src/tasks/task.repository.ts` |
+| File materialize + attach | `src/tasks/files.ts`, `src/browser/composer-attach.ts`, `src/browser/worker.ts` |
 | Topology validation | `src/config/workers-topology.ts` |
 | Env inventory | Obsidian `vault-mac-1/configs/chatgpt-mcp-env.md` |
 | Ops dashboard | `src/dashboard/public/` served at `/dashboard/` by status-api (`docs/dashboard.md`) |
