@@ -21,6 +21,7 @@ ADR-002 immutable snapshot simplified read-path races but added disk I/O at crea
 ## Consequences
 
 - No `snapshot-store.ts`; DB file rows keep legacy columns as placeholders on insert.
+- **Legacy schema debt:** `handoff_task_files.source_path`, `size_bytes`, `sha256`, `media_type` remain for v0.6 compatibility; not authoritative in v0.7 (no migration in this release).
 - `handoff_read_file` returns `FILE_READ_DISABLED` for tasks with attached files (Option C).
 - Secret/content/size/symlink guards run at materialize (see updated [ADR-005](./ADR-005-create-time-secret-scan.md)).
 - `RESOURCE_PREPARED` logs hash of bytes actually attached.

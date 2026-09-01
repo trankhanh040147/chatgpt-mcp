@@ -12,6 +12,7 @@ import {
   type PrepareFailureReason,
   type PrepareResult,
 } from "../transport/types.js";
+import { resourceExtensionSuffixesForChipMatch } from "../tasks/files.js";
 
 const UPLOAD_WAIT_MS = 30_000;
 const CHIP_POLL_MS = 250;
@@ -26,7 +27,8 @@ function injectFailAfter(): number | null {
 
 /** Read attachment chip display names from composer staging area. */
 export async function readAttachmentChips(page: Page): Promise<string[]> {
-  return page.evaluate(() => {
+  const suffixes = resourceExtensionSuffixesForChipMatch();
+  return page.evaluate((extSuffixes) => {
     const names: string[] = [];
     const seen = new Set<string>();
 
@@ -36,6 +38,11 @@ export async function readAttachmentChips(page: Page): Promise<string[]> {
       seen.add(t.toLowerCase());
       names.push(t);
     };
+
+    const escaped = extSuffixes
+      .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("|");
+    const extRe = new RegExp(`\\.(${escaped})$`, "i");
 
     for (const btn of document.querySelectorAll("button[aria-label]")) {
       const label = btn.getAttribute("aria-label") ?? "";
@@ -53,13 +60,13 @@ export async function readAttachmentChips(page: Page): Promise<string[]> {
     )) {
       const text = (el.textContent ?? "").trim();
       if (!text || text.length > 120) continue;
-      if (/\.(ts|tsx|js|jsx|md|txt|json|py|go|rs|sql|yml|yaml|toml|html|css|sh)$/i.test(text)) {
+      if (extRe.test(text.split("\n")[0]!.trim())) {
         push(text.split("\n")[0]!.trim());
       }
     }
 
     return names;
-  });
+  }, suffixes);
 }
 
 async function findFileInput(page: Page) {

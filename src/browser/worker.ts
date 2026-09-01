@@ -7,6 +7,10 @@ import { ChatGptBrowser } from "./chatgpt.js";
 import { createNativeDeliveryTarget } from "../transport/native-delivery.js";
 import { materializeWorkspaceResources } from "../tasks/files.js";
 import { HandoffFileError } from "../tasks/task.types.js";
+import {
+  cleanupPreparedAttachSession,
+  type PreparedAttachSession,
+} from "./attachment-lifecycle.js";
 import type { UiWriteMutex } from "./ui-write-mutex.js";
 import { log } from "../logging/logger.js";
 import type { WorkerStatus } from "../tasks/task.types.js";
@@ -358,6 +362,8 @@ export class BrowserWorker {
       this.workerStaleMs
     );
 
+    let attachSession: PreparedAttachSession | null = null;
+
     try {
       const rateLimited = await browser.detectRateLimit();
       if (rateLimited) {
@@ -439,17 +445,19 @@ export class BrowserWorker {
           return;
         }
 
+        attachSession = { transport, prepared: false };
+
         const prepared = await this.withUiWrite(async () => {
           this.options.assertBindingFresh?.();
           return transport.prepare(preparedResources, task.id);
         });
 
         if (!prepared.ok) {
-          await this.withUiWrite(async () => {
-            await transport.cleanup();
-          });
-
-          const clean = await transport.isClean();
+          attachSession.prepared = true;
+          const clean = await this.cleanupPreparedAttachments(
+            task.id,
+            attachSession
+          );
           const failOpts = {
             workerId: this.workerId,
             leaseToken,
@@ -480,7 +488,52 @@ export class BrowserWorker {
           this.clearActiveTask(workerState);
           return;
         }
+
+        attachSession.prepared = true;
       }
+
+      const abortBeforeTaskIdSend = async (
+        message: string,
+        opts?: {
+          markDispatchFailed?: boolean;
+          permanent?: boolean;
+        }
+      ): Promise<void> => {
+        const clean = await this.cleanupPreparedAttachments(
+          task.id,
+          attachSession
+        );
+        const failOpts = {
+          workerId: this.workerId,
+          leaseToken,
+          instanceToken: this.instanceToken,
+        };
+        if (!clean) {
+          taskService.markDispatchFailed(
+            task.id,
+            `${message}; composer not clean after attachment cleanup`,
+            { ...failOpts, permanent: true }
+          );
+          log({
+            event: "WARN",
+            component: "browser-worker",
+            taskId: task.id,
+            message: `${message} — composer not clean after cleanup (fail-closed)`,
+          });
+        } else if (opts?.markDispatchFailed) {
+          taskService.markDispatchFailed(task.id, message, {
+            ...failOpts,
+            permanent: opts.permanent,
+          });
+        }
+        log({
+          event: "WARN",
+          component: "browser-worker",
+          taskId: task.id,
+          message,
+        });
+        this.clearActiveTask(workerState);
+      };
 
       // Lease CAS outside UI mutex (must not stall other actors on DB/MCP).
       const fenced = taskService.markDispatchStarted(
@@ -492,13 +545,9 @@ export class BrowserWorker {
         this.workerStaleMs
       );
       if (!fenced) {
-        log({
-          event: "WARN",
-          component: "browser-worker",
-          taskId: task.id,
-          message: "Dispatch fence CAS failed — not touching chat",
+        await abortBeforeTaskIdSend("Dispatch fence CAS failed — not touching chat", {
+          markDispatchFailed: true,
         });
-        this.clearActiveTask(workerState);
         return;
       }
 
@@ -513,13 +562,10 @@ export class BrowserWorker {
           this.workerStaleMs
         )
       ) {
-        log({
-          event: "WARN",
-          component: "browser-worker",
-          taskId: task.id,
-          message: "Lost lease after fence — skip TASK_ID type (fail-closed)",
-        });
-        this.clearActiveTask(workerState);
+        await abortBeforeTaskIdSend(
+          "Lost lease after fence — skip TASK_ID type (fail-closed)",
+          { markDispatchFailed: false }
+        );
         return;
       }
 
@@ -554,6 +600,7 @@ export class BrowserWorker {
       workerState.setStatus("BUSY", { currentTaskId: task.id });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      await this.cleanupPreparedAttachments(task.id, attachSession);
       await browser.screenshotOnFailure(task.id);
       taskService.markDispatchFailed(task.id, message, {
         workerId: this.workerId,
@@ -831,6 +878,26 @@ export class BrowserWorker {
           "Submit window expired while idle — task TIMED_OUT; worker free for next QUEUED task",
       });
     }
+  }
+
+  private async cleanupPreparedAttachments(
+    taskId: string,
+    session: PreparedAttachSession | null
+  ): Promise<boolean> {
+    const clean = await cleanupPreparedAttachSession(session, async () => {
+      await this.withUiWrite(async () => {
+        await session!.transport.cleanup();
+      });
+    });
+    if (!clean) {
+      log({
+        event: "WARN",
+        component: "browser-worker",
+        taskId,
+        message: "Composer not clean after attachment cleanup",
+      });
+    }
+    return clean;
   }
 
   private clearActiveTask(workerState: WorkerStateManager): void {

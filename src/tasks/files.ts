@@ -25,10 +25,22 @@ const SECRET_NAME_RE =
   /(^|[\\/])(\.env(\..+)?|[^\\/]*\.pem|[^\\/]*\.key|[^\\/]*\.p12|[^\\/]*\.pfx|id_rsa|id_ed25519|credentials\.json)$/i;
 const ENV_EXAMPLE_RE = /(^|[\\/])\.env\.example$/i;
 
-function isAllowedExtension(relPath: string): boolean {
+/** Shared with composer chip detection (attachment-match fallback path). */
+export const RESOURCE_FILE_EXTENSIONS = EXT_ALLOWLIST;
+
+export function isAllowedResourceExtension(relPath: string): boolean {
   const lower = relPath.toLowerCase();
   if (ENV_EXAMPLE_RE.test(lower)) return true;
   return EXT_ALLOWLIST.some((ext) => lower.endsWith(ext));
+}
+
+/** Suffixes without dot for DOM chip text matching in browser.evaluate. */
+export function resourceExtensionSuffixesForChipMatch(): string[] {
+  return EXT_ALLOWLIST.map((ext) => ext.slice(1));
+}
+
+function isAllowedExtension(relPath: string): boolean {
+  return isAllowedResourceExtension(relPath);
 }
 
 function normalizeRelPosix(raw: string): string {
@@ -157,12 +169,16 @@ export function materializeWorkspaceResources(
     if (lst.size > MAX_BYTES_PER_FILE) {
       throw new HandoffFileError("FILE_TOO_LARGE", "File exceeds per-file cap");
     }
-    totalBytes += lst.size;
+
+    const buf = readFileSync(realCandidate);
+    if (buf.length > MAX_BYTES_PER_FILE) {
+      throw new HandoffFileError("FILE_TOO_LARGE", "File exceeds per-file cap");
+    }
+    totalBytes += buf.length;
     if (totalBytes > MAX_BYTES_PER_TASK) {
       throw new HandoffFileError("FILE_TOO_LARGE", "Task byte budget exceeded");
     }
 
-    const buf = readFileSync(realCandidate);
     if (buf.subarray(0, 8192).includes(0)) {
       throw new HandoffFileError("FILES_INVALID", "Binary/NUL content rejected");
     }
