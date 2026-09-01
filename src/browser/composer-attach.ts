@@ -14,8 +14,19 @@ import {
 } from "../transport/types.js";
 import { resourceExtensionSuffixesForChipMatch } from "../tasks/files.js";
 
-const UPLOAD_WAIT_MS = 30_000;
+/** Chip-verify wait budget: scales with batch size (ChatGPT DOM is slow for large attaches). */
+export const UPLOAD_WAIT_BASE_MS = 30_000;
+export const UPLOAD_WAIT_PER_FILE_MS = 500;
+export const UPLOAD_WAIT_MAX_MS = 180_000;
 const CHIP_POLL_MS = 250;
+
+export function computeUploadWaitMs(fileCount: number): number {
+  if (fileCount <= 0) return 0;
+  return Math.min(
+    UPLOAD_WAIT_MAX_MS,
+    UPLOAD_WAIT_BASE_MS + UPLOAD_WAIT_PER_FILE_MS * fileCount
+  );
+}
 
 /** Test hook: fail after N successful file uploads (E2E partial failure). */
 function injectFailAfter(): number | null {
@@ -133,6 +144,57 @@ async function removeChipByName(page: Page, displayName: string): Promise<boolea
   return false;
 }
 
+/** Remove every attachment chip currently in the composer (retry orphan cleanup). */
+const CHIP_CLEAR_BUDGET_MS = 15_000;
+const CHIP_CLEAR_VISIBILITY_MS = 200;
+
+async function clearAllAttachmentChips(page: Page): Promise<number> {
+  const deadline = Date.now() + CHIP_CLEAR_BUDGET_MS;
+  let removed = 0;
+
+  while (Date.now() < deadline) {
+    const chips = await readAttachmentChips(page);
+    if (chips.length === 0) break;
+
+    const bulkClicked = await page
+      .evaluate(() => {
+        let clicked = 0;
+        for (const btn of document.querySelectorAll("button[aria-label^='Remove']")) {
+          if (!(btn instanceof HTMLElement) || btn.offsetParent === null) continue;
+          btn.click();
+          clicked += 1;
+        }
+        return clicked;
+      })
+      .catch(() => 0);
+
+    if (bulkClicked > 0) {
+      removed += bulkClicked;
+      await page.waitForTimeout(400);
+      continue;
+    }
+
+    let progress = false;
+    for (const name of chips) {
+      if (Date.now() >= deadline) break;
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const removeRe = new RegExp(`^Remove (?:file \\d+: )?${escaped}(?: file)?$`, "i");
+      const byLabel = page.getByRole("button", { name: removeRe }).first();
+      if (
+        await byLabel.isVisible({ timeout: CHIP_CLEAR_VISIBILITY_MS }).catch(() => false)
+      ) {
+        await byLabel.click({ timeout: 2000 }).catch(() => undefined);
+        removed += 1;
+        progress = true;
+        await page.waitForTimeout(200);
+      }
+    }
+    if (!progress) break;
+  }
+
+  return removed;
+}
+
 function toFilePayload(p: PreparedResource) {
   return {
     name: p.displayName,
@@ -156,6 +218,25 @@ export class ComposerAttachTransport {
     }
 
     const expected = prepared.map((f) => f.displayName);
+
+    const chipsBefore = await readAttachmentChips(this.page);
+    if (chipsBefore.length > 0) {
+      log({
+        event: "INFO",
+        component: "composer-attach",
+        taskId,
+        message: `clearing ${chipsBefore.length} orphan chip(s) before attach (budget=${CHIP_CLEAR_BUDGET_MS}ms)`,
+      });
+    }
+    const cleared = await clearAllAttachmentChips(this.page);
+    if (cleared > 0) {
+      log({
+        event: "INFO",
+        component: "composer-attach",
+        taskId,
+        message: `cleared ${cleared} orphan attachment chip(s) before prepare`,
+      });
+    }
     this.baseline = await readAttachmentChips(this.page);
     this.lastAdded = [];
 
@@ -219,18 +300,19 @@ export class ComposerAttachTransport {
       };
     }
 
+    const uploadWaitMs = computeUploadWaitMs(prepared.length);
     log({
       event: "RESOURCE_ATTACHED",
       component: "composer-attach",
       taskId,
-      message: `count=${prepared.length}`,
+      message: `count=${prepared.length} verifyWaitMs=${uploadWaitMs}`,
     });
 
     const waited = await waitForAddedChips(
       this.page,
       this.baseline,
       expected,
-      UPLOAD_WAIT_MS
+      uploadWaitMs
     );
     const after = waited?.after ?? (await readAttachmentChips(this.page));
     this.lastAdded = waited?.added ?? multisetDifference(this.baseline, after);
@@ -256,30 +338,19 @@ export class ComposerAttachTransport {
       event: "RESOURCE_VERIFIED",
       component: "composer-attach",
       taskId,
-      message: `added=${this.lastAdded.join(",")}`,
+      message: `mode=${verify.ok ? verify.mode : "unknown"} added=${this.lastAdded.length} expected=${expected.length}`,
     });
 
     return { ok: true, expected, added: this.lastAdded };
   }
 
   async cleanup(): Promise<void> {
-    const toRemove = [...this.lastAdded];
-    if (toRemove.length === 0) {
-      const current = await readAttachmentChips(this.page);
-      for (const name of multisetDifference(this.baseline, current)) {
-        toRemove.push(name);
-      }
-    }
-
-    for (const name of toRemove) {
-      await removeChipByName(this.page, name);
-    }
+    await clearAllAttachmentChips(this.page);
     this.lastAdded = [];
   }
 
   async isClean(): Promise<boolean> {
     const current = await readAttachmentChips(this.page);
-    const orphan = multisetDifference(this.baseline, current);
-    return orphan.length === 0;
+    return current.length === 0;
   }
 }

@@ -572,7 +572,10 @@ export class BrowserWorker {
       // POINT OF NO RETURN — dispatch_started_at set; no automatic redispatch.
       await this.withUiWrite(async () => {
         this.options.assertBindingFresh?.();
-        await browser.submitTaskId(task.id, { skipIdleWait: true });
+        await browser.submitTaskId(task.id, {
+          skipIdleWait: true,
+          attachmentCount: taskFiles.length,
+        });
       });
 
       const budget = taskService.recordChatDispatch(
