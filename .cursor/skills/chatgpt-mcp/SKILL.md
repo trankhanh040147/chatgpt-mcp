@@ -44,7 +44,7 @@ If the user **explicitly requests** a handoff — `/chatgpt-mcp`, "handoff to Ch
 ## Invoke (every Cursor workspace)
 
 1. **Light → stop** — Light must not call MCP (`handoff_create_task`), unless user explicitly overrode (see above).
-2. Standard/Deep: if a handoff would materially help, call `handoff_create_task` on `chatgpt-mcp` / `user-chatgpt-mcp` with `type` + `prompt` (optional `context`). Skip if local context became sufficient.
+2. Standard/Deep: if a handoff would materially help, call `handoff_create_task` on `chatgpt-mcp` / `user-chatgpt-mcp` with `type` + `prompt` (optional `context`, optional `files` — workspace-relative paths already in the decision). Skip if local context became sufficient.
 3. Do **not** write SQLite yourself.
 4. **End the turn immediately** after create succeeds.
    - Do **not** poll `handoff_get_task_status`.

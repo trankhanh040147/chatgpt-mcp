@@ -82,7 +82,8 @@ Cursor handoff_get_result → continue work
 | `handoff_create_task` | Coding agent | Create task → `QUEUED` (optional `clientSessionId`) |
 | `handoff_get_task_status` | Both | Poll status without full result |
 | `handoff_get_result` | Cursor | Read completed answer |
-| `handoff_get_task` | ChatGPT | Load full prompt + context |
+| `handoff_get_task` | ChatGPT | Load full prompt + context + file manifest |
+| `handoff_read_file` | ChatGPT | Read one task-scoped evidence file (lazy; `fileId` only) |
 | `handoff_submit_result` | ChatGPT | Write answer → `COMPLETED` |
 
 ### Task status (simplified)
@@ -99,6 +100,19 @@ QUEUED → DISPATCHING → [fence] DISPATCHED → PROCESSING → COMPLETED
 ```
 
 Worker only claims work when its own state is **READY**. If stuck at `QUEUED`, the HTTP API may still be up while the dispatcher is not READY (e.g. `STARTING`).
+
+## File evidence (0.7)
+
+```text
+handoff_create_task(files[])  → TaskResource refs + workspace_root (no byte copy)
+claimNextQueued               → task.files loaded for worker
+dispatch:
+  materializeWorkspaceResources → PreparedResource buffers (RAM)
+  native setInputFiles(buffer)  → chip multiset verify
+  markDispatchStarted (fence)   → TASK_ID in chat
+```
+
+`handoff_read_file` returns `FILE_READ_DISABLED` when the task has file refs — ChatGPT reads composer attachment chips. Accepted race: workspace file may change or disappear between create and dispatch.
 
 **0.5.0 chat budget:** each successful `TASK_ID` send increments `tasks_on_chat` (once per task, including later FAILED/TIMED_OUT). At `HANDOFF_MAX_TASKS_PER_CHAT` (default 20) the worker cannot claim until idle `rotate-worker` commits a new Chat+Cursor URL. Operator then approves MCP writes if needed and restarts the broker. Details: [rotation.md](rotation.md).
 
@@ -135,6 +149,7 @@ CDP Chrome (debug dir)     ← worker attaches here — login Pro again once
 | CDP attach | `src/browser/chatgpt.ts` |
 | Config / modes | `src/index.ts` (`mcp` \| `status-api` \| `worker` \| `browser-worker` \| `remote-mcp`) |
 | Leases / fencing | `src/tasks/task.repository.ts` |
+| File materialize + attach | `src/tasks/files.ts`, `src/browser/composer-attach.ts`, `src/browser/worker.ts` |
 | Topology validation | `src/config/workers-topology.ts` |
 | Env inventory | Obsidian `vault-mac-1/configs/chatgpt-mcp-env.md` |
 | Ops dashboard | `src/dashboard/public/` served at `/dashboard/` by status-api (`docs/dashboard.md`) |

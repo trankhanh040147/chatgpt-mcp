@@ -42,24 +42,42 @@ export interface HandoffResultMetadata {
   confidence?: "low" | "medium" | "high";
 }
 
-export interface HandoffTaskFile {
+export type ResourceSource =
+  | { kind: "workspace_file"; relativePath: string }
+  | { kind: "mcp_resource"; uri: string; serverId?: string };
+
+/** Persisted resource reference (materialized at dispatch). */
+export interface TaskResource {
   fileId: string;
   displayName: string;
   relativePath: string;
-  sourcePath: string;
+  source: ResourceSource;
+  createdAt: string;
+}
+
+/** Ephemeral bytes prepared for one dispatch attempt. */
+export interface PreparedResource {
+  resourceId: string;
+  displayName: string;
+  bytes: Buffer;
   sizeBytes: number;
   sha256: string;
   mediaType: string;
-  createdAt: string;
 }
+
+/** @deprecated Alias — use TaskResource */
+export type HandoffTaskFile = TaskResource;
 
 export type HandoffFileErrorCode =
   | "FILE_NOT_ON_TASK"
   | "FILE_NOT_FOUND"
   | "FILE_NOT_ALLOWED"
-  | "FILE_CHANGED_REATTACH"
   | "FILE_TOO_LARGE"
-  | "FILES_INVALID";
+  | "FILES_INVALID"
+  | "FILES_DUPLICATE_BASENAME"
+  | "FILES_SECRET_DETECTED"
+  | "FILE_READ_DISABLED"
+  | "RESOURCES_MCP_DEFERRED";
 
 export class HandoffFileError extends Error {
   code: HandoffFileErrorCode;
@@ -93,7 +111,7 @@ export interface HandoffTask {
   nudgeStartedAt?: string;
   nudgeAttempt: number;
   workspaceRoot?: string;
-  files?: HandoffTaskFile[];
+  files?: TaskResource[];
   taskClass?: "USER" | "SYSTEM_PROBE";
   targetWorkerId?: string;
 }
@@ -115,9 +133,7 @@ export interface WorkerStateRow {
   httpPort?: number;
   startedAt?: string;
   pid?: number;
-  /** Dispatched tasks on the current chat URL (0.5 rotation budget). */
   tasksOnChat?: number;
-  /** Chat URL the counter is bound to. */
   tasksOnChatUrl?: string;
   previousWorkerUrl?: string;
   chatRotatedAt?: string;
@@ -142,7 +158,7 @@ export interface CreateTaskInput {
   context?: HandoffTaskContext;
   /** Host session / correlation key. Optional for portable MCP hosts. */
   cursorConversationId: string;
-  /** Workspace-relative evidence file paths (max 10). Never absolute paths. */
+  /** Workspace-relative evidence file paths. Never absolute paths. */
   files?: string[];
   taskClass?: "USER" | "SYSTEM_PROBE";
   targetWorkerId?: string;
@@ -150,7 +166,6 @@ export interface CreateTaskInput {
 
 /** Sentinel when the host does not supply a session id (manual poll by taskId). */
 export const UNSCOPED_CLIENT_SESSION_ID = "unscoped";
-
 
 export interface SubmitResultInput {
   taskId: string;

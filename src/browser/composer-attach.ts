@@ -1,0 +1,356 @@
+import type { Page } from "playwright";
+import { selectors } from "./selectors.js";
+import {
+  multisetDifference,
+  normalizeChipName,
+  verifyAddedChipsMatchExpected,
+} from "./attachment-match.js";
+import { log } from "../logging/logger.js";
+import type { PreparedResource } from "../tasks/task.types.js";
+import {
+  classifyPrepareFailure,
+  type PrepareFailureReason,
+  type PrepareResult,
+} from "../transport/types.js";
+import { resourceExtensionSuffixesForChipMatch } from "../tasks/files.js";
+
+/** Chip-verify wait budget: scales with batch size (ChatGPT DOM is slow for large attaches). */
+export const UPLOAD_WAIT_BASE_MS = 30_000;
+export const UPLOAD_WAIT_PER_FILE_MS = 500;
+export const UPLOAD_WAIT_MAX_MS = 180_000;
+const CHIP_POLL_MS = 250;
+
+export function computeUploadWaitMs(fileCount: number): number {
+  if (fileCount <= 0) return 0;
+  return Math.min(
+    UPLOAD_WAIT_MAX_MS,
+    UPLOAD_WAIT_BASE_MS + UPLOAD_WAIT_PER_FILE_MS * fileCount
+  );
+}
+
+/** Test hook: fail after N successful file uploads (E2E partial failure). */
+function injectFailAfter(): number | null {
+  const raw = process.env.HANDOFF_ATTACH_FAIL_AFTER?.trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/** Read attachment chip display names from composer staging area. */
+export async function readAttachmentChips(page: Page): Promise<string[]> {
+  const suffixes = resourceExtensionSuffixesForChipMatch();
+  return page.evaluate((extSuffixes) => {
+    const names: string[] = [];
+    const seen = new Set<string>();
+
+    const push = (raw: string | null | undefined) => {
+      let t = (raw ?? "").trim();
+      const numbered = t.match(/^file\s+\d+:\s*(.+)$/i);
+      if (numbered?.[1]) t = numbered[1].trim();
+      if (!t || seen.has(t.toLowerCase())) return;
+      seen.add(t.toLowerCase());
+      names.push(t);
+    };
+
+    const escaped = extSuffixes
+      .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("|");
+    const extRe = new RegExp(`\\.(${escaped})$`, "i");
+
+    for (const btn of document.querySelectorAll("button[aria-label]")) {
+      const label = btn.getAttribute("aria-label") ?? "";
+      const m = label.match(/^Remove\s+(?:file\s+\d+:\s*)?(.+?)(?:\s+file)?$/i);
+      if (m?.[1]) push(m[1]);
+    }
+
+    const composer =
+      document.querySelector("#prompt-textarea")?.closest("form") ??
+      document.querySelector("main form") ??
+      document.body;
+
+    for (const el of composer.querySelectorAll(
+      '[data-testid*="file"], [data-testid*="attachment"], [class*="attachment"]'
+    )) {
+      const text = (el.textContent ?? "").trim();
+      if (!text || text.length > 120) continue;
+      if (extRe.test(text.split("\n")[0]!.trim())) {
+        push(text.split("\n")[0]!.trim());
+      }
+    }
+
+    return names;
+  }, suffixes);
+}
+
+async function findFileInput(page: Page) {
+  let input = page.locator(selectors.fileInput).first();
+  if (await input.count().catch(() => 0)) {
+    return input;
+  }
+
+  const menuBtn = page.locator(selectors.attachMenuButton).first();
+  if (await menuBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+    await menuBtn.click({ timeout: 5000 }).catch(() => undefined);
+    await page.waitForTimeout(400);
+  }
+
+  input = page.locator(selectors.fileInput).first();
+  if (await input.count().catch(() => 0)) {
+    return input;
+  }
+
+  return null;
+}
+
+async function waitForAddedChips(
+  page: Page,
+  before: string[],
+  expected: string[],
+  deadlineMs: number
+): Promise<{ after: string[]; added: string[] } | null> {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    const after = await readAttachmentChips(page);
+    const added = multisetDifference(before, after);
+    const verify = verifyAddedChipsMatchExpected(before, after, expected);
+    if (verify.ok) {
+      return { after, added };
+    }
+    await page.waitForTimeout(CHIP_POLL_MS);
+  }
+  return null;
+}
+
+async function removeChipByName(page: Page, displayName: string): Promise<boolean> {
+  const escaped = displayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const removeRe = new RegExp(`^Remove (?:file \\d+: )?${escaped}(?: file)?$`, "i");
+  const byLabel = page.getByRole("button", { name: removeRe }).first();
+  if (await byLabel.isVisible({ timeout: 800 }).catch(() => false)) {
+    await byLabel.click({ timeout: 3000 }).catch(() => undefined);
+    await page.waitForTimeout(300);
+    return true;
+  }
+
+  const btn = page
+    .locator(selectors.attachmentRemoveButton)
+    .filter({ hasText: new RegExp(escaped, "i") })
+    .first();
+  if (await btn.isVisible({ timeout: 800 }).catch(() => false)) {
+    await btn.click({ timeout: 3000 }).catch(() => undefined);
+    await page.waitForTimeout(300);
+    return true;
+  }
+
+  return false;
+}
+
+/** Remove every attachment chip currently in the composer (retry orphan cleanup). */
+const CHIP_CLEAR_BUDGET_MS = 15_000;
+const CHIP_CLEAR_VISIBILITY_MS = 200;
+
+async function clearAllAttachmentChips(page: Page): Promise<number> {
+  const deadline = Date.now() + CHIP_CLEAR_BUDGET_MS;
+  let removed = 0;
+
+  while (Date.now() < deadline) {
+    const chips = await readAttachmentChips(page);
+    if (chips.length === 0) break;
+
+    const bulkClicked = await page
+      .evaluate(() => {
+        let clicked = 0;
+        for (const btn of document.querySelectorAll("button[aria-label^='Remove']")) {
+          if (!(btn instanceof HTMLElement) || btn.offsetParent === null) continue;
+          btn.click();
+          clicked += 1;
+        }
+        return clicked;
+      })
+      .catch(() => 0);
+
+    if (bulkClicked > 0) {
+      removed += bulkClicked;
+      await page.waitForTimeout(400);
+      continue;
+    }
+
+    let progress = false;
+    for (const name of chips) {
+      if (Date.now() >= deadline) break;
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const removeRe = new RegExp(`^Remove (?:file \\d+: )?${escaped}(?: file)?$`, "i");
+      const byLabel = page.getByRole("button", { name: removeRe }).first();
+      if (
+        await byLabel.isVisible({ timeout: CHIP_CLEAR_VISIBILITY_MS }).catch(() => false)
+      ) {
+        await byLabel.click({ timeout: 2000 }).catch(() => undefined);
+        removed += 1;
+        progress = true;
+        await page.waitForTimeout(200);
+      }
+    }
+    if (!progress) break;
+  }
+
+  return removed;
+}
+
+function toFilePayload(p: PreparedResource) {
+  return {
+    name: p.displayName,
+    mimeType: p.mediaType,
+    buffer: p.bytes,
+  };
+}
+
+export class ComposerAttachTransport {
+  private baseline: string[] = [];
+  private lastAdded: string[] = [];
+
+  constructor(private readonly page: Page) {}
+
+  async prepare(
+    prepared: readonly PreparedResource[],
+    taskId: string
+  ): Promise<PrepareResult> {
+    if (prepared.length === 0) {
+      return { ok: true, expected: [], added: [] };
+    }
+
+    const expected = prepared.map((f) => f.displayName);
+
+    const chipsBefore = await readAttachmentChips(this.page);
+    if (chipsBefore.length > 0) {
+      log({
+        event: "INFO",
+        component: "composer-attach",
+        taskId,
+        message: `clearing ${chipsBefore.length} orphan chip(s) before attach (budget=${CHIP_CLEAR_BUDGET_MS}ms)`,
+      });
+    }
+    const cleared = await clearAllAttachmentChips(this.page);
+    if (cleared > 0) {
+      log({
+        event: "INFO",
+        component: "composer-attach",
+        taskId,
+        message: `cleared ${cleared} orphan attachment chip(s) before prepare`,
+      });
+    }
+    this.baseline = await readAttachmentChips(this.page);
+    this.lastAdded = [];
+
+    for (const p of prepared) {
+      log({
+        event: "RESOURCE_PREPARED",
+        component: "composer-attach",
+        taskId,
+        message: `resourceId=${p.resourceId} displayName=${p.displayName} sizeBytes=${p.sizeBytes} sha256=${p.sha256}`,
+      });
+    }
+
+    const fileInput = await findFileInput(this.page);
+    if (!fileInput) {
+      const observed = await readAttachmentChips(this.page);
+      return {
+        ok: false,
+        expected,
+        observed,
+        ...classifyPrepareFailure("INPUT_NOT_FOUND"),
+      };
+    }
+
+    const failAfter = injectFailAfter();
+    const payloads = prepared.map(toFilePayload);
+
+    try {
+      if (failAfter === 0) {
+        throw new Error("HANDOFF_ATTACH_INJECT_FAIL");
+      }
+
+      if (failAfter != null && failAfter < prepared.length) {
+        const partial = payloads.slice(0, failAfter);
+        if (partial.length > 0) {
+          await fileInput.setInputFiles(partial);
+        }
+        throw new Error("HANDOFF_ATTACH_INJECT_FAIL");
+      }
+
+      await fileInput.setInputFiles(payloads);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const afterPartial = await readAttachmentChips(this.page);
+      this.lastAdded = multisetDifference(this.baseline, afterPartial);
+      const reason: PrepareFailureReason =
+        message.includes("rejected") || message.includes("not allowed")
+          ? "UPLOAD_REJECTED"
+          : "UPLOAD_TIMEOUT";
+      log({
+        event: "RESOURCE_PREPARE_FAILED",
+        component: "composer-attach",
+        taskId,
+        message: `reason=${reason} retryable=${classifyPrepareFailure(reason).retryable}`,
+      });
+      return {
+        ok: false,
+        expected,
+        observed: afterPartial,
+        added: this.lastAdded,
+        ...classifyPrepareFailure(reason),
+      };
+    }
+
+    const uploadWaitMs = computeUploadWaitMs(prepared.length);
+    log({
+      event: "RESOURCE_ATTACHED",
+      component: "composer-attach",
+      taskId,
+      message: `count=${prepared.length} verifyWaitMs=${uploadWaitMs}`,
+    });
+
+    const waited = await waitForAddedChips(
+      this.page,
+      this.baseline,
+      expected,
+      uploadWaitMs
+    );
+    const after = waited?.after ?? (await readAttachmentChips(this.page));
+    this.lastAdded = waited?.added ?? multisetDifference(this.baseline, after);
+
+    const verify = verifyAddedChipsMatchExpected(this.baseline, after, expected);
+    if (!verify.ok) {
+      log({
+        event: "RESOURCE_PREPARE_FAILED",
+        component: "composer-attach",
+        taskId,
+        message: "reason=CHIP_MISMATCH retryable=true",
+      });
+      return {
+        ok: false,
+        expected: verify.expected,
+        observed: after.map(normalizeChipName),
+        added: verify.added,
+        ...classifyPrepareFailure("CHIP_MISMATCH"),
+      };
+    }
+
+    log({
+      event: "RESOURCE_VERIFIED",
+      component: "composer-attach",
+      taskId,
+      message: `mode=${verify.ok ? verify.mode : "unknown"} added=${this.lastAdded.length} expected=${expected.length}`,
+    });
+
+    return { ok: true, expected, added: this.lastAdded };
+  }
+
+  async cleanup(): Promise<void> {
+    await clearAllAttachmentChips(this.page);
+    this.lastAdded = [];
+  }
+
+  async isClean(): Promise<boolean> {
+    const current = await readAttachmentChips(this.page);
+    return current.length === 0;
+  }
+}

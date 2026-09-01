@@ -292,11 +292,17 @@ export class ChatGptBrowser {
 
   async submitTaskId(
     taskId: string,
-    opts?: { skipIdleWait?: boolean }
+    opts?: { skipIdleWait?: boolean; attachmentCount?: number }
   ): Promise<void> {
     const page = this.getPage();
     const message = DISPATCH_MESSAGE(taskId);
     const marker = `TASK_ID=${taskId}`;
+    const attachmentCount = opts?.attachmentCount ?? 0;
+    const sendWaitMs =
+      attachmentCount > 0
+        ? Math.min(180_000, 10_000 + 500 * attachmentCount)
+        : 15_000;
+    const clearDeadlineMs = Math.max(30_000, sendWaitMs);
 
     const composer = page.locator(selectors.composer).first();
     await composer.waitFor({ state: "visible", timeout: 30000 });
@@ -322,7 +328,9 @@ export class ChatGptBrowser {
     if (!opts?.skipIdleWait) {
       await this.waitForComposerIdle(page);
     }
-    await this.fillComposer(page, composer, message);
+    await this.fillComposer(page, composer, message, {
+      preserveAttachments: attachmentCount > 0,
+    });
 
     const typed = ((await composer.innerText().catch(() => "")) ?? "").replace(
       /\s+/g,
@@ -334,7 +342,19 @@ export class ChatGptBrowser {
       );
     }
 
-    await this.clickSendUntilComposerClears(page, composer, marker);
+    if (attachmentCount > 0) {
+      log({
+        event: "INFO",
+        component: "browser-worker",
+        taskId,
+        message: `Waiting for Send enabled after ${attachmentCount} attachment(s) (budget=${sendWaitMs}ms)`,
+      });
+    }
+
+    await this.clickSendUntilComposerClears(page, composer, marker, {
+      sendReadyMs: sendWaitMs,
+      clearDeadlineMs,
+    });
   }
 
   /** Short reminder to call handoff_submit_result (best-effort, idempotent per nudge stage). */
@@ -370,11 +390,34 @@ export class ChatGptBrowser {
    * Matching `text=TASK_ID=…` in the page is not enough — that hits the
    * composer itself and used to ack a typed-but-unsent message.
    */
+  private async waitForSendEnabled(page: Page, timeoutMs: number): Promise<void> {
+    const sendButton = page.locator(selectors.sendButton).first();
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const ready = await sendButton
+        .evaluate((btn) => {
+          if (!(btn instanceof HTMLButtonElement)) return false;
+          if (!btn.offsetParent) return false;
+          return !btn.disabled && btn.getAttribute("aria-disabled") !== "true";
+        })
+        .catch(() => false);
+      if (ready) return;
+      await page.waitForTimeout(250);
+    }
+    throw new Error(`Send button not enabled within ${timeoutMs}ms`);
+  }
+
   private async clickSendUntilComposerClears(
     page: Page,
     composer: ReturnType<Page["locator"]>,
-    marker: string
+    marker: string,
+    opts?: { sendReadyMs?: number; clearDeadlineMs?: number }
   ): Promise<void> {
+    const sendReadyMs = opts?.sendReadyMs ?? 15_000;
+    const clearDeadlineMs = opts?.clearDeadlineMs ?? 30_000;
+
+    await this.waitForSendEnabled(page, sendReadyMs);
+
     const sendButton = page.locator(selectors.sendButton).first();
     const attemptSend = async (): Promise<void> => {
       if (await sendButton.isVisible({ timeout: 3000 }).catch(() => false)) {
@@ -389,13 +432,15 @@ export class ChatGptBrowser {
     };
 
     await attemptSend();
-    const deadline = Date.now() + 8000;
+    const deadline = Date.now() + clearDeadlineMs;
     while (Date.now() < deadline) {
       const composerText = (
         (await composer.innerText().catch(() => "")) ?? ""
       ).trim();
       if (!composerText.includes(marker)) return;
-      await page.waitForTimeout(250);
+      await this.waitForSendEnabled(page, 3_000).catch(() => undefined);
+      await attemptSend();
+      await page.waitForTimeout(500);
     }
 
     await page.keyboard.press("Enter");
@@ -426,7 +471,8 @@ export class ChatGptBrowser {
   private async fillComposer(
     page: Page,
     composer: ReturnType<Page["locator"]>,
-    message: string
+    message: string,
+    opts?: { preserveAttachments?: boolean }
   ): Promise<void> {
     await composer.scrollIntoViewIfNeeded().catch(() => undefined);
     await composer.evaluate((el) => {
@@ -436,6 +482,19 @@ export class ChatGptBrowser {
       await composer.click({ timeout: 5000 });
     } catch {
       await composer.click({ force: true, timeout: 5000 });
+    }
+
+    if (opts?.preserveAttachments) {
+      await page.keyboard.press("End");
+      const existing = ((await composer.innerText().catch(() => "")) ?? "").trim();
+      if (!existing.includes(message)) {
+        if (existing.length > 0) {
+          await page.keyboard.insertText(`\n${message}`);
+        } else {
+          await page.keyboard.insertText(message);
+        }
+      }
+      return;
     }
 
     await page.keyboard.press(
