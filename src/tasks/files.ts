@@ -9,9 +9,10 @@ import {
   type TaskResource,
 } from "./task.types.js";
 
-export const MAX_FILES_PER_TASK = 10;
-export const MAX_BYTES_PER_FILE = 256 * 1024;
-export const MAX_BYTES_PER_TASK = 1024 * 1024;
+/** Per-file cap (materialize + native attach). */
+export const MAX_BYTES_PER_FILE = 32 * 1024 * 1024;
+/** Total bytes across all files in one task (held in RAM at dispatch). */
+export const MAX_BYTES_PER_TASK = 128 * 1024 * 1024;
 export const DEFAULT_READ_BYTES = 65536;
 export const MAX_READ_BYTES = 262144;
 
@@ -92,10 +93,6 @@ export function registerTaskResourcePaths(
   paths: string[],
   now: string
 ): TaskResource[] {
-  if (paths.length > MAX_FILES_PER_TASK) {
-    throw new HandoffFileError("FILES_INVALID", "Too many files attached");
-  }
-
   const results: TaskResource[] = [];
   const seenRel = new Set<string>();
   const seenBasename = new Set<string>();

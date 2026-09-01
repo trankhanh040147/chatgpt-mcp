@@ -16,6 +16,8 @@ import {
 import { TaskRepository } from "../src/tasks/task.repository.js";
 import { TaskService } from "../src/tasks/task.service.js";
 import {
+  MAX_BYTES_PER_FILE,
+  MAX_BYTES_PER_TASK,
   materializeWorkspaceResources,
   registerTaskResourcePaths,
   resolveWorkspaceRoot,
@@ -258,22 +260,24 @@ async function main() {
     );
   }
 
-  // --- 11th file / oversize at create (path count) or materialize (size) ---
+  // --- many files at create (no count cap) / oversize at materialize ---
   {
     const { service } = freshDb(dbDir);
     const names: string[] = [];
-    for (let i = 0; i < 11; i += 1) {
+    for (let i = 0; i < 15; i += 1) {
       const name = `many${i}.ts`;
       writeFileSync(join(wsDir, name), `// ${i}`);
       names.push(name);
     }
-    expectFileError(
-      () => service.createTask({ type: "research", prompt: "p", cursorConversationId: "c9", files: names }),
-      "FILES_INVALID",
-      "reject: 11th file at create"
-    );
+    const { taskId } = service.createTask({
+      type: "research",
+      prompt: "p",
+      cursorConversationId: "c9-many",
+      files: names,
+    });
+    assert(taskId.length > 0, "accept: many files at create");
 
-    writeFileSync(join(wsDir, "big.ts"), "x".repeat(300 * 1024));
+    writeFileSync(join(wsDir, "big.ts"), "x".repeat(MAX_BYTES_PER_FILE + 1));
     const bigRefs = registerTaskResourcePaths(["big.ts"], now);
     expectFileError(
       () => materializeWorkspaceResources(bigRefs, wsDir),
@@ -282,16 +286,18 @@ async function main() {
     );
 
     const sumNames: string[] = [];
-    for (let i = 0; i < 5; i += 1) {
+    const sumChunk = 1024 * 1024;
+    const fileCount = Math.ceil(MAX_BYTES_PER_TASK / sumChunk) + 1;
+    for (let i = 0; i < fileCount; i += 1) {
       const name = `sum${i}.ts`;
-      writeFileSync(join(wsDir, name), "y".repeat(210 * 1024));
+      writeFileSync(join(wsDir, name), "y".repeat(sumChunk));
       sumNames.push(name);
     }
     const sumRefs = registerTaskResourcePaths(sumNames, now);
     expectFileError(
       () => materializeWorkspaceResources(sumRefs, wsDir),
       "FILE_TOO_LARGE",
-      "reject: sum > 1 MiB at materialize"
+      "reject: sum exceeds task byte cap at materialize"
     );
   }
 

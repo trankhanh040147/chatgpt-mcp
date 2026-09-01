@@ -79,7 +79,7 @@ export function registerHandoffTools(
       type: taskTypeSchema,
       prompt: z.string().min(1).max(MAX_PROMPT),
       context: contextSchema,
-      files: z.array(z.string().min(1).max(1_000)).max(10).optional()
+      files: z.array(z.string().min(1).max(1_000)).optional()
         .describe("Workspace-relative evidence file paths already in the current decision. No globs."),
       clientSessionId: z.string().min(1).max(200).optional(),
       cursorConversationId: z

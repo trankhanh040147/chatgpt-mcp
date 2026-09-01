@@ -158,7 +158,7 @@ export interface CreateTaskInput {
   context?: HandoffTaskContext;
   /** Host session / correlation key. Optional for portable MCP hosts. */
   cursorConversationId: string;
-  /** Workspace-relative evidence file paths (max 10). Never absolute paths. */
+  /** Workspace-relative evidence file paths. Never absolute paths. */
   files?: string[];
   taskClass?: "USER" | "SYSTEM_PROBE";
   targetWorkerId?: string;
