@@ -69,6 +69,7 @@
     "test:attachment-match": "tsx scripts/test-attachment-match.ts",
     "test:attach-lifecycle": "tsx scripts/test-attach-lifecycle.ts",
     "e2e:files-attach": "tsx scripts/e2e-files-attach.ts",
+    "e2e:attach-observability": "tsx scripts/e2e-attach-observability.ts",
     "e2e:files-mcp-create": "tsx scripts/e2e-files-mcp-create.ts",
     "test:rotation": "tsx scripts/test-rotation.ts",
     "test:worker-ops": "tsx scripts/test-worker-ops.ts",
