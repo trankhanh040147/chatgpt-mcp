@@ -4,7 +4,7 @@
  *   npx tsx scripts/test-files.ts
  */
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync, unlinkSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync, unlinkSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -363,6 +363,19 @@ async function main() {
       "FILE_NOT_ON_TASK",
       "relevantFiles-only: read fails"
     );
+  }
+
+  // --- infer workspace root from HANDOFF_DB_PATH when env unset ---
+  {
+    const prev = process.env.HANDOFF_WORKSPACE_ROOT;
+    delete process.env.HANDOFF_WORKSPACE_ROOT;
+    process.env.HANDOFF_DB_PATH = join(wsDir, "data", "handoff.sqlite");
+    mkdirSync(join(wsDir, "data"), { recursive: true });
+    assert(
+      resolveWorkspaceRoot() === realpathSync(wsDir),
+      "infer: workspace root from HANDOFF_DB_PATH/data parent"
+    );
+    process.env.HANDOFF_WORKSPACE_ROOT = prev;
   }
 
   closeDatabase();

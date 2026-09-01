@@ -33,7 +33,9 @@ export async function readAttachmentChips(page: Page): Promise<string[]> {
     const seen = new Set<string>();
 
     const push = (raw: string | null | undefined) => {
-      const t = (raw ?? "").trim();
+      let t = (raw ?? "").trim();
+      const numbered = t.match(/^file\s+\d+:\s*(.+)$/i);
+      if (numbered?.[1]) t = numbered[1].trim();
       if (!t || seen.has(t.toLowerCase())) return;
       seen.add(t.toLowerCase());
       names.push(t);
@@ -46,7 +48,7 @@ export async function readAttachmentChips(page: Page): Promise<string[]> {
 
     for (const btn of document.querySelectorAll("button[aria-label]")) {
       const label = btn.getAttribute("aria-label") ?? "";
-      const m = label.match(/^Remove\s+(.+?)(?:\s+file)?$/i);
+      const m = label.match(/^Remove\s+(?:file\s+\d+:\s*)?(.+?)(?:\s+file)?$/i);
       if (m?.[1]) push(m[1]);
     }
 
@@ -103,9 +105,6 @@ async function waitForAddedChips(
     if (verify.ok) {
       return { after, added };
     }
-    if (added.length >= expected.length) {
-      return { after, added };
-    }
     await page.waitForTimeout(CHIP_POLL_MS);
   }
   return null;
@@ -113,6 +112,14 @@ async function waitForAddedChips(
 
 async function removeChipByName(page: Page, displayName: string): Promise<boolean> {
   const escaped = displayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const removeRe = new RegExp(`^Remove (?:file \\d+: )?${escaped}(?: file)?$`, "i");
+  const byLabel = page.getByRole("button", { name: removeRe }).first();
+  if (await byLabel.isVisible({ timeout: 800 }).catch(() => false)) {
+    await byLabel.click({ timeout: 3000 }).catch(() => undefined);
+    await page.waitForTimeout(300);
+    return true;
+  }
+
   const btn = page
     .locator(selectors.attachmentRemoveButton)
     .filter({ hasText: new RegExp(escaped, "i") })
@@ -123,12 +130,6 @@ async function removeChipByName(page: Page, displayName: string): Promise<boolea
     return true;
   }
 
-  const byLabel = page.locator(`button[aria-label="Remove ${displayName}"]`).first();
-  if (await byLabel.isVisible({ timeout: 800 }).catch(() => false)) {
-    await byLabel.click({ timeout: 3000 }).catch(() => undefined);
-    await page.waitForTimeout(300);
-    return true;
-  }
   return false;
 }
 

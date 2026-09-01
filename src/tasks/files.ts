@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { basename, isAbsolute, join, normalize, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { ulid } from "ulid";
 import { containsKnownSecrets } from "./sanitize.js";
 import {
@@ -61,8 +61,22 @@ function normalizeRelPosix(raw: string): string {
   return normalized.split(sep).join("/");
 }
 
+/** When HANDOFF_WORKSPACE_ROOT is unset, infer from HANDOFF_DB_PATH (…/data/handoff.sqlite → repo root). */
+function inferWorkspaceRootFromDbPath(): string | undefined {
+  const raw = process.env.HANDOFF_DB_PATH?.trim();
+  if (!raw) return undefined;
+  const dbDir = dirname(resolve(raw));
+  if (basename(dbDir) === "data") {
+    return dirname(dbDir);
+  }
+  return undefined;
+}
+
 export function resolveWorkspaceRoot(): string {
-  const configured = process.env.HANDOFF_WORKSPACE_ROOT || process.cwd();
+  const configured =
+    process.env.HANDOFF_WORKSPACE_ROOT?.trim() ||
+    inferWorkspaceRootFromDbPath() ||
+    process.cwd();
   try {
     return realpathSync(configured);
   } catch {

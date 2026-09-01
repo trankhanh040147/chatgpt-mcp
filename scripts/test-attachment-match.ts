@@ -4,6 +4,7 @@
  *   npm run test:attachment-match
  */
 import {
+  composerChipLabelToDisplayName,
   multisetDifference,
   multisetEqual,
   multisetFromNames,
@@ -78,7 +79,21 @@ function main() {
     assert(added.filter((n) => n === "z.ts").length === 2, "diff: two z.ts added");
   }
 
-  // --- truncation case: chip shows truncated name ---
+  // --- ChatGPT numbered buffer-upload chips ---
+  {
+    const r = verifyAddedChipsMatchExpected(
+      [],
+      ["file 1: a.ts", "file 2: b.ts"],
+      ["a.ts", "b.ts"]
+    );
+    assert(r.ok === true, "verify: numbered file chips match displayName");
+  }
+
+  assert(
+    composerChipLabelToDisplayName("file 1: a.ts") === "a.ts",
+    "normalize: strip numbered prefix"
+  );
+
   {
     const long = "very-long-module-name-for-truncation.ts";
     const truncated = "very-long-module…";

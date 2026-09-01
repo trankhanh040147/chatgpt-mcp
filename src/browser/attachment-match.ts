@@ -10,8 +10,15 @@ export function multisetFromNames(names: readonly string[]): Map<string, number>
   return m;
 }
 
+/** Strip ChatGPT numbered staging prefix ("file 1: a.ts" → "a.ts"). */
+export function composerChipLabelToDisplayName(raw: string): string {
+  const t = raw.trim();
+  const m = t.match(/^file\s+\d+:\s*(.+)$/i);
+  return m?.[1]?.trim() ?? t;
+}
+
 export function normalizeChipName(name: string): string {
-  return name.trim().toLowerCase();
+  return composerChipLabelToDisplayName(name).trim().toLowerCase();
 }
 
 export function multisetEqual(
