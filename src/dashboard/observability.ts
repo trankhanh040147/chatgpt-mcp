@@ -1,5 +1,17 @@
 import type { HandoffTask, WorkerStatus } from "../tasks/task.types.js";
+import { TERMINAL_STATUSES } from "../tasks/task.types.js";
 import { sanitizeSecrets } from "../tasks/sanitize.js";
+
+export function isTerminalHandoffStatus(status: string): boolean {
+  return (TERMINAL_STATUSES as readonly string[]).includes(status);
+}
+
+/** Worker current_task_id points at a finished handoff — dispatch will not claim QUEUED. */
+export function isPinnedTerminalTask(
+  task: { status: string } | null | undefined
+): boolean {
+  return Boolean(task && isTerminalHandoffStatus(task.status));
+}
 
 const CHAT_HOSTS = new Set(["chatgpt.com", "www.chatgpt.com", "chat.openai.com"]);
 

@@ -17,6 +17,7 @@ import {
   SUBMIT_RESULT_TOOL_DESCRIPTION,
   WRITEBACK_POLICY,
 } from "../worker-policy.js";
+import { resolveCursorSessionHint } from "../cursor-session-hint.js";
 
 const MAX_PROMPT = 100_000;
 const MAX_RESULT = 200_000;
@@ -101,6 +102,14 @@ export function registerHandoffTools(
       context: contextSchema,
       files: z.array(z.string().min(1).max(1_000)).optional()
         .describe("Workspace-relative evidence file paths already in the current decision. No globs."),
+      workspaceRoot: z
+        .string()
+        .min(1)
+        .max(500)
+        .optional()
+        .describe(
+          "Absolute path to the host workspace for files[]. Required when MCP env HANDOFF_WORKSPACE_ROOT points at another repo; hook may inject."
+        ),
       clientSessionId: z.string().min(1).max(200).optional(),
       cursorConversationId: z
         .string()
@@ -120,7 +129,14 @@ export function registerHandoffTools(
         (args.clientSessionId as string | undefined)?.trim() ||
         (args.cursorConversationId as string | undefined)?.trim() ||
         "";
-      const clientSessionId = rawSession || UNSCOPED_CLIENT_SESSION_ID;
+      const hinted =
+        !rawSession || rawSession === UNSCOPED_CLIENT_SESSION_ID
+          ? resolveCursorSessionHint((args.prompt as string) ?? "")
+          : null;
+      const clientSessionId =
+        rawSession && rawSession !== UNSCOPED_CLIENT_SESSION_ID
+          ? rawSession
+          : hinted || UNSCOPED_CLIENT_SESSION_ID;
       const scoped = clientSessionId !== UNSCOPED_CLIENT_SESSION_ID;
 
       const result = taskService.createTask({
@@ -128,6 +144,7 @@ export function registerHandoffTools(
         prompt: args.prompt as string,
         context: args.context as Parameters<TaskService["createTask"]>[0]["context"],
         files: args.files as string[] | undefined,
+        workspaceRoot: args.workspaceRoot as string | undefined,
         cursorConversationId: clientSessionId,
       });
 
@@ -169,7 +186,11 @@ export function registerHandoffTools(
       }));
 
       const rawContext = (task.context ?? {}) as Record<string, unknown>;
-      const { _probeToken: _ignored, ...publicContext } = rawContext;
+      const {
+        _probeToken: _ignored,
+        submitTemplate: _submitTemplate,
+        ...publicContext
+      } = rawContext;
 
       return jsonContent({
         taskId: task.id,
@@ -182,12 +203,25 @@ export function registerHandoffTools(
           files.length > 0
             ? "Files are attached natively in ChatGPT — read attachment chips in the composer; do NOT call handoff_read_file (disabled in v0.7)."
             : undefined,
+        submitTemplate:
+          task.context?.submitTemplate &&
+          typeof task.context.submitTemplate === "object"
+            ? {
+                ...task.context.submitTemplate,
+                taskId: task.id,
+              }
+            : undefined,
         submitPolicy:
           task.taskClass === "SYSTEM_PROBE"
             ? PROBE_GET_TASK_SUBMIT_POLICY
             : {
                 ...SUBMIT_POLICY,
                 writeback: WRITEBACK_POLICY,
+                writebackRequired: task.context?.writebackRequired === true,
+                artifactsRequiredWhenAttached:
+                  (task.files?.length ?? 0) > 0
+                    ? "Task has attached workspace files. To modify them, include artifacts[] with complete file bodies in handoff_submit_result — result prose alone does not write disk."
+                    : undefined,
                 lateSubmitAccepted:
                   task.status === "TIMED_OUT" && !task.result,
               },
@@ -277,21 +311,33 @@ export function registerHandoffTools(
     {
       taskId: taskIdSchema,
       result: z.string().min(1).max(MAX_RESULT),
+      artifacts: z
+        .array(
+          z.object({
+            path: z
+              .string()
+              .min(1)
+              .max(1000)
+              .describe("Workspace-relative POSIX path, e.g. src/foo.ts"),
+            content: z
+              .string()
+              .max(MAX_BYTES_PER_FILE)
+              .describe("Complete final UTF-8 file body (not a diff)"),
+            mode: z
+              .enum(["create", "overwrite"])
+              .optional()
+              .describe("overwrite for existing/attached files; create for new paths"),
+          })
+        )
+        .max(MAX_ARTIFACTS_PER_SUBMIT)
+        .describe(
+          "Workspace file writes. Pass [] when no files changed. When returning edited/created files, each entry is one complete file. Prose in result does NOT write disk."
+        ),
       metadata: z
         .object({
           summary: z.string().max(MAX_SUMMARY).optional(),
           confidence: z.enum(["low", "medium", "high"]).optional(),
         })
-        .optional(),
-      artifacts: z
-        .array(
-          z.object({
-            path: z.string().min(1).max(1000),
-            content: z.string().max(MAX_BYTES_PER_FILE),
-            mode: z.enum(["create", "overwrite"]).optional(),
-          })
-        )
-        .max(MAX_ARTIFACTS_PER_SUBMIT)
         .optional(),
     },
     {
@@ -309,9 +355,10 @@ export function registerHandoffTools(
           metadata: args.metadata as Parameters<
             TaskService["submitResult"]
           >[0]["metadata"],
-          artifacts: args.artifacts as Parameters<
-            TaskService["submitResult"]
-          >[0]["artifacts"],
+          artifacts:
+            (args.artifacts as Parameters<
+              TaskService["submitResult"]
+            >[0]["artifacts"]) ?? [],
         });
 
         return jsonContent(output);

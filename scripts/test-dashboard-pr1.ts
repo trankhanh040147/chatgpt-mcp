@@ -8,6 +8,7 @@ import {
   isWorkerDebugOpen,
   setWorkerDebugOpen,
   deriveWorkerCountState,
+  isDispatchReady,
 } from "../src/dashboard/public/app.js";
 
 console.log("Running PR1 dashboard UI unit tests...\n");
@@ -187,8 +188,67 @@ console.log("Running PR1 dashboard UI unit tests...\n");
     { id: "w1", healthy: true },
     { id: "w2", healthy: true },
   ]);
-  assert.equal(healthySummary, "All workers ready for handoffs");
+  assert.equal(healthySummary, "All workers dispatch-ready for handoffs");
   console.log("✓ Incident summary and de-duplication passed");
+}
+
+// 3b. dispatch-ready vs infra-ready
+{
+  assert.equal(
+    isDispatchReady({
+      id: "w1",
+      healthy: true,
+      operatorState: "READY",
+    }),
+    true,
+    "healthy + operator READY → dispatch-ready"
+  );
+  assert.equal(
+    isDispatchReady({
+      id: "w2",
+      healthy: true,
+      operatorState: "READY",
+      pinnedTerminalTaskId: "ho_deadbeef",
+    }),
+    false,
+    "pinned terminal blocks dispatch-ready"
+  );
+  assert.equal(
+    isDispatchReady({
+      id: "w3",
+      healthy: false,
+      operatorState: "DEGRADED",
+      heartbeatStale: true,
+    }),
+    false,
+    "stale heartbeat blocks dispatch-ready"
+  );
+
+  const pinnedSummary = summarizeIncidents([
+    {
+      id: "w5",
+      healthy: true,
+      pidAlive: true,
+      heartbeatStale: false,
+      operatorState: "DEGRADED",
+      pinnedTerminalTaskId: "ho_abc",
+    },
+  ]);
+  assert(
+    pinnedSummary.includes("pinned to completed handoff"),
+    "pinned terminal surfaces in incident summary"
+  );
+
+  const pinnedAction = deriveRecommendedAction(
+    {
+      id: "w5",
+      healthy: true,
+      pinnedTerminalTaskId: "ho_abc",
+    },
+    { brokerReachable: true }
+  );
+  assert.equal(pinnedAction.actionKey, "clear-stuck", "pinned terminal → clear stuck");
+  console.log("✓ dispatch-ready semantics passed");
 }
 
 // 4. Attention sorting
@@ -279,19 +339,19 @@ console.log("Running PR1 dashboard UI unit tests...\n");
   assert.equal(zeroState.text, "0 registered");
   assert.equal(zeroState.kind, "warn");
 
-  // All healthy (e.g. 2 of 2)
+  // All dispatch-ready (e.g. 2 of 2)
   const allHealthyState = deriveWorkerCountState(2, 2);
-  assert.equal(allHealthyState.text, "2 registered · 2 healthy");
+  assert.equal(allHealthyState.text, "2 registered · 2 dispatch-ready");
   assert.equal(allHealthyState.kind, "ok");
 
-  // Degraded (e.g. 1 of 2 healthy)
+  // Degraded (e.g. 1 of 2 dispatch-ready)
   const degradedState = deriveWorkerCountState(2, 1);
-  assert.equal(degradedState.text, "2 registered · 1 healthy");
+  assert.equal(degradedState.text, "2 registered · 1 dispatch-ready");
   assert.equal(degradedState.kind, "warn");
 
-  // All unhealthy (e.g. 0 of 2 healthy)
+  // None dispatch-ready (e.g. 0 of 2)
   const allUnhealthyState = deriveWorkerCountState(2, 0);
-  assert.equal(allUnhealthyState.text, "2 registered · 0 healthy");
+  assert.equal(allUnhealthyState.text, "2 registered · 0 dispatch-ready");
   assert.equal(allUnhealthyState.kind, "bad");
 
   console.log("✓ Worker count state derivation passed");

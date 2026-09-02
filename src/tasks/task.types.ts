@@ -36,6 +36,13 @@ export interface HandoffTaskContext {
   constraints?: string[];
   relevantFiles?: string[];
   gitDiff?: string;
+  /** E2E / explicit tasks: reject prose-only submit (artifacts[] required). */
+  writebackRequired?: boolean;
+  /** Optional copy-paste payload for handoff_submit_result (taskId filled by worker). */
+  submitTemplate?: {
+    result: string;
+    artifacts: ResultArtifactInput[];
+  };
 }
 
 export interface HandoffResultMetadata {
@@ -167,6 +174,8 @@ export interface CreateTaskInput {
   cursorConversationId: string;
   /** Workspace-relative evidence file paths. Never absolute paths. */
   files?: string[];
+  /** Absolute host workspace for files[] (overrides HANDOFF_WORKSPACE_ROOT). Hook may inject. */
+  workspaceRoot?: string;
   taskClass?: "USER" | "SYSTEM_PROBE";
   targetWorkerId?: string;
 }

@@ -3,8 +3,14 @@
   "hooks": {
     "preToolUse": [
       {
-        "matcher": "handoff_create_task",
+        "matcher": "handoff_create_task|MCP:handoff_create_task|CallDynamicTool|call_dynamic_tool|CallMcpTool|call_mcp_tool",
         "command": "python3 cursor/inject-session.py"
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "matcher": "handoff_create_task|MCP:handoff_create_task|CallDynamicTool|call_dynamic_tool|CallMcpTool|call_mcp_tool",
+        "command": "python3 cursor/record-mcp-session.py"
       }
     ],
     "stop": [

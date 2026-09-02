@@ -450,6 +450,22 @@ export class TaskRepository {
     return Number(info.changes ?? 0);
   }
 
+  /** Merge artifact manifest after completion CAS (write-after-claim). */
+  patchResultMetadataIfCompleted(
+    id: string,
+    metadata: HandoffResultMetadata
+  ): number {
+    const info = this.db
+      .prepare(
+        `UPDATE handoff_tasks
+         SET result_metadata_json = ?
+         WHERE id = ?
+           AND status = 'COMPLETED'`
+      )
+      .run(JSON.stringify(metadata), id);
+    return Number(info.changes ?? 0);
+  }
+
   /** @deprecated Prefer saveResultIfOpen for concurrent-safe completion. */
   saveResult(
     id: string,
@@ -1589,7 +1605,9 @@ export class TaskRepository {
     this.db
       .prepare(
         `UPDATE worker_state
-         SET current_task_id = NULL, last_seen_at = ?
+         SET status = 'READY',
+             current_task_id = NULL,
+             last_seen_at = ?
          WHERE id = ?`
       )
       .run(now, workerId);

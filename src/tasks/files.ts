@@ -73,8 +73,10 @@ function inferWorkspaceRootFromDbPath(): string | undefined {
   return undefined;
 }
 
-export function resolveWorkspaceRoot(): string {
+/** Resolve host workspace for file attach/writeback. Per-task override wins over env. */
+export function resolveWorkspaceRoot(override?: string): string {
   const configured =
+    override?.trim() ||
     process.env.HANDOFF_WORKSPACE_ROOT?.trim() ||
     inferWorkspaceRootFromDbPath() ||
     process.cwd();
@@ -85,6 +87,35 @@ export function resolveWorkspaceRoot(): string {
       "FILES_INVALID",
       "Workspace root missing or unreadable"
     );
+  }
+}
+
+/** Fail fast at create when attached paths are missing under the resolved workspace. */
+export function assertWorkspaceFilesExist(
+  paths: readonly string[],
+  workspaceRoot: string
+): void {
+  if (paths.length === 0) return;
+  const root = realpathSync(workspaceRoot);
+  for (const raw of paths) {
+    const relPosix = normalizeRelPosix(raw);
+    const candidate = join(root, relPosix.split("/").join(sep));
+    try {
+      const lst = lstatSync(candidate);
+      if (lst.isSymbolicLink()) {
+        throw new HandoffFileError("FILES_INVALID", "Symlink attachments rejected");
+      }
+      if (!lst.isFile()) {
+        throw new HandoffFileError("FILES_INVALID", `Not a regular file (${relPosix})`);
+      }
+    } catch (err) {
+      if (err instanceof HandoffFileError) throw err;
+      throw new HandoffFileError(
+        "FILES_INVALID",
+        `File not found under workspace (${relPosix}). ` +
+          "If handoff is from another repo, set HANDOFF_WORKSPACE_ROOT=${workspaceFolder} in MCP config or pass workspaceRoot on handoff_create_task."
+      );
+    }
   }
 }
 

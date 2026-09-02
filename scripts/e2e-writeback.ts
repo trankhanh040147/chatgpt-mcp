@@ -86,28 +86,56 @@ async function waitForStatus(
   throw new Error(`Timed out waiting for ${want.join("|")} (task ${taskId})`);
 }
 
-function buildHappyPrompt(newA: string, newB: string): string {
+function buildHappySubmitTemplate(newA: string, newB: string) {
+  return {
+    result: "Written: a.ts, b.ts",
+    artifacts: [
+      {
+        path: "a.ts",
+        content: `export const nonce = "${newA}";\n`,
+        mode: "overwrite" as const,
+      },
+      {
+        path: "b.ts",
+        content: `export const nonce = "${newB}";\n`,
+        mode: "overwrite" as const,
+      },
+    ],
+  };
+}
+
+function buildCreateNewSubmitTemplate(newC: string) {
+  return {
+    result: "Written: a.ts (overwrite), c.ts (create)",
+    artifacts: [
+      {
+        path: "a.ts",
+        content: 'export const nonce = "MATCH_A";\n',
+        mode: "overwrite" as const,
+      },
+      {
+        path: "c.ts",
+        content: `export const nonce = "${newC}";\n`,
+        mode: "create" as const,
+      },
+    ],
+  };
+}
+
+function buildHappyPrompt(): string {
   return [
-    "Native writeback E2E — read attached files only (do NOT call handoff_read_file).",
-    "Change export const nonce in each attached file to these values:",
-    `a.ts nonce → ${newA}`,
-    `b.ts nonce → ${newB}`,
-    "Call handoff_submit_result with:",
-    "- result: one-line summary listing written files",
-    "- artifacts[]: FULL file bodies for a.ts and b.ts with mode overwrite",
-    "Do NOT submit prose-only; artifacts are required.",
+    "Native writeback E2E. Do NOT call handoff_read_file.",
+    "1) handoff_get_task — read submitTemplate",
+    "2) handoff_submit_result — pass taskId + submitTemplate.result + submitTemplate.artifacts (required)",
+    "Prose-only submit FAILS the server check.",
   ].join("\n");
 }
 
-function buildCreateNewPrompt(newNonce: string): string {
+function buildCreateNewPrompt(): string {
   return [
-    "Native writeback E2E (create-new) — read attached a.ts only.",
-    `Create a new file c.ts with: export const nonce = "${newNonce}";`,
-    "Also overwrite a.ts nonce to MATCH_A.",
-    "Call handoff_submit_result with artifacts[]:",
-    "- a.ts mode overwrite (full body)",
-    "- c.ts mode create (full body)",
-    "result must summarize written files.",
+    "Native writeback E2E (create-new). Do NOT call handoff_read_file.",
+    "1) handoff_get_task — read submitTemplate",
+    "2) handoff_submit_result using submitTemplate (artifacts[] required)",
   ].join("\n");
 }
 
@@ -145,18 +173,28 @@ async function main() {
 
   const conversationId = `e2e-writeback-${scenario}-${Date.now()}`;
   const files = scenario === "create-new" ? ["a.ts"] : ["a.ts", "b.ts"];
-  const prompt =
+  const submitTemplate =
     scenario === "create-new"
-      ? buildCreateNewPrompt(newC)
-      : buildHappyPrompt(newA, newB);
+      ? buildCreateNewSubmitTemplate(newC)
+      : buildHappySubmitTemplate(newA, newB);
+  const prompt =
+    scenario === "create-new" ? buildCreateNewPrompt() : buildHappyPrompt();
 
   const { taskId } = taskService.createTask({
     type: "second_opinion",
     prompt,
+    context: { writebackRequired: true, submitTemplate },
     cursorConversationId: conversationId,
     files,
   });
   console.log(`created taskId=${taskId}`);
+  const ctxRow = getDatabase()
+    .prepare("SELECT context_json FROM handoff_tasks WHERE id = ?")
+    .get(taskId) as { context_json: string | null } | undefined;
+  if (!ctxRow?.context_json?.includes("writebackRequired")) {
+    console.error("FAIL: writebackRequired not persisted in context_json");
+    process.exit(1);
+  }
 
   const finalStatus = await waitForStatus(
     httpBase,
@@ -175,7 +213,10 @@ async function main() {
   const result = taskService.getResult(taskId);
   const manifest = result.metadata?.artifacts ?? [];
   if (manifest.length === 0) {
-    console.error("FAIL: metadata.artifacts empty — writeback not used");
+    console.error(
+      `FAIL: metadata.artifacts empty — ChatGPT submitted prose-only.\n` +
+        `result preview: ${(result.result ?? "").slice(0, 400)}`
+    );
     process.exit(1);
   }
 

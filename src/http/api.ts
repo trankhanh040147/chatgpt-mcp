@@ -17,6 +17,7 @@ import {
   dashboardContentMode,
   deriveWorkerIndicators,
   isHandoffTaskStuck,
+  isPinnedTerminalTask,
   redactPreview,
   sanitizeChatUrl,
   taskTiming,
@@ -1054,6 +1055,21 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
                   .listActiveOperations()
                   .find((o) => o.workerId === w.id)
               : undefined;
+            const inFlightTaskId =
+              w.id === "default" ? null : repo.getInFlightTaskId(w.id);
+            let stuckInFlightTaskId: string | null = null;
+            let pinnedTerminalTaskId: string | null = null;
+            if (inFlightTaskId) {
+              const inFlightTask = repo.getTaskById(inFlightTaskId);
+              if (inFlightTask && isPinnedTerminalTask(inFlightTask)) {
+                pinnedTerminalTaskId = inFlightTaskId;
+              } else if (
+                inFlightTask &&
+                isHandoffTaskStuck(inFlightTask, nowIso)
+              ) {
+                stuckInFlightTaskId = inFlightTaskId;
+              }
+            }
             const health = buildWorkerHealthRow({
               worker: w,
               brokerStatus,
@@ -1063,19 +1079,8 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
               activeOperation: activeOp
                 ? { state: activeOp.state, kind: activeOp.kind }
                 : null,
+              pinnedTerminalTaskId,
             });
-            const inFlightTaskId =
-              w.id === "default" ? null : repo.getInFlightTaskId(w.id);
-            let stuckInFlightTaskId: string | null = null;
-            if (inFlightTaskId) {
-              const inFlightTask = repo.getTaskById(inFlightTaskId);
-              if (
-                inFlightTask &&
-                isHandoffTaskStuck(inFlightTask, nowIso)
-              ) {
-                stuckInFlightTaskId = inFlightTaskId;
-              }
-            }
             let chatAccessDenied = false;
             let chatProbeReason: string | undefined;
             if (
@@ -1128,6 +1133,7 @@ export function startHttpApi(options: HttpApiOptions): Promise<void> {
                 : null,
               inFlightTaskId,
               stuckInFlightTaskId,
+              pinnedTerminalTaskId,
             };
           })
         );

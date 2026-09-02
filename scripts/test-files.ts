@@ -137,24 +137,22 @@ async function main() {
     );
   }
 
-  // --- Symlink reject at materialize (not create) ---
+  // --- Symlink reject at create (fail fast) ---
   {
     const { service } = freshDb(dbDir);
     const linkPath = join(wsDir, "link.ts");
     try { unlinkSync(linkPath); } catch { /* ignore */ }
     symlinkSync("/etc/hosts", linkPath);
-    const { taskId } = service.createTask({
-      type: "research",
-      prompt: "p",
-      cursorConversationId: "c3b",
-      files: ["link.ts"],
-    });
-    const task = service.getTask(taskId)!;
-    assert((task.files ?? []).length === 1, "symlink: create succeeds with ref");
     expectFileError(
-      () => materializeWorkspaceResources(task.files!, wsDir),
+      () =>
+        service.createTask({
+          type: "research",
+          prompt: "p",
+          cursorConversationId: "c3b",
+          files: ["link.ts"],
+        }),
       "FILES_INVALID",
-      "reject: symlink at materialize"
+      "reject: symlink at create"
     );
   }
 
@@ -369,6 +367,43 @@ async function main() {
       "FILE_NOT_ON_TASK",
       "relevantFiles-only: read fails"
     );
+  }
+
+  // --- workspaceRoot override beats env ---
+  {
+    const { service } = freshDb(dbDir);
+    writeFileSync(join(wsDir, "override.ts"), "export {};\n");
+    const prev = process.env.HANDOFF_WORKSPACE_ROOT;
+    process.env.HANDOFF_WORKSPACE_ROOT = join(wsDir, "wrong-root");
+    mkdirSync(join(wsDir, "wrong-root"), { recursive: true });
+    const { taskId } = service.createTask({
+      type: "research",
+      prompt: "p",
+      cursorConversationId: "c-override",
+      files: ["override.ts"],
+      workspaceRoot: wsDir,
+    });
+    process.env.HANDOFF_WORKSPACE_ROOT = prev;
+    const task = service.getTask(taskId)!;
+    assert(task.workspaceRoot === realpathSync(wsDir), "create: workspaceRoot override stored");
+  }
+
+  // --- missing file at create (fail fast) ---
+  {
+    const { service } = freshDb(dbDir);
+    let code = "";
+    try {
+      service.createTask({
+        type: "research",
+        prompt: "p",
+        cursorConversationId: "c-missing",
+        files: ["no-such-file.ts"],
+        workspaceRoot: wsDir,
+      });
+    } catch (err) {
+      code = err instanceof HandoffFileError ? err.code : "";
+    }
+    assert(code === "FILES_INVALID", "create: missing file rejected at create");
   }
 
   // --- infer workspace root from HANDOFF_DB_PATH when env unset ---

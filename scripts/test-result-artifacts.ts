@@ -80,6 +80,16 @@ function main(): void {
 
     expectFileError(
       () =>
+        writeResultArtifacts(
+          [{ path: "out/missing.txt", content: "x\n", mode: "overwrite" }],
+          ws
+        ),
+      "FILES_INVALID",
+      "overwrite: reject missing target"
+    );
+
+    expectFileError(
+      () =>
         writeResultArtifacts([{ path: "../escape.txt", content: "x" }], ws),
       "FILES_INVALID",
       "reject: path traversal"

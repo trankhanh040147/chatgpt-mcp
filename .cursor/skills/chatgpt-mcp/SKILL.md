@@ -44,12 +44,14 @@ If the user **explicitly requests** a handoff — `/chatgpt-mcp`, "handoff to Ch
 ## Invoke (every Cursor workspace)
 
 1. **Light → stop** — Light must not call MCP (`handoff_create_task`), unless user explicitly overrode (see above).
-2. Standard/Deep: if a handoff would materially help, call `handoff_create_task` on `chatgpt-mcp` / `user-chatgpt-mcp` with `type` + `prompt` (optional `context`, optional `files` — workspace-relative paths already in the decision). Skip if local context became sufficient.
+2. Standard/Deep: if a handoff would materially help, call `handoff_create_task` on `chatgpt-mcp` / `user-chatgpt-mcp` with `type` + `prompt` (optional `context`, optional `files` — workspace-relative paths already in the decision). When using `files[]`, paths resolve against the **open Cursor workspace** — ensure MCP `HANDOFF_WORKSPACE_ROOT` is `${workspaceFolder}`, not a hardcoded chatgpt-mcp path. Skip if local context became sufficient.
 3. Do **not** write SQLite yourself.
 4. **End the turn immediately** after create succeeds.
    - Do **not** poll `handoff_get_task_status`.
    - Stop hook resumes with followup.
 5. On resume: `handoff_get_result` only → evaluate critically → continue. Never poll after resume.
+   - **`metadata.artifacts` non-empty:** disk writeback succeeded — read/verify files; do not parse prose to re-edit.
+   - **Empty artifacts + edit prose:** apply changes locally with edit tools.
 6. Exception: `scoped: false` outside Cursor → poll by `taskId`.
 
 ### Soft-refuse (ChatGPT UI)

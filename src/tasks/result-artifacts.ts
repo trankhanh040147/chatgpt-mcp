@@ -138,6 +138,9 @@ function validateAndPrepareArtifacts(
     if (mode === "create" && existsSync(targetPath)) {
       throw artifactError("FILES_INVALID", "Create target already exists", relPosix);
     }
+    if (mode === "overwrite" && !existsSync(targetPath)) {
+      throw artifactError("FILES_INVALID", "Overwrite target does not exist", relPosix);
+    }
 
     prepared.push({
       relPosix,
@@ -214,6 +217,8 @@ function rollbackCommitted(committed: readonly CommittedArtifact[]): void {
         }
       } else if (entry.backup !== null) {
         writeFileSync(entry.targetPath, entry.backup);
+      } else if (existsSync(entry.targetPath)) {
+        unlinkSync(entry.targetPath);
       }
     } catch {
       /* best-effort rollback per ADR-010 */
@@ -231,9 +236,14 @@ function commitBatch(prepared: readonly PreparedArtifact[]): WrittenResultArtifa
         commitCreate(item.targetPath, item.buf);
         committed.push({ targetPath: item.targetPath, mode: "create", backup: null });
       } else {
-        const backup = existsSync(item.targetPath)
-          ? readFileSync(item.targetPath)
-          : Buffer.alloc(0);
+        if (!existsSync(item.targetPath)) {
+          throw artifactError(
+            "FILES_INVALID",
+            "Overwrite target does not exist",
+            item.relPosix
+          );
+        }
+        const backup = readFileSync(item.targetPath);
         commitOverwrite(item.targetPath, item.buf);
         committed.push({
           targetPath: item.targetPath,

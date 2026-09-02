@@ -102,6 +102,8 @@ export function deriveOperatorPresentation(input: {
   recommendedAction: RecommendedAction;
   activeOperation?: { state: string; kind: string } | null;
   brokerReachable: boolean;
+  heartbeatStale?: boolean;
+  pinnedTerminalTaskId?: string | null;
 }): {
   operatorState: OperatorState;
   operatorAction: OperatorAction;
@@ -138,6 +140,23 @@ export function deriveOperatorPresentation(input: {
       operatorState: "STARTING",
       operatorAction: "NONE",
       operatorDetail: "Connecting worker chat",
+    };
+  }
+
+  if (input.pinnedTerminalTaskId) {
+    return {
+      operatorState: "DEGRADED",
+      operatorAction: "CONTINUE",
+      operatorDetail:
+        "Completed handoff still pinned — worker cannot claim queue",
+    };
+  }
+
+  if (input.heartbeatStale && input.healthState === "READY") {
+    return {
+      operatorState: "DEGRADED",
+      operatorAction: "NONE",
+      operatorDetail: "Heartbeat stale — not claiming new handoffs",
     };
   }
 
@@ -197,6 +216,7 @@ export function buildWorkerHealthRow(input: {
   brokerReachable: boolean;
   staleMs: number;
   activeOperation?: { state: string; kind: string } | null;
+  pinnedTerminalTaskId?: string | null;
   now?: number;
 }): WorkerHealthRow {
   const now = input.now ?? Date.now();
@@ -305,6 +325,10 @@ export function buildWorkerHealthRow(input: {
     healthState = "DEGRADED";
   }
 
+  const lastSeenMs = w.lastSeenAt ? Date.parse(w.lastSeenAt) : Number.NaN;
+  const heartbeatStale =
+    !Number.isFinite(lastSeenMs) || now - lastSeenMs > input.staleMs;
+
   let recommendedAction: RecommendedAction = "NONE";
   if (!brokerOk) recommendedAction = "START_BROKER";
   else if (w.status === "SESSION_LOST") recommendedAction = "RECREATE_CHAT";
@@ -312,9 +336,26 @@ export function buildWorkerHealthRow(input: {
     recommendedAction = "RETRY_VERIFY";
   } else if (!binding || !urlMatch) recommendedAction = "ASSIGN_URL";
 
-  const lastSeenMs = w.lastSeenAt ? Date.parse(w.lastSeenAt) : Number.NaN;
-  const heartbeatStale =
-    !Number.isFinite(lastSeenMs) || now - lastSeenMs > input.staleMs;
+  const operator = deriveOperatorPresentation({
+    worker: {
+      status: w.status,
+      readinessReason: w.readinessReason ?? null,
+      error: w.error ?? null,
+      mcpWriteStatus: w.mcpWriteStatus,
+    },
+    healthState,
+    recommendedAction,
+    activeOperation: input.activeOperation,
+    brokerReachable: input.brokerReachable,
+    heartbeatStale,
+    pinnedTerminalTaskId: input.pinnedTerminalTaskId ?? null,
+  });
+
+  if (input.pinnedTerminalTaskId) {
+    healthState = "DEGRADED";
+  } else if (heartbeatStale && healthState === "READY") {
+    healthState = "DEGRADED";
+  }
 
   const indicators = deriveWorkerIndicators({
     status: w.status,
@@ -328,19 +369,6 @@ export function buildWorkerHealthRow(input: {
     readinessReason: w.readinessReason,
     chatBudgetWarn: false,
     chatBudgetExhausted: false,
-  });
-
-  const operator = deriveOperatorPresentation({
-    worker: {
-      status: w.status,
-      readinessReason: w.readinessReason ?? null,
-      error: w.error ?? null,
-      mcpWriteStatus: w.mcpWriteStatus,
-    },
-    healthState,
-    recommendedAction,
-    activeOperation: input.activeOperation,
-    brokerReachable: input.brokerReachable,
   });
 
   return {

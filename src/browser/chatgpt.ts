@@ -300,7 +300,7 @@ export class ChatGptBrowser {
     const attachmentCount = opts?.attachmentCount ?? 0;
     const sendWaitMs =
       attachmentCount > 0
-        ? Math.min(180_000, 10_000 + 500 * attachmentCount)
+        ? Math.min(180_000, 15_000 + 500 * attachmentCount)
         : 15_000;
     const clearDeadlineMs = Math.max(30_000, sendWaitMs);
 
@@ -360,12 +360,14 @@ export class ChatGptBrowser {
   /** Short reminder to call handoff_submit_result (best-effort, idempotent per nudge stage). */
   async sendSubmitNudge(
     taskId: string,
-    opts?: { skipIdleWait?: boolean; probe?: boolean }
+    opts?: { skipIdleWait?: boolean; probe?: boolean; hasAttachedFiles?: boolean }
   ): Promise<void> {
     const page = this.getPage();
     const message = opts?.probe
       ? PROBE_SUBMIT_NUDGE_MESSAGE(taskId)
-      : SUBMIT_NUDGE_MESSAGE(taskId);
+      : SUBMIT_NUDGE_MESSAGE(taskId, {
+          hasAttachedFiles: opts?.hasAttachedFiles,
+        });
     const marker = `TASK_ID=${taskId}`;
 
     const composer = page.locator(selectors.composer).first();

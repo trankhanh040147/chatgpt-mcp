@@ -14,12 +14,11 @@ export const WORKER_MCP_INSTRUCTIONS =
 /** Tool description for handoff_submit_result (ChatGPT worker). */
 export const SUBMIT_RESULT_TOOL_DESCRIPTION =
   "Submit the completed task result. " +
-  "Use artifacts to write complete file contents into the task workspace: " +
-  "overwrite replaces an existing/attached file with the complete final content; " +
-  "create adds a new file (default). " +
+  "When modifying or creating workspace files, pass artifacts[] with complete final UTF-8 file bodies — prose in result does NOT write to disk. " +
+  "overwrite replaces an existing/attached file; create adds a new path (default). " +
   "Artifact writes are validated and committed as one batch — validation failures write nothing; " +
   "if a commit fails, the server rolls back that batch before returning an error. " +
-  "Do not use artifacts for partial patches or instructions; describe those changes in result instead. " +
+  "Do not use artifacts for partial patches; describe those in result instead. " +
   "Limits: 20 artifacts, 32 MiB per file, 128 MiB total. result must always be non-empty.";
 
 /** Per-task behavioral guidance for writeback (decision-oriented, not runtime rules). */
@@ -31,6 +30,7 @@ export const WRITEBACK_POLICY = {
     "If the change cannot be safely represented as a complete final file, do not emit an artifact; describe it in result instead.",
   ],
   submission: [
+    "When you modified or created workspace files, artifacts[] is required — result prose alone does not write bytes.",
     "Artifacts are validated and committed as one batch. Validation failures write nothing.",
     "If a commit fails, the server rolls back that batch before returning an error.",
     "Always provide a non-empty result summarizing files written and any prose-only changes.",
@@ -49,8 +49,13 @@ export const SUBMIT_POLICY = {
 } as const;
 
 /** Playwright nudge when ChatGPT has not submitted within ~30s. */
-export const SUBMIT_NUDGE_MESSAGE = (taskId: string): string =>
-  `Complete TASK_ID=${taskId} using handoff_submit_result.`;
+export const SUBMIT_NUDGE_MESSAGE = (
+  taskId: string,
+  opts?: { hasAttachedFiles?: boolean }
+): string =>
+  opts?.hasAttachedFiles
+    ? `Complete TASK_ID=${taskId} using handoff_submit_result with artifacts[] (complete file bodies) for each file you changed.`
+    : `Complete TASK_ID=${taskId} using handoff_submit_result.`;
 
 /** Minimal tool description for handoff_complete_probe (legacy; prefer handoff_ack). */
 export const PROBE_COMPLETE_TOOL_DESCRIPTION =
