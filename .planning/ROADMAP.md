@@ -16,6 +16,7 @@
 | 0.7 | **Handoff Resources** | **ACTIVE** (impl on branch) |
 | 0.8 | Claude host | PLANNED |
 | 0.9 | Result artifacts | CANDIDATE |
+| — | **Dashboard 1.0** (React rebuild) | **PROPOSED** — [spec](active/dashboard-react-rebuild.md) · [ADR-010](decisions/ADR-010-dashboard-react-rebuild.md) |
 
 ## Active
 
