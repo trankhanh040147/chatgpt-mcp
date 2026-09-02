@@ -13,7 +13,8 @@ export const WORKER_MCP_INSTRUCTIONS =
 
 /** Tool description for handoff_submit_result (ChatGPT worker). */
 export const SUBMIT_RESULT_TOOL_DESCRIPTION =
-  "Return the completed task result to the application that created the task.";
+  "Return the completed task result. Optional artifacts[] writes workspace files " +
+  "(relative path + UTF-8 content); fail-closed on invalid paths or secrets.";
 
 /** Attached to handoff_get_task payload. */
 export const SUBMIT_POLICY = {

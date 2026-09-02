@@ -1,4 +1,5 @@
 import type { WorkerReadinessReason } from "../workers/chat-budget.js";
+import type { ResultArtifactInput } from "./result-artifacts.js";
 
 export type HandoffTaskStatus =
   | "QUEUED"
@@ -40,6 +41,12 @@ export interface HandoffTaskContext {
 export interface HandoffResultMetadata {
   summary?: string;
   confidence?: "low" | "medium" | "high";
+  artifacts?: Array<{
+    relativePath: string;
+    displayName: string;
+    sizeBytes: number;
+    sha256: string;
+  }>;
 }
 
 export type ResourceSource =
@@ -171,6 +178,7 @@ export interface SubmitResultInput {
   taskId: string;
   result: string;
   metadata?: HandoffResultMetadata;
+  artifacts?: ResultArtifactInput[];
 }
 
 export const ACTIVE_STATUSES: HandoffTaskStatus[] = [

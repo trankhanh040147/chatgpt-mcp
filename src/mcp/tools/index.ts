@@ -6,6 +6,10 @@ import {
   UNSCOPED_CLIENT_SESSION_ID,
 } from "../../tasks/task.types.js";
 import {
+  MAX_ARTIFACTS_PER_SUBMIT,
+} from "../../tasks/result-artifacts.js";
+import { MAX_BYTES_PER_FILE } from "../../tasks/files.js";
+import {
   PROBE_ACK_TOOL_DESCRIPTION,
   PROBE_COMPLETE_TOOL_DESCRIPTION,
   PROBE_GET_TASK_SUBMIT_POLICY,
@@ -262,6 +266,16 @@ export function registerHandoffTools(
           confidence: z.enum(["low", "medium", "high"]).optional(),
         })
         .optional(),
+      artifacts: z
+        .array(
+          z.object({
+            path: z.string().min(1).max(1000),
+            content: z.string().max(MAX_BYTES_PER_FILE),
+            mode: z.enum(["create", "overwrite"]).optional(),
+          })
+        )
+        .max(MAX_ARTIFACTS_PER_SUBMIT)
+        .optional(),
     },
     {
       title: "Submit handoff result",
@@ -277,6 +291,9 @@ export function registerHandoffTools(
         metadata: args.metadata as Parameters<
           TaskService["submitResult"]
         >[0]["metadata"],
+        artifacts: args.artifacts as Parameters<
+          TaskService["submitResult"]
+        >[0]["artifacts"],
       });
 
       return jsonContent(output);

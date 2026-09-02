@@ -29,8 +29,8 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | Single-CDP multi-tab (A1-S) + create-worker CLI | **0.3.0** | Broker + UI mutex; dual/burst canary; `npm run create-worker` |
 | Ops dashboard | **0.4.0** | Dashboard **0.1–0.3** + usage at `/dashboard/` on status-api |
 | Agent UX + chat rotation | **0.5.0** | Light/Standard/Deep; `HANDOFF_MAX_TASKS_PER_CHAT=20`; idle `rotate-worker` |
-| Worker Ops & Dashboard | **0.6.0** | **Active** — control plane + **`gptmcp` CLI** — [`.planning/active/0.6-worker-ops.md`](../.planning/active/0.6-worker-ops.md) |
-| Handoff Resources (dispatch materialize + native attach) | **0.7.0** | **Active** — [`.planning/active/0.7-handoff-resources.md`](../.planning/active/0.7-handoff-resources.md) |
+| Handoff Resources (dispatch materialize + native attach) | **0.7.0** | **Shipped** — [`.planning/active/0.7-handoff-resources.md`](../.planning/active/0.7-handoff-resources.md); exit debt → 0.7.x |
+| Worker Ops & Dashboard | **0.6.0** | **Shipped** |
 
 ## Sequencing principles
 
@@ -51,9 +51,11 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | **0.4.0** | Ops dashboard | Local dashboard **0.1** (health, workers, tasks, troubleshoot); status-api serve + `GET /tasks` | Dashboard 0.1 usable on localhost; diagnose stuck/idle/SESSION_LOST without log diving; tag when hardened | Cloud hosting; auth SSO; create-worker GUI; metrics history DB |
 | **0.5.0** | Agent UX + worker chat rotation | Skill/rule handoff policy (Light/Standard/Deep); **self-regulate context** — rotate worker chat over threshold | Scenario set passes; ≤1 handoff/decision; rotation fail-closed | Host-generic “chooser”; unattended login |
 | **0.6.0** | Worker Ops & Dashboard + public CLI | Health poll; assign/create URL; auto-canary; kill/recreate; SESSION_LOST heal (confirm); **`gptmcp` ops surface** | Dashboard ops without sqlite; broker registry SSOT; **`gptmcp status` exit 0** onboarding path | Claude host; transport abstraction |
-| **0.7.0** | Handoff Resources | Agent-selected files → dispatch-time materialize; native CDP buffer attach; `handoff_read_file` disabled for file tasks | Multi-file E2E; fail-closed attach | ZIP; MCP resource URI; auto-routing |
-| **0.8.0** | Claude host | Claude skill/hook; E2E by `taskId` | Documented Claude path | Marketplace / Windows |
-| **0.9.0** | Result artifacts | Symmetric ChatGPT → Cursor file artifacts | TBD | Binary artifacts |
+| **0.7.0** | Handoff Resources (P0) | Dispatch-time materialize; native CDP attach; `handoff_read_file` disabled for file tasks | Merged; formal E2E + CI → 0.7.x | Phase 2 items → 0.8+ |
+| **0.8.0** | Handoff Resources Phase 2 | Native writeback/artifacts; large-batch observability E2E; v0.7 E2E gate formalized | Writeback E2E; observability evidence; CI/hook reliability | MCP URI → 0.9; Claude → 0.11 |
+| **0.9.0** | MCP Resource URI transport | `mcp_resource` ingress; explicit transport selection; benchmark vs native | No silent MCP fallback; ADR-003 honored | Audit store → 0.10 |
+| **0.10.0** | Resource persistence / read APIs | Optional audit store; controlled `handoff_read_file` revival | Evidence-gated only | ZIP/context-pack experiments |
+| **0.11.0** | Claude host | Claude skill/hook; E2E by `taskId`; reuse resource contracts | Documented Claude path | Marketplace / Windows |
 
 ### 0.3.0 — CDP optimize + assisted create-worker (**shipped**)
 
@@ -210,31 +212,43 @@ Portable create semantics (`clientSessionId` optional, `taskId` authoritative) s
 
 **Remaining for 0.6.0 tag:** worker control plane phases A–F (impl plan), `npm run test:worker-ops`, manual M1–M5.
 
-### 0.7.0 — Handoff Resources
+### 0.7.0 — Handoff Resources (P0) (**shipped**)
 
 **Spec:** [`.planning/active/0.7-handoff-resources.md`](../.planning/active/0.7-handoff-resources.md)
 
-Agent-selected files → dispatch-time materialize → native CDP buffer attach before fence. Implementation on `feat/0.7-handoff-resources` (PR #15).
+Dispatch-time materialize → native CDP buffer attach before fence. Merged PR #15 (2026-09-01).
 
-### 0.8.0 — Claude host
+**Exit debt (0.7.x):** `test:rotation` CI, formal `e2e:files-attach` D1–D3/D1b, issue #18, tag `v0.7.0`. See [test log](../.planning/active/0.7-handoff-resources-test-log-2026-09-01.md).
 
-Same `taskId` contract; optional `files` from 0.7 on this host.
+### 0.8.0 — Handoff Resources Phase 2
 
-### 0.9.0 — Result artifacts (candidate)
+**Spec:** [`.planning/active/0.8-handoff-resources-phase2.md`](../.planning/active/0.8-handoff-resources-phase2.md)
 
-Symmetric ChatGPT → Cursor artifacts on `handoff_submit_result`.
+Native symmetric writeback (ChatGPT → workspace), large-batch observability E2E, resource lifecycle hardening. Do not raise DOM chip cap without evidence.
+
+### 0.9.0 — MCP Resource URI transport
+
+`mcp_resource` source with explicit transport selection; benchmark against native attach (ADR-003: no silent fallback).
+
+### 0.10.0 — Resource persistence / read APIs
+
+Optional audit store; controlled `handoff_read_file` revival — evidence-gated.
+
+### 0.11.0 — Claude host
+
+Same `taskId` contract; optional `files` from 0.7+; after resource family stabilized.
 
 ## Current milestone
 
-- **Shipped:** **0.1.0** … **0.5.0** (agent UX + chat rotation).
-- **In progress:** **0.6.0** — Worker Ops & Dashboard; **`gptmcp` CLI + installer baseline landed**; control plane impl phases A–F remain.
-- **Then:** **0.7.0** Handoff Resources; **0.8.0** Claude host; **0.9.0** result artifacts (candidate).
+- **Shipped:** **0.1.0** … **0.7.0** (Handoff Resources P0).
+- **In progress:** **0.7.x** exit debt + **0.8.0** Handoff Resources Phase 2.
+- **Then:** **0.9.0** MCP URI → **0.10.0** persistence → **0.11.0** Claude host.
 
 ## Near-term queue
 
-1. **0.6.0** Worker Ops (health, URL ops, auto-canary, SESSION_LOST heal).
-2. **0.7.0** Handoff Resources (dispatch materialize + native attach E2E).
-3. **0.8.0** Claude host.
+1. **0.7.x** — rotation CI, formal E2E, #18, tag `v0.7.0`
+2. **0.8.0** — writeback + observability + lifecycle hardening
+3. **0.9.0+** — MCP URI, audit, Claude (sequenced)
 
 ## Deferred / non-goals
 
@@ -243,16 +257,20 @@ Symmetric ChatGPT → Cursor artifacts on `handoff_submit_result`.
 | Dynamic worker pool / auto-create on queue depth | After **0.3.0** proven + explicit product consent |
 | Auto-login / cookie export / auto-approve writes | Never as default |
 | Self-regulate context (message/context threshold → new worker chat) | **0.5.0** (shipped) |
-| “Works with all coding agents” claim | After each host has evidence (**0.8.0+**) |
+| “Works with all coding agents” claim | After each host has evidence (**0.11.0+**) |
 | Marketplace / Windows | After macOS+Cursor multi-worker bar is solid |
 | Dashboard history/charts / create-worker UI | Dash **0.3+** later |
-| Handoff Resources (dispatch materialize + native attach) | **0.7.0** |
+| Handoff Resources P0 (dispatch materialize + native attach) | **0.7.0** (shipped) |
+| Handoff Resources Phase 2 (writeback, observability) | **0.8.0** |
+| MCP Resource URI transport | **0.9.0** |
+| Claude host | **0.11.0** |
 | Arbitrary workspace MCP (`read_file(path)`) | Never — task-scoped `handoff_read_file` only |
 
 ## Decision log
 
 | Date | Decision | Reason | Supersedes |
 |------|----------|--------|------------|
+| 2026-09-01 | **0.8 = HR Phase 2**; Claude → **0.11**; MCP URI → **0.9**; audit/read → **0.10** | 0.7 spec deferred resource work to v0.8+; Aug 30 ladder was host-driven too early; evidence before new hosts | 2026-08-30 ladder (0.8 Claude, 0.9 artifacts) |
 | 2026-08-30 | **`gptmcp` = sole public ops UX**; `make` / `npm run` = developer/CI only | Reduce onboarding surface; safe lifecycle (PID ownership, no cwd token leaks); user-scoped `$CHATGPT_MCP_HOME` | Scattered `make up` / script onboarding in README |
 | 2026-08-30 | **0.6 = Worker Ops**; **0.7 = Handoff Resources**; Claude → **0.8**; artifacts → **0.9** | Ops pain (CONSENT/URL/SESSION_LOST) blocks file-attach E2E; ship ops dashboard first | 2026-08-29 ladder (0.6 = Handoff Resources) |
 | 2026-08-29 | **0.6 = Handoff Resources**; absorb portable core; Claude → **0.7**; result artifacts → **0.8** candidate | Portable core already in codebase; consolidate file layer + transport | 0.6 portable + 0.7 add files as separate milestones |

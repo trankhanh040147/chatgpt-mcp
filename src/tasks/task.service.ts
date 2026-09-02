@@ -7,6 +7,7 @@ import {
   registerTaskResourcePaths,
   resolveWorkspaceRoot,
 } from "./files.js";
+import { writeResultArtifacts } from "./result-artifacts.js";
 import {
   HandoffFileError,
   type ClaimResult,
@@ -289,7 +290,7 @@ export class TaskService {
     }
 
     const sanitizedResult = sanitizeSecrets(input.result);
-    const metadata = input.metadata
+    let metadata = input.metadata
       ? (sanitizeContext(
           input.metadata as Record<string, unknown>
         ) as HandoffResultMetadata)
@@ -333,6 +334,18 @@ export class TaskService {
             : " Use handoff_complete_probe with the canary from the task prompt — not handoff_submit_result prose.";
         throw new Error(`SYSTEM_PROBE ${classified}: invalid probe submit.${hint}`);
       }
+    }
+
+    if (input.artifacts && input.artifacts.length > 0) {
+      const root = task.workspaceRoot ?? resolveWorkspaceRoot();
+      const written = writeResultArtifacts(input.artifacts, root);
+      metadata = { ...metadata, artifacts: written };
+      log({
+        event: "RESULT_ARTIFACTS_WRITTEN",
+        component: "task-service",
+        taskId: input.taskId,
+        message: `count=${written.length}`,
+      });
     }
 
     const fromTimedOut = task.status === "TIMED_OUT";

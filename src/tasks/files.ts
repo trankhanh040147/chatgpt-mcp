@@ -44,7 +44,7 @@ function isAllowedExtension(relPath: string): boolean {
   return isAllowedResourceExtension(relPath);
 }
 
-function normalizeRelPosix(raw: string): string {
+export function normalizeRelPosix(raw: string): string {
   if (typeof raw !== "string" || raw.length === 0 || raw.length > 1000) {
     throw new HandoffFileError("FILES_INVALID", "Invalid file path");
   }
