@@ -15,6 +15,7 @@ import {
   PROBE_GET_TASK_SUBMIT_POLICY,
   SUBMIT_POLICY,
   SUBMIT_RESULT_TOOL_DESCRIPTION,
+  WRITEBACK_POLICY,
 } from "../worker-policy.js";
 
 const MAX_PROMPT = 100_000;
@@ -51,22 +52,37 @@ const fileIdSchema = z
   .max(64)
   .regex(/^f_[A-Z0-9]+$/i, "fileId must look like f_…");
 
+type ToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
+};
+
 type ToolRegistrar = {
   tool: (
     name: string,
     description: string,
     schema: Record<string, z.ZodTypeAny>,
     annotations: ToolAnnotations,
-    handler: (
-      args: Record<string, unknown>
-    ) => Promise<{ content: Array<{ type: "text"; text: string }> }>
+    handler: (args: Record<string, unknown>) => Promise<ToolResult>
   ) => void;
 };
 
-function jsonContent(payload: unknown) {
+function jsonContent(payload: unknown): ToolResult {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
   };
+}
+
+function artifactErrorContent(code: string, detail?: string): ToolResult {
+  const text = detail ? `${code}: ${detail}` : code;
+  return {
+    content: [{ type: "text" as const, text }],
+    isError: true,
+  };
+}
+
+function handoffFileErrorResult(err: HandoffFileError): ToolResult {
+  return artifactErrorContent(err.code, err.message);
 }
 
 export function registerHandoffTools(
@@ -171,6 +187,7 @@ export function registerHandoffTools(
             ? PROBE_GET_TASK_SUBMIT_POLICY
             : {
                 ...SUBMIT_POLICY,
+                writeback: WRITEBACK_POLICY,
                 lateSubmitAccepted:
                   task.status === "TIMED_OUT" && !task.result,
               },
@@ -280,23 +297,30 @@ export function registerHandoffTools(
     {
       title: "Submit handoff result",
       readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: true,
+      destructiveHint: true,
+      idempotentHint: false,
       openWorldHint: false,
     },
     async (args) => {
-      const output = taskService.submitResult({
-        taskId: args.taskId as string,
-        result: args.result as string,
-        metadata: args.metadata as Parameters<
-          TaskService["submitResult"]
-        >[0]["metadata"],
-        artifacts: args.artifacts as Parameters<
-          TaskService["submitResult"]
-        >[0]["artifacts"],
-      });
+      try {
+        const output = taskService.submitResult({
+          taskId: args.taskId as string,
+          result: args.result as string,
+          metadata: args.metadata as Parameters<
+            TaskService["submitResult"]
+          >[0]["metadata"],
+          artifacts: args.artifacts as Parameters<
+            TaskService["submitResult"]
+          >[0]["artifacts"],
+        });
 
-      return jsonContent(output);
+        return jsonContent(output);
+      } catch (err) {
+        if (err instanceof HandoffFileError) {
+          return handoffFileErrorResult(err);
+        }
+        throw new Error("ARTIFACT_WRITE_FAILED");
+      }
     }
   );
 

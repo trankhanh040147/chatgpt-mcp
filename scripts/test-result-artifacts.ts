@@ -3,7 +3,7 @@
  * Result artifact writeback tests (v0.8).
  *   npm run test:result-artifacts
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MAX_BYTES_PER_FILE } from "../src/tasks/files.js";
@@ -95,7 +95,6 @@ function main(): void {
       "reject: secret filename"
     );
 
-    writeFileSync(join(ws, "big.bin"), Buffer.alloc(100));
     expectFileError(
       () =>
         writeResultArtifacts(
@@ -109,6 +108,66 @@ function main(): void {
         ),
       "FILE_TOO_LARGE",
       "reject: oversize artifact"
+    );
+
+    writeFileSync(join(ws, "out/pristine.txt"), "original\n");
+    expectFileError(
+      () =>
+        writeResultArtifacts(
+          [
+            { path: "out/pristine.txt", content: "mutated\n", mode: "overwrite" },
+            { path: ".env", content: "SECRET=x\n" },
+          ],
+          ws
+        ),
+      "FILES_INVALID",
+      "batch: validation fail leaves prior file unchanged"
+    );
+    assert(
+      readWorkspaceArtifact(ws, "out/pristine.txt").toString("utf8") === "original\n",
+      "batch: pristine file unchanged after validation failure"
+    );
+
+    writeFileSync(join(ws, "out/orig-a.txt"), "alpha-original\n");
+    mkdirSync(join(ws, "out/blocker"), { recursive: true });
+    try {
+      writeResultArtifacts(
+        [
+          { path: "out/orig-a.txt", content: "alpha-new\n", mode: "overwrite" },
+          { path: "out/blocker", content: "x\n", mode: "overwrite" },
+        ],
+        ws
+      );
+      assert(false, "batch: expected commit failure on directory target");
+    } catch (err) {
+      assert(err instanceof HandoffFileError, "batch: commit failure is HandoffFileError");
+    }
+    assert(
+      readWorkspaceArtifact(ws, "out/orig-a.txt").toString("utf8") ===
+        "alpha-original\n",
+      "batch: rollback restores file after commit failure"
+    );
+
+    const pad = "x".repeat(520 * 1024);
+    expectFileError(
+      () =>
+        writeResultArtifacts(
+          [{ path: "out/late-secret.txt", content: `${pad}\nsk-abcdefghijklmnopqrstuvwxyz\n` }],
+          ws
+        ),
+      "FILES_SECRET_DETECTED",
+      "reject: secret beyond 512 KiB (full-body scan)"
+    );
+    assert(
+      !(() => {
+        try {
+          readWorkspaceArtifact(ws, "out/late-secret.txt");
+          return true;
+        } catch {
+          return false;
+        }
+      })(),
+      "secret reject: no file written"
     );
   } finally {
     rmSync(ws, { recursive: true, force: true });

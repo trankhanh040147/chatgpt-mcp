@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { ulid } from "ulid";
-import { containsKnownSecrets } from "./sanitize.js";
+import { bufferContainsKnownSecrets } from "./sanitize.js";
 import {
   HandoffFileError,
   type PreparedResource,
@@ -194,8 +194,7 @@ export function materializeWorkspaceResources(
       throw new HandoffFileError("FILES_INVALID", "Binary/NUL content rejected");
     }
 
-    const textSample = buf.toString("utf8", 0, Math.min(buf.length, 512 * 1024));
-    if (containsKnownSecrets(textSample)) {
+    if (bufferContainsKnownSecrets(buf)) {
       throw new HandoffFileError(
         "FILES_SECRET_DETECTED",
         "Known secret pattern detected in file content"

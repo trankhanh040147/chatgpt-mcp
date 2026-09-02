@@ -11,6 +11,11 @@ function resetPattern(pattern: RegExp): void {
   pattern.lastIndex = 0;
 }
 
+/** Full-buffer secret scan for materialize / writeback (≤ per-file cap). */
+export function bufferContainsKnownSecrets(buf: Buffer): boolean {
+  return containsKnownSecrets(buf.toString("utf8"));
+}
+
 /** Best-effort create-time guard — not a DLP boundary (ADR-005). */
 export function containsKnownSecrets(text: string): boolean {
   for (const pattern of SECRET_PATTERNS) {
