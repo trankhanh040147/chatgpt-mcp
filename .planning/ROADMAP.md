@@ -18,6 +18,7 @@
 | 0.9 | MCP Resource URI transport | PLANNED |
 | 0.10 | Audit store + read API revival | PLANNED |
 | 0.11 | Claude host | PLANNED |
+| — | **Dashboard 1.0** (React rebuild) | **ACTIVE (design gate)** — [spec](active/dashboard-react-rebuild.md) · [review](2026-09-02-dashboard-react-rebuild/design-review.md) |
 
 Handoff Resources spans **0.7–0.10** as one feature family; new hosts after resource semantics are evidence-backed.
 
