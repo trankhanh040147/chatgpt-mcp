@@ -78,15 +78,24 @@ If the user **explicitly requests** a handoff — `/chatgpt-mcp`, "handoff to Ch
 
 MCP `type` (`research`, `architecture_review`, `code_review`, `second_opinion`, `debug_analysis`) is orthogonal to tier.
 
+### File attachments (`files[]`)
+
+When attaching workspace files:
+
+- Paths are **relative to the open Cursor workspace**, not the chatgpt-mcp install path.
+- Global MCP config must use `"HANDOFF_WORKSPACE_ROOT": "${workspaceFolder}"` — never hardcode the chatgpt-mcp repo path.
+- If `files[]` is non-empty and create fails with `File not found under workspace`, pass `workspaceRoot` as the absolute path of the current project (hook injects when available).
+- Do not attach secret-shaped paths (`.env`, keys, credentials).
+
 ## After handoff_create_task succeeds
 
 **Finish the current turn immediately in every Cursor conversation.** Do **not** call `handoff_get_task_status` in a loop. User-level `~/.cursor/hooks` + this repo’s stop hook long-poll and resume with `followup_message`.
 
-## When resumed
+## When resumed (v0.8 writeback)
 
 1. Call `handoff_get_result` (use the taskId from the followup).
-2. Evaluate the external result critically.
-3. Incorporate useful findings.
-4. Continue the original task.
+2. If `metadata.artifacts` is non-empty: files were written on disk under the task workspace — verify/read them; do not re-apply from prose.
+3. If `metadata.artifacts` is empty but `result` describes edits: apply locally via edit tools (prose-only path).
+4. Evaluate the external result critically; continue the original task.
 5. Do not blindly trust the external result.
 6. Do **not** poll status again after resume.

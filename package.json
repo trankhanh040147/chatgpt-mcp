@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Cursor ↔ ChatGPT MCP handoff (portable taskId; Cursor E2E, other hosts experimental)",
   "license": "MIT",
   "repository": {
@@ -26,8 +26,9 @@
   ],
   "scripts": {
     "test": "npm run test:unit",
-    "test:unit": "npm run test:dashboard && npm run test:leases && npm run test:ops && npm run test:hook-ack && npm run test:usage && npm run test:create-worker && npm run test:agent-policy && npm run test:files && npm run test:attach-lifecycle && npm run test:rotation && npm run test:worker-ops && npm run test:chrome-cdp && npm run test:gptmcp-args",
+    "test:unit": "npm run test:dashboard && npm run test:worker-health && npm run test:leases && npm run test:ops && npm run test:hook-ack && npm run test:usage && npm run test:create-worker && npm run test:agent-policy && npm run test:files && npm run test:attach-lifecycle && npm run test:rotation && npm run test:worker-ops && npm run test:chrome-cdp && npm run test:gptmcp-args",
     "test:dashboard": "tsx scripts/test-dashboard-pr1.ts",
+    "test:worker-health": "tsx scripts/test-worker-health.ts",
     "test:gptmcp-args": "tsx scripts/test-gptmcp-args.ts",
     "check:unit": "npm run typecheck && npm run test:unit",
     "verify": "npm run check:unit && npm run build",
@@ -68,6 +69,9 @@
     "test:files": "tsx scripts/test-files.ts",
     "test:attachment-match": "tsx scripts/test-attachment-match.ts",
     "test:attach-lifecycle": "tsx scripts/test-attach-lifecycle.ts",
+    "test:result-artifacts": "tsx scripts/test-result-artifacts.ts",
+    "test:writeback-contract": "tsx scripts/test-writeback-contract.ts",
+    "e2e:writeback": "tsx scripts/e2e-writeback.ts",
     "e2e:files-attach": "tsx scripts/e2e-files-attach.ts",
     "e2e:attach-observability": "tsx scripts/e2e-attach-observability.ts",
     "e2e:files-mcp-create": "tsx scripts/e2e-files-mcp-create.ts",

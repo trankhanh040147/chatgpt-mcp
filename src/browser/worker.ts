@@ -14,7 +14,7 @@ import {
 import type { UiWriteMutex } from "./ui-write-mutex.js";
 import { log } from "../logging/logger.js";
 import type { WorkerStatus } from "../tasks/task.types.js";
-import { DEFAULT_WORKER_ID } from "../tasks/task.types.js";
+import { DEFAULT_WORKER_ID, TERMINAL_STATUSES } from "../tasks/task.types.js";
 import { classifyProbeFailure } from "../mcp/probe-failure.js";
 
 export interface BrowserWorkerOptions {
@@ -328,6 +328,36 @@ export class BrowserWorker {
     }
 
     if (status !== "READY") {
+      if (!this.activeTaskId && this.repo) {
+        const ws = this.repo.getWorkerState(this.workerId);
+        const pinnedId = ws.currentTaskId;
+        if (pinnedId) {
+          const pinned = this.repo.getTaskById(pinnedId);
+          if (
+            pinned &&
+            (TERMINAL_STATUSES as readonly string[]).includes(pinned.status)
+          ) {
+            log({
+              event: "INFO",
+              component: "browser-worker",
+              taskId: pinnedId,
+              message:
+                "Reconciling ghost-BUSY: pinned terminal handoff — returning worker to READY",
+            });
+            this.clearActiveTask(workerState);
+            return;
+          }
+        } else if (status === "BUSY") {
+          log({
+            event: "INFO",
+            component: "browser-worker",
+            message:
+              "Reconciling ghost-BUSY: BUSY with no current task — returning worker to READY",
+          });
+          this.clearActiveTask(workerState);
+          return;
+        }
+      }
       workerState.touchHeartbeat();
       return;
     }
@@ -798,6 +828,7 @@ export class BrowserWorker {
               await browser.sendSubmitNudge(taskId, {
                 skipIdleWait: true,
                 probe: isProbe,
+                hasAttachedFiles: (taskRow?.files?.length ?? 0) > 0,
               });
               log({
                 event: "INFO",

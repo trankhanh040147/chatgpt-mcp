@@ -91,12 +91,23 @@ export function deriveWorkerCountState(liveCount, healthyCount) {
     return { text: "0 registered", kind: "warn" };
   }
   if (healthyCount === 0) {
-    return { text: `${liveCount} registered · 0 healthy`, kind: "bad" };
+    return { text: `${liveCount} registered · 0 dispatch-ready`, kind: "bad" };
   }
   if (healthyCount < liveCount) {
-    return { text: `${liveCount} registered · ${healthyCount} healthy`, kind: "warn" };
+    return { text: `${liveCount} registered · ${healthyCount} dispatch-ready`, kind: "warn" };
   }
-  return { text: `${liveCount} registered · ${healthyCount} healthy`, kind: "ok" };
+  return { text: `${liveCount} registered · ${healthyCount} dispatch-ready`, kind: "ok" };
+}
+
+/** True when worker can actually claim QUEUED handoffs (not just infra-wired). */
+export function isDispatchReady(w) {
+  const op = w.operatorState ?? w.healthState ?? "UNKNOWN";
+  return (
+    Boolean(w.healthy) &&
+    op === "READY" &&
+    !w.pinnedTerminalTaskId &&
+    !w.stuckInFlightTaskId
+  );
 }
 
 export function age(iso) {
@@ -265,6 +276,7 @@ export function deriveSystemTaxonomy(health, workers) {
     if (!w.healthy) return true;
     if (w.pidAlive === false) return true;
     if (w.heartbeatStale) return true;
+    if (w.pinnedTerminalTaskId) return true;
     const op = w.operatorState ?? w.healthState;
     if (op === "DEGRADED" || op === "ACTION_REQUIRED" || op === "ERROR" || op === "BLOCKED" || op === "OFFLINE") {
       return true;
@@ -306,6 +318,17 @@ export function deriveRecommendedAction(w, systemState = {}) {
       actionKey: "clear-stuck",
       reason: `Stuck handoff ${middleTruncate(w.stuckInFlightTaskId)}`,
       priority: 90,
+      destructive: false,
+    };
+  }
+
+  // 2b. Pinned completed handoff (ghost-BUSY)
+  if (w.pinnedTerminalTaskId) {
+    return {
+      label: "Clear stuck",
+      actionKey: "clear-stuck",
+      reason: `Pinned completed handoff ${middleTruncate(w.pinnedTerminalTaskId)}`,
+      priority: 88,
       destructive: false,
     };
   }
@@ -523,6 +546,8 @@ export function summarizeIncidents(workers, systemState = {}) {
       issues.push(`${w.id} not in registry`);
     } else if (w.stuckInFlightTaskId) {
       issues.push(`${w.id} handoff stuck`);
+    } else if (w.pinnedTerminalTaskId) {
+      issues.push(`${w.id} pinned to completed handoff`);
     } else if (w.chatAccessDenied) {
       issues.push(`${w.id} chat access denied`);
     } else if (w.status === "SESSION_LOST") {
@@ -546,7 +571,7 @@ export function summarizeIncidents(workers, systemState = {}) {
   }
 
   if (issues.length === 0) {
-    return "All workers ready for handoffs";
+    return "All workers dispatch-ready for handoffs";
   }
 
   return issues.slice(0, 3).join(" · ") + (issues.length > 3 ? " …" : "");
@@ -559,7 +584,7 @@ function renderHeadline(taxonomy, workers, health, healthBody) {
   if (!headlinePanel) return;
 
   const live = (workers ?? []).filter((w) => w.id !== "default");
-  const healthyN = live.filter((w) => w.healthy).length;
+  const dispatchReadyN = live.filter((w) => isDispatchReady(w)).length;
   const systemState = {
     brokerReachable: healthBody?.brokerReachable,
     brokerConfigured: healthBody?.brokerConfigured,
@@ -588,9 +613,9 @@ function renderHeadline(taxonomy, workers, health, healthBody) {
     } else if (taxonomy === "SETUP") {
       headlineTitle.textContent = "0 workers registered";
     } else if (taxonomy === "OK") {
-      headlineTitle.textContent = `All ${live.length} workers available`;
+      headlineTitle.textContent = `All ${live.length} workers dispatch-ready`;
     } else {
-      headlineTitle.textContent = `${healthyN} of ${live.length} workers available`;
+      headlineTitle.textContent = `${dispatchReadyN} of ${live.length} workers dispatch-ready`;
     }
   }
 
@@ -802,9 +827,9 @@ function renderWorkers(workers, showReference, systemState = {}) {
     return;
   }
 
-  const healthyN = live.filter((w) => w.healthy).length;
+  const dispatchReadyN = live.filter((w) => isDispatchReady(w)).length;
   if (workerCount) {
-    const countState = deriveWorkerCountState(live.length, healthyN);
+    const countState = deriveWorkerCountState(live.length, dispatchReadyN);
     workerCount.textContent = countState.text;
     workerCount.className = `worker-count-chip ${countState.kind}`;
   }
@@ -846,11 +871,13 @@ function renderWorkers(workers, showReference, systemState = {}) {
         surfaceLine = `<div class="card-surface-banner"><strong>${escapeHtml(w.activeOperation.kind)}</strong> <span class="mono">${escapeHtml(w.activeOperation.state)}</span></div>`;
       } else if (w.stuckInFlightTaskId) {
         surfaceLine = `<div class="card-surface-banner" style="border-color:rgba(180,35,46,0.4);background:rgba(180,35,46,0.08)"><strong>Handoff stuck</strong> · <code>${escapeHtml(w.stuckInFlightTaskId)}</code></div>`;
+      } else if (w.pinnedTerminalTaskId) {
+        surfaceLine = `<div class="card-surface-banner" style="border-color:rgba(180,35,46,0.4);background:rgba(180,35,46,0.08)"><strong>Pinned completed handoff</strong> · <code>${escapeHtml(w.pinnedTerminalTaskId)}</code></div>`;
       }
 
-      // Visible lines: ~3-4 for healthy, ~5 for unhealthy
+      // Visible lines: ~3-4 for dispatch-ready, ~5 for blocked
       let visibleLines = "";
-      if (w.healthy && opState === "READY") {
+      if (isDispatchReady(w)) {
         visibleLines = `
           <div class="card-line">
             <span class="card-line__label">Status</span>

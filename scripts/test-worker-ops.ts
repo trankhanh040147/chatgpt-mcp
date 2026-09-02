@@ -339,6 +339,35 @@ async function main(): Promise<void> {
     teardown(dbPath);
   }
 
+  // T9b — wrong canary rejected (server-side token match)
+  {
+    const { service, dbPath } = freshEnv(workersFile);
+    const token = "deadbeef00000003";
+    const { taskId } = service.createSystemProbe({
+      workerId: "w1",
+      operationId: "wop_t9b",
+      token,
+    });
+    const claimed = service.claimNextQueued("w1", "inst-test", 30_000, 120_000);
+    service.markDispatchStarted(
+      taskId,
+      "w1",
+      claimed!.leaseToken,
+      "inst-test",
+      30_000,
+      120_000
+    );
+    let threw = false;
+    try {
+      service.completeProbe({ taskId, canary: "0000000000000001" });
+    } catch {
+      threw = true;
+    }
+    assert(threw, "T9b wrong canary rejected");
+    assert(service.getTask(taskId)?.status !== "COMPLETED", "T9b probe not completed");
+    teardown(dbPath);
+  }
+
   // T10 — new chat always enqueues; clears stuck handoff first
   {
     const { repo, service, opsRepo, broker, dbPath } = freshEnv(workersFile);

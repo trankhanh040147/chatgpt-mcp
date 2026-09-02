@@ -12,21 +12,25 @@
 | 0.3 | CDP optimize + create-worker | SHIPPED |
 | 0.4 | Ops dashboard | SHIPPED |
 | 0.5 | Agent UX + chat rotation | SHIPPED |
-| 0.6 | **Worker Control Plane** (lite ops + dashboard + `gptmcp` CLI) | **ACTIVE** |
-| 0.7 | **Handoff Resources** | **ACTIVE** (impl on branch) |
-| 0.8 | Claude host | PLANNED |
-| 0.9 | Result artifacts | CANDIDATE |
+| 0.6 | Worker Control Plane | SHIPPED |
+| 0.7 | Handoff Resources (P0) | SHIPPED — exit debt → 0.7.x |
+| 0.8 | **Handoff Resources Phase 2 (writeback)** | **ACTIVE** — branch `feat/0.8-writeback` |
+| 0.9 | MCP Resource URI transport | PLANNED |
+| 0.10 | Audit store + read API revival | PLANNED |
+| 0.11 | Claude host | PLANNED |
+
+Handoff Resources spans **0.7–0.10** as one feature family; new hosts after resource semantics are evidence-backed.
 
 ## Active
 
-1. **[0.6 — Worker Control Plane](active/0.6-worker-ops.md)** — durable ops journal, broker HTTP, SYSTEM_PROBE, extend existing dashboard. **Ship first.**
-2. **[0.7 — Handoff Resources](active/0.7-handoff-resources.md)** — native file attach + snapshot. **PR after 0.6 recommended.**
+1. **[0.7.x patch](./active/0.7-handoff-resources.md)** — rotation CI, formal E2E D1–D3/D1b, #18, tag `v0.7.0`
+2. **[0.8 — Handoff Resources Phase 2](active/0.8-handoff-resources-phase2.md)** — writeback + large-batch observability + lifecycle hardening
 
-Core principle (0.7): **Agent chooses context; runtime chooses transport.**
+Core principle: **Agent chooses context; runtime chooses transport.**
 
 ## Product direction
 
-Local-first Cursor/agent ↔ ChatGPT handoff over MCP. Priorities: correctness, consent, reproducible evidence — then **worker ops**, **handoff resources**, then more hosts.
+Local-first Cursor/agent ↔ ChatGPT handoff over MCP. Priorities: correctness, consent, reproducible evidence — then **complete handoff resources**, then more hosts.
 
 ## Sequencing principles
 
@@ -34,6 +38,11 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP. Priorities: correctness, 
 - Server-generated `taskId` is authoritative.
 - UI automation fails closed; login / consent stay manual.
 - One `0.N.0` must meet exit criteria before the next feature version is claimed.
+- Evidence precedes support claims (“works with X”).
+
+## Reconciliation (2026-09-01)
+
+Aug 30 ladder placed Claude at 0.8 while the 0.7 spec deferred remaining resource work to “v0.8+”. **Superseded:** 0.8 = HR Phase 2; Claude → 0.11. Source: handoff `ho_01M1EDZR3R94ZD8SC8BW61WS2H`.
 
 ## Archive
 

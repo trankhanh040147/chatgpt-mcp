@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Inject Cursor session + workspace into handoff_create_task MCP calls."""
+"""
+Cursor beforeMCPExecution: record conversation_id for handoff_create_task.
+
+CallDynamicTool often drops preToolUse updated_input. This hook cannot rewrite
+MCP args, but it sees conversation_id — persist a hint the MCP server reads.
+Always fail-open (permission allow).
+"""
 from __future__ import annotations
 
 import json
@@ -94,7 +100,6 @@ def _is_handoff_create_task(tool_name: str | None, tool_input: dict) -> bool:
                 or tool_input.get("Namespace")
                 or tool_input.get("server_name")
                 or tool_input.get("serverName")
-                or tool_input.get("ServerName")
                 or ""
             )
             inner = (
@@ -108,89 +113,51 @@ def _is_handoff_create_task(tool_name: str | None, tool_input: dict) -> bool:
     return False
 
 
-def _unwrap_tool_input(tool_input: dict, wrapped: bool) -> dict:
-    if not wrapped:
-        return tool_input
-    args = tool_input.get("arguments") or tool_input.get("Arguments")
-    if isinstance(args, dict):
-        return args
-    return tool_input
-
-
-def _extract_workspace_root(event: dict) -> str | None:
-    candidates: list[str] = []
-
-    for key in (
-        "workspace_roots",
-        "workspaceRoots",
-        "workspace_root",
-        "workspaceRoot",
-        "workspace_folder",
-        "workspaceFolder",
-        "project_path",
-        "projectPath",
-        "cwd",
-        "root_path",
-        "rootPath",
-    ):
-        value = event.get(key)
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, str) and item.strip():
-                    candidates.append(item.strip())
-        elif isinstance(value, str) and value.strip():
-            candidates.append(value.strip())
-
-    for raw in candidates:
-        try:
-            return str(Path(raw).expanduser().resolve())
-        except OSError:
-            continue
-
-    env_root = os.environ.get("HANDOFF_WORKSPACE_ROOT", "").strip()
-    if env_root and "${" not in env_root:
-        try:
-            return str(Path(env_root).expanduser().resolve())
-        except OSError:
-            pass
-    return None
-
-
 def main() -> None:
     event = json.load(sys.stdin)
-    tool_name = event.get("tool_name") or event.get("toolName")
-    tool_input = dict(event.get("tool_input") or event.get("toolInput") or {})
+    tool_name = (
+        event.get("tool_name")
+        or event.get("toolName")
+        or event.get("tool")
+        or event.get("mcp_tool_name")
+        or event.get("mcpToolName")
+    )
+    raw_input = (
+        event.get("tool_input")
+        or event.get("toolInput")
+        or event.get("arguments")
+        or event.get("args")
+        or event.get("input")
+        or {}
+    )
+    if not isinstance(raw_input, dict):
+        raw_input = {}
 
-    if not _is_handoff_create_task(tool_name, tool_input):
+    looks_like_handoff = _is_handoff_create_task(tool_name, raw_input) or (
+        isinstance(tool_name, str)
+        and _strip_mcp_prefix(tool_name) == "handoff_create_task"
+    )
+    if not looks_like_handoff:
         print("{}")
         return
 
-    wrapped = _is_wrapped_tool_name(tool_name)
-    payload = dict(_unwrap_tool_input(tool_input, wrapped))
     conversation_id = _extract_conversation_id(event)
+    if not conversation_id:
+        print(json.dumps({"permission": "allow"}))
+        return
 
-    if conversation_id:
-        payload["clientSessionId"] = conversation_id
-        payload["cursorConversationId"] = conversation_id
-        _record_session_hint(
-            conversation_id=conversation_id,
-            tool_name=tool_name if isinstance(tool_name, str) else None,
-            prompt=payload.get("prompt") if isinstance(payload.get("prompt"), str) else None,
-        )
+    prompt = raw_input.get("prompt")
+    if prompt is None and _is_wrapped_tool_name(tool_name):
+        args = raw_input.get("arguments") or raw_input.get("Arguments") or {}
+        if isinstance(args, dict):
+            prompt = args.get("prompt")
 
-    files = payload.get("files")
-    has_files = isinstance(files, list) and len(files) > 0
-    if has_files and not payload.get("workspaceRoot"):
-        workspace_root = _extract_workspace_root(event)
-        if workspace_root:
-            payload["workspaceRoot"] = workspace_root
-
-    if wrapped:
-        updated = {**tool_input, "arguments": payload, "Arguments": payload}
-    else:
-        updated = payload
-
-    print(json.dumps({"updated_input": updated, "updatedInput": updated}))
+    _record_session_hint(
+        conversation_id=conversation_id,
+        tool_name=tool_name if isinstance(tool_name, str) else None,
+        prompt=prompt if isinstance(prompt, str) else None,
+    )
+    print(json.dumps({"permission": "allow"}))
 
 
 if __name__ == "__main__":

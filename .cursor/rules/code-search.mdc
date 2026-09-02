@@ -1,0 +1,62 @@
+---
+description: Code search routing for chatgpt-mcp (GitNexus repo slug + hints)
+alwaysApply: true
+---
+
+# Code Discovery (chatgpt-mcp)
+
+Extends user `code-search` rule. When this rule conflicts with User Rules, follow this Project Rule. Team Rules still take precedence.
+
+**GitNexus slug (required):** `chatgpt-mcp` — every call: `{ repo: "chatgpt-mcp", ... }`.
+
+Edit/commit invariants (`impact`, `detect_changes`, `rename`) → `AGENTS.md` only.
+
+## Discovery flow
+
+```
+DISCOVERY     query → context → targeted Read (start narrow; typically 1–2 ranges — not a hard limit)
+EDIT GATE     if changing existing symbol → impact upstream (AGENTS.md)
+VERIFY        exact/path-scoped Grep
+```
+
+Start narrow. Widen only when initial reads leave a **concrete remaining question** (e.g. `controller → service → repository` needs another range).
+
+## Quick-map (hints — not authority)
+
+| Topic | Start symbol |
+|-------|----------------|
+| MCP handoff tools | `registerHandoffTools` |
+| Task lifecycle | `TaskService` |
+| Native writeback v0.8 | `writeResultArtifacts` |
+| Worker health UI/API | `buildWorkerHealthRow` |
+| HTTP dashboard | `server` (`src/http/api.ts`) |
+
+If `context` cannot resolve an entry, **rediscover with `query`** — do not assume the symbol still exists.
+
+Prefer `context` on these over repo-wide `handoff` / `task` greps.
+
+## Stale / missing index
+
+GitNexus miss alone does **not** imply a stale index.
+
+If a **known** symbol or path is missing unexpectedly:
+
+1. Verify once with path-scoped Grep/Glob.
+2. If code exists but GitNexus still misses it → index **suspected stale** → suggest `node .gitnexus/run.cjs analyze` from repo root.
+3. Continue with path-scoped Grep + targeted Read.
+4. Suggest re-analysis once when it would materially improve further work.
+
+Distinguish **suspected stale** vs **confirmed unavailable** (MCP down, no index).
+
+## Repo literals (grep-first OK)
+
+Exact strings where Grep before GitNexus is correct:
+
+- `handoff_*` tool names, env vars (`HANDOFF_*`), npm scripts (`test:result-artifacts`)
+- paths: `src/mcp/tools/index.ts`, `.planning/active/`
+
+## Anti-patterns (this repo)
+
+- Repo-wide grep `handoff` before `context(registerHandoffTools)`.
+- Edit `submitResult` / `createTask` / `buildWorkerHealthRow` without `impact`.
+- Full-file read of `task.service.ts` when `context` gives method line range.

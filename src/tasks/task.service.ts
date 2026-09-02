@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { ulid } from "ulid";
 import type { TaskRepository } from "./task.repository.js";
 import { sanitizeContext, sanitizeSecrets } from "./sanitize.js";
@@ -6,7 +7,9 @@ import { log, logTransition } from "../logging/logger.js";
 import {
   registerTaskResourcePaths,
   resolveWorkspaceRoot,
+  assertWorkspaceFilesExist,
 } from "./files.js";
+import { writeResultArtifacts } from "./result-artifacts.js";
 import {
   HandoffFileError,
   type ClaimResult,
@@ -35,7 +38,8 @@ export class TaskService {
     let workspaceRoot: string | undefined;
     let files: HandoffTask["files"] = [];
     if (input.files && input.files.length > 0) {
-      workspaceRoot = resolveWorkspaceRoot();
+      workspaceRoot = resolveWorkspaceRoot(input.workspaceRoot);
+      assertWorkspaceFilesExist(input.files, workspaceRoot);
       files = registerTaskResourcePaths(input.files, now);
     }
 
@@ -166,6 +170,15 @@ export class TaskService {
     if (!canary || canary.length > 128) {
       throw new Error("canary must be a non-empty verification token");
     }
+    const stored = this.repo.getProbeToken(input.taskId);
+    if (!stored) {
+      throw new Error(`Probe token missing for task ${input.taskId}`);
+    }
+    if (!TaskService.probeTokensEqual(canary, stored)) {
+      throw new Error(
+        `SYSTEM_PROBE PROBE_RESULT_MISMATCH: canary does not match task token`
+      );
+    }
     return this.submitResult({
       taskId: input.taskId,
       result: `CREATE_WORKER_CANARY=${canary}`,
@@ -289,7 +302,7 @@ export class TaskService {
     }
 
     const sanitizedResult = sanitizeSecrets(input.result);
-    const metadata = input.metadata
+    let metadata = input.metadata
       ? (sanitizeContext(
           input.metadata as Record<string, unknown>
         ) as HandoffResultMetadata)
@@ -321,10 +334,10 @@ export class TaskService {
     }
 
     if (task.taskClass === "SYSTEM_PROBE") {
-      const hasCanaryFormat = /CREATE_WORKER_CANARY=[a-f0-9]+/i.test(
-        sanitizedResult
+      const canaryMatch = sanitizedResult.match(
+        /CREATE_WORKER_CANARY=([a-f0-9]+)/i
       );
-      if (!hasCanaryFormat) {
+      if (!canaryMatch) {
         const classified = classifyCompletedProbeResult(sanitizedResult);
         const hint =
           classified === "MCP_TOOL_NOT_INVOKED" &&
@@ -333,6 +346,26 @@ export class TaskService {
             : " Use handoff_complete_probe with the canary from the task prompt — not handoff_submit_result prose.";
         throw new Error(`SYSTEM_PROBE ${classified}: invalid probe submit.${hint}`);
       }
+      const stored = this.repo.getProbeToken(input.taskId);
+      if (!stored) {
+        throw new Error(`Probe token missing for task ${input.taskId}`);
+      }
+      if (!TaskService.probeTokensEqual(canaryMatch[1], stored)) {
+        throw new Error(
+          `SYSTEM_PROBE PROBE_RESULT_MISMATCH: canary does not match task token`
+        );
+      }
+    }
+
+    const artifactCount = input.artifacts?.length ?? 0;
+    if (task.context?.writebackRequired && artifactCount === 0) {
+      const hint = task.context.submitTemplate
+        ? " Use submitTemplate from handoff_get_task as the handoff_submit_result payload."
+        : "";
+      throw new HandoffFileError(
+        "FILES_INVALID",
+        `artifacts[] required for this task — result prose does not write workspace files.${hint}`
+      );
     }
 
     const fromTimedOut = task.status === "TIMED_OUT";
@@ -341,30 +374,69 @@ export class TaskService {
       sanitizedResult,
       metadata
     );
-    if (changed === 1) {
-      logTransition("task-service", input.taskId, task.status, "COMPLETED");
-      log({
-        event: "RESULT_RECEIVED",
-        component: "task-service",
-        taskId: input.taskId,
-        message: fromTimedOut
-          ? "Late submit after TIMED_OUT — result kept"
-          : undefined,
-      });
-      this.recordUsageBestEffort(input.taskId, task.prompt, sanitizedResult);
-      this.recordMcpWriteVerifiedForTask(input.taskId);
-      return {
-        success: true,
-        status: "COMPLETED",
-        lateSubmit: fromTimedOut || undefined,
-      };
+    if (changed !== 1) {
+      const again = this.repo.getTaskById(input.taskId);
+      if (!again) {
+        throw new Error(`Task not found: ${input.taskId}`);
+      }
+      return this.reconcileCompletedSubmit(again, sanitizedResult, input.taskId);
     }
 
-    const again = this.repo.getTaskById(input.taskId);
-    if (!again) {
-      throw new Error(`Task not found: ${input.taskId}`);
+    if (artifactCount > 0) {
+      try {
+        const root = task.workspaceRoot ?? resolveWorkspaceRoot();
+        const written = writeResultArtifacts(input.artifacts!, root);
+        metadata = { ...metadata, artifacts: written };
+        this.repo.patchResultMetadataIfCompleted(input.taskId, metadata ?? {});
+        log({
+          event: "RESULT_ARTIFACTS_WRITTEN",
+          component: "task-service",
+          taskId: input.taskId,
+          message: `count=${written.length}`,
+        });
+      } catch (err) {
+        log({
+          event: "WARN",
+          component: "task-service",
+          taskId: input.taskId,
+          message: `Task COMPLETED but artifact write failed after claim: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        });
+        throw err;
+      }
+    } else if ((task.files?.length ?? 0) > 0) {
+      log({
+        event: "WARN",
+        component: "task-service",
+        taskId: input.taskId,
+        message: `submit without artifacts (attachedFiles=${task.files?.length ?? 0})`,
+      });
     }
-    return this.reconcileCompletedSubmit(again, sanitizedResult, input.taskId);
+
+    logTransition("task-service", input.taskId, task.status, "COMPLETED");
+    log({
+      event: "RESULT_RECEIVED",
+      component: "task-service",
+      taskId: input.taskId,
+      message: fromTimedOut
+        ? "Late submit after TIMED_OUT — result kept"
+        : undefined,
+    });
+    this.recordUsageBestEffort(input.taskId, task.prompt, sanitizedResult);
+    this.recordMcpWriteVerifiedForTask(input.taskId);
+    return {
+      success: true,
+      status: "COMPLETED",
+      lateSubmit: fromTimedOut || undefined,
+    };
+  }
+
+  private static probeTokensEqual(submitted: string, stored: string): boolean {
+    const a = Buffer.from(submitted.trim().toLowerCase(), "utf8");
+    const b = Buffer.from(stored.trim().toLowerCase(), "utf8");
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
   }
 
   /** Never fail submit if usage estimation blows up. */
