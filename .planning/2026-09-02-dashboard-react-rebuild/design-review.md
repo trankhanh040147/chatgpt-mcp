@@ -4,13 +4,15 @@
 **Make file:** [Create Design from Spec](https://www.figma.com/make/GdV7zzx4CjYqKrUEp24O29/Create-Design-from-Spec?t=vAndgFVMumHk4Q4m-1)  
 **Exported source reviewed:** `App.tsx` (~1500 LOC), `index.css`, `package.json`  
 **Baseline:** shipped vanilla dashboard `src/dashboard/public/` + status-api routes  
-**Verdict:** **Strong visual direction — not ready for code port.** Run one Make revision pass using [figma-make-revision.prompt.md](./figma-make-revision.prompt.md), then sign-off before React adapt.
+**Verdict:** **Strong visual direction (~8.5/10 product) — not ready for code port.** Next pass is **engineering/product semantics**, not visual redesign. Run Make revision v2 using [figma-make-revision.prompt.md](./figma-make-revision.prompt.md), then sign-off before React adapt.
 
 ---
 
 ## Executive summary
 
-The Make export successfully captures the **light-first, calm developer-tool** direction from `dashboard-redesign-brief.md`:
+The Make export captures the **light-first, calm developer-tool** direction. Visual language does **not** need changing. The gap is **state semantics**: turning a polished UI into an operator console that answers *what is running · what is happening · what is unhealthy · what to do next*.
+
+**Keeps working:**
 
 - Tabs: Overview · Tasks · Diagnostics
 - Workers as visual center with capacity bars
@@ -25,6 +27,69 @@ However, several **engineering blockers** remain before porting to real API hook
 | **Blocker** | 5 | Wrong IDs/vocabulary, missing ops flows, missing states |
 | **Major** | 6 | Missing control-plane data, incomplete Diagnostics, hardcoded version |
 | **Minor** | 4 | CSS root mismatch, decorative avatars, column labels |
+| **Semantics** | 6 | Causal state, strip hierarchy, card model, capacity fatigue, menu context, API vs broker |
+
+---
+
+## Semantics pass (v2 — adopt before Figma handoff)
+
+These refinements supersede the v1 revision prompt. They do **not** change visual language.
+
+### S1 — Core rule: causal state, not independent badges
+
+> When an upstream dependency fails, downstream checks become **UNKNOWN**, not FAILED. Surface the highest actionable root cause **once**; suppress duplicate derived warnings on Overview.
+
+Example: broker offline → `✕ Broker`, then `?` for binding/URL/session/MCP — not six red failures. Summary: *Broker unavailable — downstream checks unknown*.
+
+Maps cleanly to `WorkerCondition` TRUE / FALSE / UNKNOWN from `worker-health.ts`.
+
+### S2 — Control plane strip hierarchy
+
+Not six equal KPI tiles. Primary: **● OK · Last tick 8s ago** (tooltip: “Status API refreshed …”). Secondary: lease reaper + reap counters.
+
+When poll stale, strip shows **● STALE · Last tick 42s ago** — no extra alert section.
+
+### S3 — Worker card = 3 questions
+
+Who (`w1`) · operator state + one sentence · capacity + last activity. **Never** show `READY`/`SESSION_LOST`/MCP checks on card — drawer only.
+
+### S4 — Capacity bar: avoid alert fatigue
+
+| Used | UI |
+|------|-----|
+| 0–15 | Calm neutral bar |
+| 16–17 | Calm bar + small “Approaching capacity” text |
+| 18–19 | Amber bar + “Rotate soon” |
+| 20 | Blocked + “New chat” |
+
+Do not turn full bar warning-colored at 16/20.
+
+### S5 — Drawer = diagnostic ladder
+
+Vertical connector chain (Process → Broker → … → MCP write), not flat checklist. UNKNOWN visually distinct from FALSE.
+
+### S6 — API unreachable ≠ broker offline
+
+| Case | UX |
+|------|-----|
+| Status API down | Replace entire shell — no tabs, no stale cards |
+| Broker offline | Banner + trustworthy Overview; downstream UNKNOWN in drawer |
+
+### S7 — Context-sensitive overflow menu
+
+Grouped: Chat / Worker / Recovery / Remove (isolated). Hide Continue when Ready; show Enable when disabled.
+
+### S8 — Add-worker step 3 = waiting state
+
+No Next button; polling advances. Show elapsed wait + “Having trouble? gptmcp doctor”.
+
+### S9 — Destructive modals name consequences
+
+Preview affected worker, current task, what gets replaced — not generic warning paragraph.
+
+### S10 — Diagnostics: human first
+
+Commands → readable topology table → connection model reference → endpoints → collapsed raw JSON.
 
 ---
 
@@ -62,23 +127,13 @@ Real registry uses **`wN`** worker ids (`default`, `w1`, `w2`, …). Make mock u
 
 **Fix:** Replace all worker ids in mock data, labels, and inline alert copy.
 
-### B2 — Missing control plane strip
+### B2 — Control plane strip (hierarchical)
 
-Vanilla dashboard exposes lease reaper + reap counters operators rely on:
+Vanilla dashboard exposes lease reaper + reap counters. Make Overview has **no control plane section**.
 
-| Field | API source |
-|-------|------------|
-| Health | `GET /health` → `ok` |
-| Lease reaper | `health.leaseReaper` |
-| Last tick | `health.lastReapAt` |
-| Requeued / timed out / failed | `health.reapStats` |
+API source: `GET /health` → `ok`, `leaseReaper`, `lastReapAt`, `reapStats`.
 
-Make Overview has **no control plane section**. Either:
-
-- Compact horizontal KV strip below page heading (preferred — matches shipped dash 0.4–0.6), or
-- Move to Diagnostics tab **and** show a one-line summary on Overview (“Lease reaper ON · 1 requeued”)
-
-**Recommendation:** compact strip on Overview — operators use this every poll cycle.
+**Fix:** compact strip with **primary** signal (● OK · Last tick) and **secondary** counters — not six equal KPI tiles. Stale poll → strip shows STALE, not a separate alert.
 
 ### B3 — Missing mutation / confirm flows
 

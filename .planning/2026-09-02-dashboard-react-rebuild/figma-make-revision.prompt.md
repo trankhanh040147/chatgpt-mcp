@@ -1,52 +1,56 @@
-# Figma Make revision prompt — dash 1.0 engineering pass
+# Figma Make revision prompt — dash 1.0 semantics pass (v2)
 
 Paste everything below the line into **Figma Make** on the existing file:  
 https://www.figma.com/make/GdV7zzx4CjYqKrUEp24O29/Create-Design-from-Spec
 
-This is a **revision pass** on the current light-theme Overview — not a from-scratch redesign. Keep the visual direction (Instrument Sans, JetBrains Mono, Tailwind v4, calm light surfaces). Fix engineering gaps so the export can be ported to the real chatgpt-mcp status API.
+This is **not a visual redesign**. Keep the current light theme (Instrument Sans, JetBrains Mono, Tailwind v4, `#F6F6F8` page / white surfaces). This pass turns the Overview from a polished UI into an **operator console** a solo developer can read → diagnose → act within seconds.
+
+---
+
+## Core principle (read first)
+
+> **Design around causal state, not independent badges.** When an upstream dependency fails, downstream checks become **UNKNOWN** rather than FAILED. Surface the highest actionable root cause **once**, and suppress duplicate derived warnings elsewhere in Overview.
+
+Good control-plane dashboards answer four questions: *what is running, what is happening, what is unhealthy, what should I do next*. Use fleet cards → drawer for drill-down; do not dump telemetry on the main screen.
 
 ---
 
 ## Context
 
-You already produced a strong Overview (tabs, worker cards, capacity bars, drawers). Engineering reviewed the exported `App.tsx` against the live API. **Do not regress** what works. Apply the fixes below.
+You already produced a strong Overview (tabs, worker cards, capacity bars, drawers). Engineering reviewed the export against the live chatgpt-mcp status API. **Do not regress** what works. Apply semantics fixes below.
 
 Product: local-first ops dashboard at `http://127.0.0.1:8787/dashboard/` — loopback only, not SaaS.
 
-Primary user: solo developer operator.
+Primary user: **solo developer operator** — not NOC, not multi-tenant admin.
 
 ---
 
 ## KEEP (do not change)
 
-- Light-first theme: page `#F6F6F8`, surfaces white, subtle `#E8E8EC` borders
+- Light-first theme, subtle borders, no glassmorphism / gradients / dark SaaS cards
 - Tab nav: Overview · Tasks · Diagnostics (no permanent sidebar)
-- Overview order: page heading → **one** inline alert (if needed) → active handoff → workers → recent handoffs
-- **Never** repeat the same incident in heading + separate Attention section + worker card
-- Worker cards as visual center; healthy cards quiet; Working = blue (not warning)
-- Capacity semantics: warn only at **16+/20** (approaching), **18–19** (rotate soon), **20** (blocked). **1/20 is normal — no warning**
+- Overview order: control plane strip → **one** contextual alert (if actionable) → active handoff → workers → recent handoffs
+- **Never** repeat the same incident in strip + alert + worker card
+- Worker cards as visual center; Working = healthy blue (not warning)
 - Single active handoff → lifecycle stepper; multiple → compact table
 - Worker drawer + task drawer (440px right rail)
-- Instrument Sans + JetBrains Mono; monospace for IDs/commands only
+- Monospace for IDs, durations, commands only
 
 ---
 
 ## FIX — vocabulary (mandatory)
 
-Replace all mock worker ids **`A1`, `A2`, `A3`** with **`w1`, `w2`, `w3`**.
+Replace mock worker ids **`A1`, `A2`, `A3`** → **`w1`, `w2`, `w3`**.
 
-Use exact product terms — never generic SaaS labels:
-
-| Concept | Correct label |
-|---------|---------------|
-| Worker ids | `w1`, `w2`, `w3`, `default` |
+| Layer | Rule |
+|-------|------|
+| **Card / Overview** | Operator vocabulary only: Ready · Working · Starting · Action required · Degraded · Offline · Disabled |
+| **Never on card** | `READY`, `BUSY`, `SESSION_LOST`, `RATE_LIMITED`, `ERROR` — runtime enums belong in drawer “Technical details” only |
 | Task ids | `ho_…` monospace, middle-truncated |
-| Worker runtime | `READY`, `BUSY`, `SESSION_LOST`, `RATE_LIMITED`, `ERROR` (internal) |
-| Operator-facing worker states | Ready · Working · Starting · Action required · Degraded · Offline · Disabled |
-| Task statuses | Queued · Dispatching · Dispatched · Processing · Waiting approval · Completed · Failed · Timed out |
+| Task statuses (UI) | Queued · Dispatching · Dispatched · Processing · Waiting approval · Completed · Failed · Timed out |
 | Handoff types | Research · Code review · Architecture review · Debug analysis · Second opinion |
 
-Copyable commands must be **project-real**:
+Real commands only:
 
 ```
 gptmcp start
@@ -56,185 +60,377 @@ curl -s http://127.0.0.1:8787/health | jq
 ./scripts/start-broker-stack.sh
 ```
 
-**Never** use: `systemctl`, `docker-compose`, `journalctl`, port `:8080`, or `:8788` for broker (default broker ops port is **18788**).
+Never: `systemctl`, `docker-compose`, `journalctl`, port `:8080`, broker on `:8788` (default broker ops = **18788**).
 
 ---
 
-## ADD — control plane strip (Overview)
+## ADD — control plane strip (hierarchical, not flat KPI row)
 
-Below the page heading (or integrated into it), add a **compact horizontal strip** — not giant KPI cards:
+Add a compact strip at top of Overview — **not** six equal-weight KPI cards.
 
-| Label | Example |
-|-------|---------|
-| Health | OK |
-| Lease reaper | ON |
-| Last tick | 8s ago |
-| Requeued | 1 |
-| Timed out | 0 |
-| Failed | 0 |
+**Primary signal (stronger weight):**
 
-Low height, scannable, same visual weight as the rest of Overview — not a hero banner.
+```
+● OK    Last tick 8s ago
+```
 
----
+Tooltip on Last tick: `Status API refreshed 8s ago`
 
-## ADD — missing screens / modals
+When data is stale (> ~30s without successful poll), the strip itself changes — **no separate alert section**:
 
-Design these at the same fidelity as Overview:
+```
+● STALE    Last tick 42s ago
+```
 
-### 1. Confirm modal (destructive ops)
+**Secondary signal (lighter weight, same row, separated visually):**
 
-Used for: Recreate chat · Remove worker · Recover workers · Fail task
+```
+Lease reaper ON  ·  Requeued 1  ·  Timed out 0  ·  Failed 0
+```
 
-- Title + blast-radius preview (what will change)
-- Primary destructive button + Cancel
-- No typed-phrase confirmation (vanilla uses one-click confirm + CSRF)
+Layout example:
 
-### 2. Add worker wizard (modal or slide-over)
+```
+● OK · Last tick 8s ago  |  Lease reaper ON · Requeued 1 · Timed out 0 · Failed 0
+```
 
-Steps:
-
-1. Add worker slot
-2. Creating ChatGPT chat… (progress: step 2 of 4 · Binding browser tab)
-3. Waiting for MCP approval — “Open ChatGPT and approve write access”
-4. Ready
-
-Advanced link: **Assign existing ChatGPT URL**
-
-### 3. API unreachable (full page)
-
-When status API is down — **replace entire app**, no tabs:
-
-- “Control plane unreachable”
-- Last seen timestamp
-- Copyable commands block (the five real commands above)
-
-### 4. Empty setup state
-
-- “No workers yet”
-- “Add a ChatGPT worker to start accepting handoffs.”
-- [Add worker] primary CTA
-
-### 5. Broker offline banner
-
-Pale warning banner at top of Overview:
-
-- “Broker control plane unreachable”
-- Primary: **Start broker** (maps to `gptmcp restart` / stack script)
-- Workers show `BROKER: UNKNOWN` in drawer checklist
-
-### 6. Worker overflow menu
-
-From card `•••` button — dropdown with:
-
-- Assign URL · New chat · Continue verification · Enable/Disable
-- Separator
-- Recreate chat (destructive) · Clear stuck · Remove worker (destructive)
-
-### 7. Diagnostics tab (complete, not placeholder)
-
-Sections:
-
-- **Quick commands** — copy buttons for the five real commands
-- **Topology** — read-only JSON/table (worker ids, chat urls redacted host ok)
-- **Condition reference** — explains PROCESS / BROKER / BINDING / URL / SESSION / MCP read / MCP write
-- **Endpoints** — Status API `:8787`, Broker ops `:18788` (loopback)
+First question this answers: **“Is status data alive?”** — not “how many failures?”
 
 ---
 
-## FIX — worker drawer
+## Worker card — answer 3 questions only
 
-Progressive disclosure sections:
+Each card answers:
 
-1. **Summary** — operator state sentence (“Ready for handoffs” / “MCP approval required”)
-2. **Current activity** — task + elapsed (if busy)
-3. **Chat capacity** — `12 of 20` + bar
-4. **Connection checks** — checklist with readable labels:
+1. **Who** — worker id (`w1`)
+2. **State** — operator label + one human sentence
+3. **Capacity + recency** — bar + last activity
 
-   - Process · Broker · Browser binding · Chat URL · ChatGPT session · MCP read · MCP write
+Do **not** expose MCP/broker/browser checks on the card. Those live in the drawer.
 
-   Use ✓ / ✗ / ? for TRUE / FALSE / UNKNOWN
+### Ready
 
-5. **Chat** — sanitized `https://chatgpt.com/c/…` + Open ChatGPT
-6. **Runtime** — PID, last heartbeat, start time (monospace values only)
-7. **Technical details** (collapsed) — raw readiness reason, error codes
+```
+w1                                    •••
+Ready
 
-Primary action on drawer footer when applicable: Continue · Assign URL · New chat · Recreate chat
+Ready for handoffs
 
----
+Capacity
+████████░░░░░░░░░░░░  12 / 20
 
-## FIX — task drawer
+Last activity                         2m ago
+```
 
-Include:
+### Working (healthy — not warning styling)
 
-- Lifecycle timeline (Queued → Dispatching → Dispatched → Processing → Completed)
-- Timing: queue / processing / total duration
-- Usage estimate block:
+```
+w2                                    •••
+Working
 
-  > Estimated visible-text tokens — not ChatGPT billing.
+Architecture review
+ho_8f2…91c                            03:42
 
-- Optional reference row (when enabled):
+Capacity
+████████████████░░░░  16 / 20
+```
 
-  > Reference API equivalent · Hypothetical comparison (Claude Sonnet 5)
+### Action required
 
-- **Fail task** button (failed/timed out processing tasks only) → opens confirm modal
-- Redacted content section:
+```
+w3                                    •••
+Action required
 
-  > Task content is hidden for privacy.
+MCP write approval required
+[Continue verification]
 
-  [Load redacted preview] — when enabled; include best-effort privacy notice
+Capacity
+██████░░░░░░░░░░░░░░  6 / 20
+```
 
----
-
-## FIX — CSS entry
-
-Update `index.css` so `body` background matches the light app shell (`#F6F6F8`), not `#09090d`. Remove dark-theme root if App already sets light background.
-
----
-
-## FIX — version badge
-
-Replace hardcoded `v0.8.3` with placeholder `v{packageVersion}` or `dashboard 1.0 · v0.6.x`.
+Card shows **one primary action** when needed. Overflow `•••` for the rest.
 
 ---
 
-## Sample data for primary mockup (revise existing)
+## FIX — capacity bar semantics (avoid alert fatigue)
 
-Render Overview with:
+Thresholds:
 
-**System:** 2 of 3 workers dispatch-ready · Broker connected · Lease reaper ON
+| Used | Treatment |
+|------|-----------|
+| 0–15 | Neutral/calm bar — **no warning text** |
+| 16–17 | Bar stays calm + small text: `Approaching capacity` |
+| 18–19 | Amber bar + `Rotate soon` |
+| 20 | Blocked + primary `New chat` |
+
+**Do not** turn the entire bar amber/red at 16/20 — that looks like an incident. Solo operator tool, not NOC wallboard.
+
+**1/20 is normal** — never warn about rotation when chat is nearly empty.
+
+---
+
+## Causal state — suppress downstream failures
+
+When Broker is offline, drawer checklist must **not** show six red failures:
+
+**Wrong:**
+
+```
+✕ Broker
+✕ Browser binding
+✕ Chat URL
+✕ Session
+✕ MCP read
+✕ MCP write
+```
+
+**Correct:**
+
+```
+✕ Broker
+? Browser binding
+? Chat URL
+? ChatGPT session
+? MCP read
+? MCP write
+```
+
+Summary line: **Broker unavailable — downstream checks unknown**
+
+Rules:
+
+- `✓` = connected / verified (TRUE)
+- `✕` = failed (FALSE) — only when evidence exists
+- `?` = unknown (UNKNOWN) — lack of evidence, not failure
+- Do **not** use amber for all UNKNOWN; neutral `?` is fine
+
+Represent checks as a **diagnostic ladder** with light vertical connectors — pipeline, not independent badges:
+
+```
+Connection
+
+✓ Process
+│
+✓ Broker
+│
+✓ Browser binding
+│
+✓ Chat URL
+│
+✓ ChatGPT session
+│
+✓ MCP read
+│
+✕ MCP write
+  Approval required
+```
+
+---
+
+## Two failure modes — completely different UX
+
+### Status API unreachable
+
+→ **Entire UI untrusted** — replace app shell, **no tabs**, no worker cards, no stale data.
+
+```
+Control plane unreachable
+
+The dashboard can't reach the local status API.
+
+Last seen 07:03:18
+
+Quick recovery
+gptmcp status
+gptmcp doctor
+curl -s http://127.0.0.1:8787/health | jq
+./scripts/start-broker-stack.sh
+```
+
+### Broker offline
+
+→ Status API still works — Overview **remains trustworthy**.
+
+- Pale banner: `Broker control plane unreachable` + **[Start broker]**
+- Worker drawer: Broker = ✕, downstream = ?
+- Do **not** full-page replace
+
+---
+
+## Add worker wizard — step 3 is a waiting state, not a form
+
+Flow: slot → creating chat → MCP approval → ready
+
+**Step 3 design:**
+
+```
+        ○
+Waiting for MCP approval
+
+Open ChatGPT and approve write access.
+This page will continue automatically once
+approval is detected.
+
+[Open ChatGPT]
+
+Waiting…                         01:24
+
+Having trouble?
+Run gptmcp doctor
+
+Advanced: Assign existing ChatGPT URL
+```
+
+**No Next button.** Polling advances to Ready. Feels like real control plane, not mock wizard.
+
+Step 2 example: `Creating ChatGPT chat… · Step 2 of 4 · Binding browser tab`
+
+---
+
+## Destructive confirm modals — consequence sentences
+
+Not just action name — show **domain objects** affected.
+
+**Recreate chat:**
+
+```
+Recreate chat for w2?
+
+The current ChatGPT conversation will be replaced.
+w2 will need MCP verification again.
+
+Current task
+ho_a81…90e · Architecture review
+
+[Cancel]  [Recreate chat]
+```
+
+**Remove worker:**
+
+```
+Remove w2?
+
+This removes the worker slot from the control plane.
+The ChatGPT conversation itself will not be deleted.
+
+[Cancel]  [Remove worker]
+```
+
+Also design: Recover workers · Fail task — same blast-radius pattern. No typed-phrase confirm.
+
+---
+
+## Worker overflow menu — context-sensitive, grouped
+
+**Not** a static 8-item list. Group and hide irrelevant actions:
+
+```
+Chat
+  Open ChatGPT
+  Assign URL
+  New chat
+  Continue verification      ← only when ACTION_REQUIRED
+
+Worker
+  Disable worker             ← or Enable worker if disabled
+
+Recovery
+  Clear stuck
+  Recreate chat
+
+────────────────
+Remove worker                ← isolated, last, destructive
+```
+
+If worker is Ready → hide Continue verification. If Disabled → show Enable worker.
+
+---
+
+## Diagnostics tab — operator first, debugger second
+
+Order:
+
+1. **Quick commands** (copy buttons)
+2. **System topology** (readable table — worker id, state, chat url)
+3. **Connection model** (reference ladder: Process → Broker → Binding → URL → Session → MCP read → MCP write)
+4. **Endpoints** — Status API `127.0.0.1:8787` · Broker ops `127.0.0.1:18788`
+5. **Raw topology JSON** — collapsed `▸ Show` — progressive disclosure last
+
+Do **not** lead with JSON dump.
+
+---
+
+## Empty state — minimal
+
+```
+No workers yet
+
+Add a ChatGPT worker to start
+accepting handoffs.
+
+[+ Add worker]
+
+Advanced: Assign existing ChatGPT URL
+```
+
+No large illustration, no onboarding checklist.
+
+---
+
+## Target Overview layout (1440px)
+
+```
+Control plane
+● OK · Last tick 8s ago  |  Lease reaper ON · Requeued 1 · Timed out 0 · Failed 0
+
+[ one contextual alert ONLY if actionable ]
+
+Active handoff
+Research · ho_8f2…91c · w2 · Processing · 03:42
+●────●────●────○  Queued → Dispatch → Processing → Complete
+
+Workers                                              + Add worker
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ w1       ••• │ │ w2       ••• │ │ w3       ••• │
+│ Ready        │ │ Working      │ │ Action req.  │
+│ Ready for    │ │ ho_8f…91c    │ │ MCP approval │
+│ handoffs     │ │ 03:42        │ │ [Continue]   │
+│ ████ 12/20   │ │ ████ 16/20   │ │ ██ 6/20      │
+└──────────────┘ └──────────────┘ └──────────────┘
+
+Recent handoffs
+...
+```
+
+---
+
+## Sample mockup scenario
 
 | Worker | State | Notes |
 |--------|-------|-------|
-| w1 | Ready | Chat 8/20 — no capacity warning |
-| w2 | Working | Architecture review · ho_01J… · 2m 14s · Chat 14/20 |
-| w3 | Action required | MCP approval required · Chat 1/20 — **no rotation warning** |
+| w1 | Ready | 12/20 — calm bar |
+| w2 | Working | Architecture review · 16/20 — text only “Approaching capacity”, bar still calm |
+| w3 | Action required | MCP approval · 6/20 — no rotation warning |
 
-**Inline alert (one only):** w3 needs MCP approval · [Open ChatGPT] [Continue]
+One inline alert: `w3 needs MCP approval` · [Open ChatGPT] [Continue]
 
-**Active handoff:** ho_01J… · Architecture review · w2 · Processing · 2m 21s
-
-**Recent tasks:** 5 rows — include one timed_out with error code visible
+Also design variants: API unreachable (full page) · broker offline (banner) · all OK (no alert) · empty workers.
 
 ---
 
 ## Deliverables checklist
 
-Before calling this done, ensure the file includes:
+- [ ] Control plane strip with primary/secondary hierarchy + STALE state
+- [ ] Causal ladder in worker drawer + downstream UNKNOWN suppression
+- [ ] Worker cards — operator vocabulary only, 3-question model
+- [ ] Capacity bar — calm at 16, escalate at 18–20
+- [ ] API unreachable vs broker offline — distinct frames
+- [ ] Add worker wizard with waiting-state step 3
+- [ ] Destructive modals with consequence copy
+- [ ] Context-sensitive overflow menu
+- [ ] Diagnostics tab — human-readable first
+- [ ] All worker ids `w1/w2/w3`, all commands project-real
 
-- [ ] Overview — healthy / degraded / setup / API-down variants (or one frame + notes)
-- [ ] Tasks tab — filters work visually
-- [ ] Diagnostics tab — complete
-- [ ] Worker drawer — all sections
-- [ ] Task drawer — usage + fail task
-- [ ] Add worker wizard
-- [ ] Confirm modal (destructive)
-- [ ] Worker overflow menu
-- [ ] Control plane strip on Overview
-- [ ] All worker ids `w1/w2/w3`
-- [ ] All commands project-real
+**Review question:** Can a developer open this dashboard, know whether handoffs work, find the root cause, and take the correct next action within 10 seconds?
 
-**Review question:** Could a developer who knows almost nothing about the internal architecture open this dashboard, understand whether handoffs work, identify a problem, and take the correct next action within 10 seconds?
-
-If no — simplify further.
-
-Do not generate mobile layouts until desktop 1440px is signed off.
+Do not generate mobile until desktop 1440px is signed off.
