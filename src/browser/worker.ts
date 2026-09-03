@@ -450,6 +450,18 @@ export class BrowserWorker {
             );
           }
           preparedResources = materializeWorkspaceResources(taskFiles, root);
+          if (preparedResources.redaction) {
+            taskService.recordAttachSecretRedaction(
+              task.id,
+              preparedResources.redaction
+            );
+            log({
+              event: "WARN",
+              component: "browser-worker",
+              taskId: task.id,
+              message: `Attach secret redaction applied: count=${preparedResources.redaction.redactionCount} detectors=${preparedResources.redaction.detectorIds.join(",")}`,
+            });
+          }
         } catch (err) {
           const code =
             err instanceof HandoffFileError ? err.code : "FILES_INVALID";
@@ -479,7 +491,7 @@ export class BrowserWorker {
 
         const prepared = await this.withUiWrite(async () => {
           this.options.assertBindingFresh?.();
-          return transport.prepare(preparedResources, task.id);
+          return transport.prepare(preparedResources.resources, task.id);
         });
 
         if (!prepared.ok) {

@@ -2,12 +2,23 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { ulid } from "ulid";
-import { bufferContainsKnownSecrets } from "./sanitize.js";
+import {
+  fileRedactionSummary,
+  mergeSecretRedactionDisclosures,
+  redactSecretsInBuffer,
+  type SecretRedactionDisclosure,
+} from "./sanitize.js";
 import {
   HandoffFileError,
   type PreparedResource,
   type TaskResource,
 } from "./task.types.js";
+
+/** Materialize output: ephemeral bytes plus optional ADR-005 disclosure. */
+export interface MaterializeWorkspaceResult {
+  resources: PreparedResource[];
+  redaction?: SecretRedactionDisclosure;
+}
 
 /** Per-file cap (materialize + native attach). */
 export const MAX_BYTES_PER_FILE = 32 * 1024 * 1024;
@@ -166,9 +177,10 @@ export function registerTaskResourcePaths(
 export function materializeWorkspaceResources(
   resources: readonly TaskResource[],
   workspaceRoot: string
-): PreparedResource[] {
+): MaterializeWorkspaceResult {
   const root = realpathSync(workspaceRoot);
   const results: PreparedResource[] = [];
+  const redactionParts: SecretRedactionDisclosure[] = [];
   let totalBytes = 0;
 
   for (const resource of resources) {
@@ -212,24 +224,33 @@ export function materializeWorkspaceResources(
       throw new HandoffFileError("FILE_TOO_LARGE", "File exceeds per-file cap");
     }
 
-    const buf = readFileSync(realCandidate);
-    if (buf.length > MAX_BYTES_PER_FILE) {
+    const raw = readFileSync(realCandidate);
+    if (raw.length > MAX_BYTES_PER_FILE) {
       throw new HandoffFileError("FILE_TOO_LARGE", "File exceeds per-file cap");
     }
-    totalBytes += buf.length;
+    totalBytes += raw.length;
     if (totalBytes > MAX_BYTES_PER_TASK) {
       throw new HandoffFileError("FILE_TOO_LARGE", "Task byte budget exceeded");
     }
 
-    if (buf.subarray(0, 8192).includes(0)) {
+    if (raw.subarray(0, 8192).includes(0)) {
       throw new HandoffFileError("FILES_INVALID", "Binary/NUL content rejected");
     }
 
-    if (bufferContainsKnownSecrets(buf)) {
+    const { buf, disclosure, unsafeSecretHit } = redactSecretsInBuffer(raw);
+    if (unsafeSecretHit) {
       throw new HandoffFileError(
         "FILES_SECRET_DETECTED",
-        "Known secret pattern detected in file content"
+        "Known secret pattern detected but content is not safely redactable"
       );
+    }
+    if (disclosure.redactionCount > 0) {
+      const fileSummary = fileRedactionSummary(resource.displayName, disclosure);
+      redactionParts.push({
+        ...disclosure,
+        files: fileSummary ? [fileSummary] : undefined,
+      });
+      // Redaction can shrink bytes; keep totalBytes as upper bound (raw sizes).
     }
 
     const sha256 = createHash("sha256").update(buf).digest("hex");
@@ -243,5 +264,8 @@ export function materializeWorkspaceResources(
     });
   }
 
-  return results;
+  return {
+    resources: results,
+    redaction: mergeSecretRedactionDisclosures(redactionParts),
+  };
 }

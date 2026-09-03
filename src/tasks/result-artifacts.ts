@@ -12,7 +12,12 @@ import {
   writeSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
-import { bufferContainsKnownSecrets } from "./sanitize.js";
+import {
+  fileRedactionSummary,
+  mergeSecretRedactionDisclosures,
+  redactSecretsInBuffer,
+  type SecretRedactionDisclosure,
+} from "./sanitize.js";
 import {
   isAllowedResourceExtension,
   MAX_BYTES_PER_FILE,
@@ -37,6 +42,14 @@ export interface WrittenResultArtifact {
   displayName: string;
   sizeBytes: number;
   sha256: string;
+  modifiedForSecretRemoval?: boolean;
+  redactionCount?: number;
+  detectorIds?: string[];
+}
+
+export interface WriteResultArtifactsResult {
+  artifacts: WrittenResultArtifact[];
+  redaction?: SecretRedactionDisclosure;
 }
 
 interface PreparedArtifact {
@@ -47,6 +60,9 @@ interface PreparedArtifact {
   targetPath: string;
   sha256: string;
   sizeBytes: number;
+  modifiedForSecretRemoval?: boolean;
+  redactionCount?: number;
+  detectorIds?: string[];
 }
 
 interface CommittedArtifact {
@@ -91,8 +107,8 @@ function resolveTargetPath(root: string, relPosix: string): string {
 function validateAndPrepareArtifacts(
   artifacts: readonly ResultArtifactInput[],
   root: string
-): PreparedArtifact[] {
-  if (artifacts.length === 0) return [];
+): { prepared: PreparedArtifact[]; redaction?: SecretRedactionDisclosure } {
+  if (artifacts.length === 0) return { prepared: [] };
   if (artifacts.length > MAX_ARTIFACTS_PER_SUBMIT) {
     throw artifactError(
       "FILES_INVALID",
@@ -101,6 +117,7 @@ function validateAndPrepareArtifacts(
   }
 
   const prepared: PreparedArtifact[] = [];
+  const redactionParts: SecretRedactionDisclosure[] = [];
   let totalBytes = 0;
   const seenRel = new Set<string>();
 
@@ -112,23 +129,26 @@ function validateAndPrepareArtifacts(
     seenRel.add(relPosix);
     assertAllowedArtifactPath(relPosix);
 
-    const buf = Buffer.from(artifact.content, "utf8");
-    if (buf.length > MAX_BYTES_PER_FILE) {
+    const raw = Buffer.from(artifact.content, "utf8");
+    if (raw.length > MAX_BYTES_PER_FILE) {
       throw artifactError("FILE_TOO_LARGE", "Artifact exceeds per-file cap", relPosix);
     }
+    if (raw.subarray(0, 8192).includes(0)) {
+      throw artifactError("FILES_INVALID", "Binary/NUL content rejected", relPosix);
+    }
+
+    const { buf, disclosure, unsafeSecretHit } = redactSecretsInBuffer(raw);
+    if (unsafeSecretHit) {
+      throw artifactError(
+        "FILES_SECRET_DETECTED",
+        "Known secret pattern detected but artifact is not safely redactable",
+        relPosix
+      );
+    }
+
     totalBytes += buf.length;
     if (totalBytes > MAX_BYTES_PER_TASK) {
       throw artifactError("FILE_TOO_LARGE", "Artifact byte budget exceeded", relPosix);
-    }
-    if (buf.subarray(0, 8192).includes(0)) {
-      throw artifactError("FILES_INVALID", "Binary/NUL content rejected", relPosix);
-    }
-    if (bufferContainsKnownSecrets(buf)) {
-      throw artifactError(
-        "FILES_SECRET_DETECTED",
-        "Known secret pattern detected in artifact content",
-        relPosix
-      );
     }
 
     const mode: ResultArtifactWriteMode =
@@ -142,18 +162,37 @@ function validateAndPrepareArtifacts(
       throw artifactError("FILES_INVALID", "Overwrite target does not exist", relPosix);
     }
 
+    const displayName = relPosix.split("/").pop() ?? relPosix;
+    if (disclosure.redactionCount > 0) {
+      const fileSummary = fileRedactionSummary(displayName, disclosure);
+      redactionParts.push({
+        ...disclosure,
+        files: fileSummary ? [fileSummary] : undefined,
+        modifiedForSecretRemoval: true,
+      });
+    }
+
     prepared.push({
       relPosix,
-      displayName: relPosix.split("/").pop() ?? relPosix,
+      displayName,
       buf,
       mode,
       targetPath,
       sha256: createHash("sha256").update(buf).digest("hex"),
       sizeBytes: buf.length,
+      modifiedForSecretRemoval:
+        disclosure.redactionCount > 0 ? true : undefined,
+      redactionCount:
+        disclosure.redactionCount > 0 ? disclosure.redactionCount : undefined,
+      detectorIds:
+        disclosure.redactionCount > 0 ? disclosure.detectorIds : undefined,
     });
   }
 
-  return prepared;
+  return {
+    prepared,
+    redaction: mergeSecretRedactionDisclosures(redactionParts),
+  };
 }
 
 function commitCreate(targetPath: string, buf: Buffer): void {
@@ -256,6 +295,9 @@ function commitBatch(prepared: readonly PreparedArtifact[]): WrittenResultArtifa
         displayName: item.displayName,
         sizeBytes: item.sizeBytes,
         sha256: item.sha256,
+        modifiedForSecretRemoval: item.modifiedForSecretRemoval,
+        redactionCount: item.redactionCount,
+        detectorIds: item.detectorIds,
       });
     }
     return results;
@@ -272,12 +314,17 @@ function commitBatch(prepared: readonly PreparedArtifact[]): WrittenResultArtifa
 export function writeResultArtifacts(
   artifacts: readonly ResultArtifactInput[],
   workspaceRoot: string
-): WrittenResultArtifact[] {
-  if (artifacts.length === 0) return [];
+): WriteResultArtifactsResult {
+  if (artifacts.length === 0) return { artifacts: [] };
 
   const root = realpathSync(workspaceRoot);
-  const prepared = validateAndPrepareArtifacts(artifacts, root);
-  return commitBatch(prepared);
+  const { prepared, redaction } = validateAndPrepareArtifacts(artifacts, root);
+  return {
+    artifacts: commitBatch(prepared),
+    redaction: redaction
+      ? { ...redaction, modifiedForSecretRemoval: true }
+      : undefined,
+  };
 }
 
 /** Read back artifact bytes for tests / verification. */
