@@ -3,7 +3,7 @@
 
 PROJECT_NAME ?= chatgpt-mcp
 HANDOFF_DIR  ?= .
-HANDOFF_ZIP  ?= $(abspath $(HANDOFF_DIR)/$(PROJECT_NAME)-handoff-$(shell date +%Y%m%d-%H%M%S).zip)
+HANDOFF_ZIP  ?= $(abspath $(HANDOFF_DIR)/$(PROJECT_NAME)-handoff-$(shell date +%Y%m%d-%H%M%S).tar.zst)
 
 NODE        ?= node
 DIST        ?= dist/index.js
@@ -224,11 +224,13 @@ e2e-1: ## One live reliability canary
 e2e-20: ## 20 consecutive handoffs
 	npm run e2e:reliability:20
 
-handoff-zip: ## Zip source for external review
+handoff-zip: ## Pack source as .tar.zst for external review
+	@command -v zstd >/dev/null || { echo "zstd required (e.g. brew install zstd)"; exit 1; }
 	@rm -f "$(HANDOFF_ZIP)"
-	@zip -rq "$(HANDOFF_ZIP)" $(HANDOFF_PATHS) \
-		-x '*.DS_Store' \
-		-x '*/.DS_Store'
+	@COPYFILE_DISABLE=1 tar -cf - \
+		--exclude='.DS_Store' \
+		$(HANDOFF_PATHS) \
+		| zstd -T0 -o "$(HANDOFF_ZIP)"
 	@echo ""
 	@ls -lh "$(HANDOFF_ZIP)"
 	@echo "Ready: $(HANDOFF_ZIP)"
