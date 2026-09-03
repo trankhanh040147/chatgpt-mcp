@@ -29,7 +29,7 @@ import { HandoffFileError } from "./task.types.js";
 /** Max artifacts per submit_result (aligned with CHATGPT_DOM_CHIP_CAP). */
 export const MAX_ARTIFACTS_PER_SUBMIT = 20;
 
-export type ResultArtifactWriteMode = "create" | "overwrite";
+export type ResultArtifactWriteMode = "create" | "overwrite" | "upsert";
 
 export interface ResultArtifactInput {
   path: string;
@@ -56,7 +56,7 @@ interface PreparedArtifact {
   relPosix: string;
   displayName: string;
   buf: Buffer;
-  mode: ResultArtifactWriteMode;
+  mode: "create" | "overwrite";
   targetPath: string;
   sha256: string;
   sizeBytes: number;
@@ -106,13 +106,23 @@ function resolveTargetPath(root: string, relPosix: string): string {
 
 function validateAndPrepareArtifacts(
   artifacts: readonly ResultArtifactInput[],
-  root: string
+  root: string,
+  opts?: {
+    maxItems?: number;
+    maxBytesPerFile?: number;
+    maxBytesTotal?: number;
+    /** When true, create-if-missing / overwrite-if-present (archive ingest). */
+    upsert?: boolean;
+  }
 ): { prepared: PreparedArtifact[]; redaction?: SecretRedactionDisclosure } {
   if (artifacts.length === 0) return { prepared: [] };
-  if (artifacts.length > MAX_ARTIFACTS_PER_SUBMIT) {
+  const maxItems = opts?.maxItems ?? MAX_ARTIFACTS_PER_SUBMIT;
+  const maxFile = opts?.maxBytesPerFile ?? MAX_BYTES_PER_FILE;
+  const maxTotal = opts?.maxBytesTotal ?? MAX_BYTES_PER_TASK;
+  if (artifacts.length > maxItems) {
     throw artifactError(
       "FILES_INVALID",
-      `Too many artifacts (max ${MAX_ARTIFACTS_PER_SUBMIT})`
+      `Too many artifacts (max ${maxItems})`
     );
   }
 
@@ -130,7 +140,7 @@ function validateAndPrepareArtifacts(
     assertAllowedArtifactPath(relPosix);
 
     const raw = Buffer.from(artifact.content, "utf8");
-    if (raw.length > MAX_BYTES_PER_FILE) {
+    if (raw.length > maxFile) {
       throw artifactError("FILE_TOO_LARGE", "Artifact exceeds per-file cap", relPosix);
     }
     if (raw.subarray(0, 8192).includes(0)) {
@@ -147,19 +157,22 @@ function validateAndPrepareArtifacts(
     }
 
     totalBytes += buf.length;
-    if (totalBytes > MAX_BYTES_PER_TASK) {
+    if (totalBytes > maxTotal) {
       throw artifactError("FILE_TOO_LARGE", "Artifact byte budget exceeded", relPosix);
     }
 
-    const mode: ResultArtifactWriteMode =
-      artifact.mode === "overwrite" ? "overwrite" : "create";
     const targetPath = resolveTargetPath(root, relPosix);
-
-    if (mode === "create" && existsSync(targetPath)) {
-      throw artifactError("FILES_INVALID", "Create target already exists", relPosix);
-    }
-    if (mode === "overwrite" && !existsSync(targetPath)) {
-      throw artifactError("FILES_INVALID", "Overwrite target does not exist", relPosix);
+    let mode: "create" | "overwrite";
+    if (opts?.upsert) {
+      mode = existsSync(targetPath) ? "overwrite" : "create";
+    } else {
+      mode = artifact.mode === "overwrite" ? "overwrite" : "create";
+      if (mode === "create" && existsSync(targetPath)) {
+        throw artifactError("FILES_INVALID", "Create target already exists", relPosix);
+      }
+      if (mode === "overwrite" && !existsSync(targetPath)) {
+        throw artifactError("FILES_INVALID", "Overwrite target does not exist", relPosix);
+      }
     }
 
     const displayName = relPosix.split("/").pop() ?? relPosix;
@@ -189,10 +202,11 @@ function validateAndPrepareArtifacts(
     });
   }
 
-  return {
-    prepared,
-    redaction: mergeSecretRedactionDisclosures(redactionParts),
-  };
+  const redaction =
+    redactionParts.length > 0
+      ? mergeSecretRedactionDisclosures(redactionParts)
+      : undefined;
+  return { prepared, redaction };
 }
 
 function commitCreate(targetPath: string, buf: Buffer): void {
@@ -319,6 +333,30 @@ export function writeResultArtifacts(
 
   const root = realpathSync(workspaceRoot);
   const { prepared, redaction } = validateAndPrepareArtifacts(artifacts, root);
+  return {
+    artifacts: commitBatch(prepared),
+    redaction: redaction
+      ? { ...redaction, modifiedForSecretRemoval: true }
+      : undefined,
+  };
+}
+
+/**
+ * Archive-member writeback: each path upserts (create if absent, overwrite if present).
+ * Validates all before any mutation (same transactional commit as writeResultArtifacts).
+ */
+export function writeUpsertArtifacts(
+  artifacts: readonly ResultArtifactInput[],
+  workspaceRoot: string
+): WriteResultArtifactsResult {
+  if (artifacts.length === 0) return { artifacts: [] };
+  const root = realpathSync(workspaceRoot);
+  const { prepared, redaction } = validateAndPrepareArtifacts(artifacts, root, {
+    maxItems: 100,
+    maxBytesPerFile: 64 * 1024 * 1024,
+    maxBytesTotal: 64 * 1024 * 1024,
+    upsert: true,
+  });
   return {
     artifacts: commitBatch(prepared),
     redaction: redaction

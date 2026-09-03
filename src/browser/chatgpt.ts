@@ -360,13 +360,19 @@ export class ChatGptBrowser {
   /** Short reminder to call handoff_submit_result (best-effort, idempotent per nudge stage). */
   async sendSubmitNudge(
     taskId: string,
-    opts?: { skipIdleWait?: boolean; probe?: boolean; hasAttachedFiles?: boolean }
+    opts?: {
+      skipIdleWait?: boolean;
+      probe?: boolean;
+      hasAttachedFiles?: boolean;
+      preferArchive?: boolean;
+    }
   ): Promise<void> {
     const page = this.getPage();
     const message = opts?.probe
       ? PROBE_SUBMIT_NUDGE_MESSAGE(taskId)
       : SUBMIT_NUDGE_MESSAGE(taskId, {
           hasAttachedFiles: opts?.hasAttachedFiles,
+          preferArchive: opts?.preferArchive,
         });
     const marker = `TASK_ID=${taskId}`;
 

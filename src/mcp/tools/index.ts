@@ -9,6 +9,7 @@ import {
   MAX_ARTIFACTS_PER_SUBMIT,
 } from "../../tasks/result-artifacts.js";
 import { MAX_BYTES_PER_FILE } from "../../tasks/files.js";
+import { ArchiveError } from "../../archive/errors.js";
 import {
   PROBE_ACK_TOOL_DESCRIPTION,
   PROBE_COMPLETE_TOOL_DESCRIPTION,
@@ -86,6 +87,10 @@ function handoffFileErrorResult(err: HandoffFileError): ToolResult {
   return artifactErrorContent(err.code, err.message);
 }
 
+function archiveErrorResult(err: ArchiveError): ToolResult {
+  return artifactErrorContent(err.code, err.message);
+}
+
 export function registerHandoffTools(
   server: ToolRegistrar,
   taskService: TaskService
@@ -100,8 +105,13 @@ export function registerHandoffTools(
       type: taskTypeSchema,
       prompt: z.string().min(1).max(MAX_PROMPT),
       context: contextSchema,
-      files: z.array(z.string().min(1).max(1_000)).optional()
-        .describe("Workspace-relative evidence file paths already in the current decision. No globs."),
+      files: z
+        .array(z.string().min(1).max(1_000))
+        .max(100)
+        .optional()
+        .describe(
+          "Workspace-relative evidence file paths (max 100). Attached as one tar.zst chip. No globs."
+        ),
       workspaceRoot: z
         .string()
         .min(1)
@@ -219,10 +229,25 @@ export function registerHandoffTools(
                 ...SUBMIT_POLICY,
                 writeback: WRITEBACK_POLICY,
                 writebackRequired: task.context?.writebackRequired === true,
-                artifactsRequiredWhenAttached:
-                  (task.files?.length ?? 0) > 0
-                    ? "Task has attached workspace files. To modify them, include artifacts[] with complete file bodies in handoff_submit_result — result prose alone does not write disk."
-                    : undefined,
+                artifactsRequiredWhenAttached: (() => {
+                  const tmpl = task.context?.submitTemplate as
+                    | { archive?: unknown; artifacts?: unknown }
+                    | undefined;
+                  if (tmpl && typeof tmpl === "object" && tmpl.archive) {
+                    return (
+                      "submitTemplate.archive is required — pass it verbatim to " +
+                      "handoff_submit_result. Do not invent artifacts[]."
+                    );
+                  }
+                  if ((task.files?.length ?? 0) > 0) {
+                    return (
+                      "Task has attached workspace files. To modify them, include artifacts[] " +
+                      "with complete file bodies in handoff_submit_result — result prose alone " +
+                      "does not write disk. For larger batches use archive instead (XOR)."
+                    );
+                  }
+                  return undefined;
+                })(),
                 lateSubmitAccepted:
                   task.status === "TIMED_OUT" && !task.result,
               },
@@ -331,8 +356,22 @@ export function registerHandoffTools(
           })
         )
         .max(MAX_ARTIFACTS_PER_SUBMIT)
+        .optional()
         .describe(
-          "Workspace file writes. Pass [] when no files changed. When returning edited/created files, each entry is one complete file. Prose in result does NOT write disk."
+          "Workspace file writes (max 20). Prefer for small batches. Mutually exclusive with archive."
+        ),
+      archive: z
+        .object({
+          format: z.literal("tar.zst"),
+          encoding: z.literal("base64"),
+          data: z
+            .string()
+            .min(1)
+            .describe("Canonical base64 of a single-frame tar.zst archive"),
+        })
+        .optional()
+        .describe(
+          "Batch writeback as tar.zst (max 100 members). Mutually exclusive with artifacts[]."
         ),
       metadata: z
         .object({
@@ -350,20 +389,36 @@ export function registerHandoffTools(
     },
     async (args) => {
       try {
+        const artifacts =
+          (args.artifacts as Parameters<
+            TaskService["submitResult"]
+          >[0]["artifacts"]) ?? [];
+        const archive = args.archive as
+          | { format: "tar.zst"; encoding: "base64"; data: string }
+          | undefined;
+        if (archive && artifacts.length > 0) {
+          return archiveErrorResult(
+            new ArchiveError(
+              "ARCHIVE_WITH_ARTIFACTS",
+              "Pass archive XOR artifacts[] — not both"
+            )
+          );
+        }
         const output = taskService.submitResult({
           taskId: args.taskId as string,
           result: args.result as string,
           metadata: args.metadata as Parameters<
             TaskService["submitResult"]
           >[0]["metadata"],
-          artifacts:
-            (args.artifacts as Parameters<
-              TaskService["submitResult"]
-            >[0]["artifacts"]) ?? [],
+          artifacts,
+          archive,
         });
 
         return jsonContent(output);
       } catch (err) {
+        if (err instanceof ArchiveError) {
+          return archiveErrorResult(err);
+        }
         if (err instanceof HandoffFileError) {
           return handoffFileErrorResult(err);
         }

@@ -197,6 +197,11 @@ export interface SubmitResultInput {
   result: string;
   metadata?: HandoffResultMetadata;
   artifacts?: ResultArtifactInput[];
+  archive?: {
+    format: "tar.zst";
+    encoding: "base64";
+    data: string;
+  };
 }
 
 export const ACTIVE_STATUSES: HandoffTaskStatus[] = [
