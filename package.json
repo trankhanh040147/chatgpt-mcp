@@ -26,7 +26,7 @@
   ],
   "scripts": {
     "test": "npm run test:unit",
-    "test:unit": "npm run test:dashboard && npm run test:worker-health && npm run test:leases && npm run test:ops && npm run test:hook-ack && npm run test:usage && npm run test:create-worker && npm run test:agent-policy && npm run test:files && npm run test:attach-lifecycle && npm run test:rotation && npm run test:worker-ops && npm run test:chrome-cdp && npm run test:gptmcp-args",
+    "test:unit": "npm run test:dashboard && npm run test:worker-health && npm run test:leases && npm run test:ops && npm run test:hook-ack && npm run test:usage && npm run test:create-worker && npm run test:agent-policy && npm run test:sanitize && npm run test:files && npm run test:attach-lifecycle && npm run test:rotation && npm run test:worker-ops && npm run test:chrome-cdp && npm run test:gptmcp-args",
     "test:dashboard": "tsx scripts/test-dashboard-pr1.ts",
     "test:worker-health": "tsx scripts/test-worker-health.ts",
     "test:gptmcp-args": "tsx scripts/test-gptmcp-args.ts",
@@ -67,6 +67,7 @@
     "test:create-worker": "tsx scripts/test-create-worker-registry.ts",
     "test:agent-policy": "tsx scripts/test-agent-policy.ts",
     "test:files": "tsx scripts/test-files.ts",
+    "test:sanitize": "tsx scripts/test-sanitize.ts",
     "test:attachment-match": "tsx scripts/test-attachment-match.ts",
     "test:attach-lifecycle": "tsx scripts/test-attach-lifecycle.ts",
     "test:result-artifacts": "tsx scripts/test-result-artifacts.ts",

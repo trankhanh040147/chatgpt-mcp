@@ -47,8 +47,8 @@ function main(): void {
       [{ path: "out/hello.txt", content: "hello writeback\n" }],
       ws
     );
-    assert(written.length === 1, "write: one artifact");
-    assert(written[0].relativePath === "out/hello.txt", "write: path");
+    assert(written.artifacts.length === 1, "write: one artifact");
+    assert(written.artifacts[0].relativePath === "out/hello.txt", "write: path");
     const bytes = readWorkspaceArtifact(ws, "out/hello.txt");
     assert(bytes.toString("utf8") === "hello writeback\n", "write: bytes on disk");
 
@@ -158,27 +158,18 @@ function main(): void {
       "batch: rollback restores file after commit failure"
     );
 
-    const pad = "x".repeat(520 * 1024);
-    expectFileError(
-      () =>
-        writeResultArtifacts(
-          [{ path: "out/late-secret.txt", content: `${pad}\nsk-abcdefghijklmnopqrstuvwxyz\n` }],
-          ws
-        ),
-      "FILES_SECRET_DETECTED",
-      "reject: secret beyond 512 KiB (full-body scan)"
+    // Secret past the old 512 KiB create-time window — full-body scan still redacts.
+    const pad = "x".repeat(64 * 1024);
+    const late = writeResultArtifacts(
+      [{ path: "out/late-secret.txt", content: `${pad}\nsk-abcdefghijklmnopqrstuvwxyz\n` }],
+      ws
     );
-    assert(
-      !(() => {
-        try {
-          readWorkspaceArtifact(ws, "out/late-secret.txt");
-          return true;
-        } catch {
-          return false;
-        }
-      })(),
-      "secret reject: no file written"
-    );
+    assert(late.artifacts.length === 1, "late-secret: written after redact");
+    assert(late.redaction?.filesRedacted === true, "late-secret: disclosure");
+    assert(late.artifacts[0].modifiedForSecretRemoval === true, "late-secret: per-artifact flag");
+    const onDisk = readWorkspaceArtifact(ws, "out/late-secret.txt").toString("utf8");
+    assert(onDisk.includes("[REDACTED]"), "late-secret: redacted on disk");
+    assert(!onDisk.includes("sk-abcdefghijklmnopqrstuvwxyz"), "late-secret: raw key absent");
   } finally {
     rmSync(ws, { recursive: true, force: true });
   }

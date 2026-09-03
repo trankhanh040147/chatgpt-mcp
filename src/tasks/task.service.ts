@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { ulid } from "ulid";
 import type { TaskRepository } from "./task.repository.js";
-import { sanitizeContext, sanitizeSecrets } from "./sanitize.js";
+import { sanitizeContext, sanitizeSecrets, type SecretRedactionDisclosure } from "./sanitize.js";
 import { assertTransition } from "./task-state.js";
 import { log, logTransition } from "../logging/logger.js";
 import {
@@ -295,6 +295,10 @@ export class TaskService {
     status: "COMPLETED";
     idempotent?: boolean;
     lateSubmit?: boolean;
+    filesRedacted?: boolean;
+    redactionCount?: number;
+    detectorIds?: string[];
+    modifiedForSecretRemoval?: boolean;
   } {
     const task = this.repo.getTaskById(input.taskId);
     if (!task) {
@@ -382,17 +386,34 @@ export class TaskService {
       return this.reconcileCompletedSubmit(again, sanitizedResult, input.taskId);
     }
 
+    let writebackRedaction: SecretRedactionDisclosure | undefined;
     if (artifactCount > 0) {
       try {
         const root = task.workspaceRoot ?? resolveWorkspaceRoot();
         const written = writeResultArtifacts(input.artifacts!, root);
-        metadata = { ...metadata, artifacts: written };
+        writebackRedaction = written.redaction;
+        metadata = {
+          ...metadata,
+          artifacts: written.artifacts,
+          ...(writebackRedaction
+            ? {
+                filesRedacted: true,
+                redactionCount: writebackRedaction.redactionCount,
+                detectorIds: writebackRedaction.detectorIds,
+                modifiedForSecretRemoval: true,
+              }
+            : {}),
+        };
         this.repo.patchResultMetadataIfCompleted(input.taskId, metadata ?? {});
         log({
           event: "RESULT_ARTIFACTS_WRITTEN",
           component: "task-service",
           taskId: input.taskId,
-          message: `count=${written.length}`,
+          message: `count=${written.artifacts.length}${
+            writebackRedaction
+              ? ` redacted=${writebackRedaction.redactionCount} detectors=${writebackRedaction.detectorIds.join(",")}`
+              : ""
+          }`,
         });
       } catch (err) {
         log({
@@ -429,7 +450,29 @@ export class TaskService {
       success: true,
       status: "COMPLETED",
       lateSubmit: fromTimedOut || undefined,
+      ...(writebackRedaction
+        ? {
+            filesRedacted: true,
+            redactionCount: writebackRedaction.redactionCount,
+            detectorIds: writebackRedaction.detectorIds,
+            modifiedForSecretRemoval: true,
+          }
+        : {}),
     };
+  }
+
+  /** Persist attach-time secret redaction disclosure (ADR-005). */
+  recordAttachSecretRedaction(
+    taskId: string,
+    disclosure: SecretRedactionDisclosure
+  ): void {
+    if (!disclosure.filesRedacted || disclosure.redactionCount <= 0) return;
+    this.repo.setAttachSecretRedaction(taskId, {
+      filesRedacted: true,
+      redactionCount: disclosure.redactionCount,
+      detectorIds: disclosure.detectorIds,
+      files: disclosure.files,
+    });
   }
 
   private static probeTokensEqual(submitted: string, stored: string): boolean {
@@ -485,16 +528,20 @@ export class TaskService {
     status: HandoffTask["status"];
     result?: string;
     metadata?: HandoffResultMetadata;
+    attachSecretRedaction?: SecretRedactionDisclosure;
   } {
     const task = this.repo.getTaskById(taskId);
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
     }
 
+    const attachSecretRedaction = this.repo.getAttachSecretRedaction(taskId);
+
     return {
       status: task.status,
       result: task.result,
       metadata: task.resultMetadata,
+      ...(attachSecretRedaction ? { attachSecretRedaction } : {}),
     };
   }
 

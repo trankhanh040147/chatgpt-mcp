@@ -103,7 +103,7 @@ async function main() {
   {
     writeFileSync(join(wsDir, "mat.ts"), "export const x = 42;\n");
     const refs = registerTaskResourcePaths(["mat.ts"], now);
-    const prepared = materializeWorkspaceResources(refs, wsDir);
+    const { resources: prepared } = materializeWorkspaceResources(refs, wsDir);
     assert(prepared.length === 1, "materialize: one prepared resource");
     assert(prepared[0].bytes.toString("utf8") === "export const x = 42;\n", "materialize: bytes match");
     const hash = createHash("sha256").update(prepared[0].bytes).digest("hex");
@@ -115,7 +115,7 @@ async function main() {
     writeFileSync(join(wsDir, "b1.ts"), "b1");
     writeFileSync(join(wsDir, "b2.ts"), "b2");
     const refs = registerTaskResourcePaths(["b1.ts", "b2.ts"], now);
-    const prepared = materializeWorkspaceResources(refs, wsDir);
+    const { resources: prepared } = materializeWorkspaceResources(refs, wsDir);
     assert(prepared.length === 2, "two-file: both materialized");
     const byName = Object.fromEntries(prepared.map((p) => [p.displayName, p.bytes.toString("utf8")]));
     assert(byName["b1.ts"] === "b1", "two-file: b1 content");
@@ -183,7 +183,7 @@ async function main() {
     const refs = registerTaskResourcePaths(["mut.ts"], now);
     writeFileSync(path, "mutated!!");
     const prepared = materializeWorkspaceResources(refs, wsDir);
-    assert(prepared[0].bytes.toString("utf8") === "mutated!!", "dispatch-time: reads current workspace bytes");
+    assert(prepared.resources[0].bytes.toString("utf8") === "mutated!!", "dispatch-time: reads current workspace bytes");
   }
 
   // --- Delete workspace file before dispatch → materialize fails ---
@@ -236,15 +236,35 @@ async function main() {
     );
   }
 
-  // --- Secret content at materialize ---
+  // --- Secret content at materialize: redact + disclose (ADR-005 amend) ---
   {
     writeFileSync(join(wsDir, "secret.ts"), "const k = 'sk-123456789012345678901234';\n");
     const refs = registerTaskResourcePaths(["secret.ts"], now);
-    expectFileError(
-      () => materializeWorkspaceResources(refs, wsDir),
-      "FILES_SECRET_DETECTED",
-      "reject: secret pattern at materialize"
+    const { resources, redaction } = materializeWorkspaceResources(refs, wsDir);
+    assert(resources.length === 1, "secret: materialize succeeds");
+    assert(
+      resources[0].bytes.toString("utf8").includes("[REDACTED]"),
+      "secret: sk- redacted in attached bytes"
     );
+    assert(!resources[0].bytes.toString("utf8").includes("sk-123456789012345678901234"), "secret: raw key absent");
+    assert(redaction?.filesRedacted === true, "secret: disclosure filesRedacted");
+    assert((redaction?.redactionCount ?? 0) >= 1, "secret: disclosure count");
+    assert(redaction?.detectorIds.includes("sk"), "secret: detector id sk");
+  }
+
+  // --- FP: Bearer field prose must not redact ---
+  {
+    writeFileSync(
+      join(wsDir, "arch.md"),
+      "Code comment notes no static Bearer field in UI — tunnel may need adjustment.\n"
+    );
+    const refs = registerTaskResourcePaths(["arch.md"], now);
+    const { resources, redaction } = materializeWorkspaceResources(refs, wsDir);
+    assert(
+      resources[0].bytes.toString("utf8").includes("Bearer field"),
+      "fp: Bearer field preserved"
+    );
+    assert(!redaction, "fp: no redaction disclosure for docs prose");
   }
 
   // --- NUL / binary at materialize ---
@@ -299,18 +319,17 @@ async function main() {
     );
   }
 
-  // --- Secret at 64 KiB boundary at materialize ---
+  // --- Secret at 64 KiB boundary at materialize: still redacted ---
   {
     const secret = "sk-" + "A".repeat(40);
     const prefixLen = 65536 - 10;
     const content = "x".repeat(prefixLen) + secret + "y".repeat(100);
     writeFileSync(join(wsDir, "boundary.ts"), content);
     const refs = registerTaskResourcePaths(["boundary.ts"], now);
-    expectFileError(
-      () => materializeWorkspaceResources(refs, wsDir),
-      "FILES_SECRET_DETECTED",
-      "boundary: secret at 64k caught at materialize"
-    );
+    const { resources, redaction } = materializeWorkspaceResources(refs, wsDir);
+    assert(resources[0].bytes.toString("utf8").includes("[REDACTED]"), "boundary: secret redacted");
+    assert(!resources[0].bytes.toString("utf8").includes(secret), "boundary: raw secret absent");
+    assert(redaction?.detectorIds.includes("sk"), "boundary: detector sk");
   }
 
   // --- Second materialize after change → different sha256 ---
@@ -321,7 +340,7 @@ async function main() {
     const first = materializeWorkspaceResources(refs, wsDir);
     writeFileSync(path, "v2-longer");
     const second = materializeWorkspaceResources(refs, wsDir);
-    assert(first[0].sha256 !== second[0].sha256, "rehash: dispatch-time hash reflects current bytes");
+    assert(first.resources[0].sha256 !== second.resources[0].sha256, "rehash: dispatch-time hash reflects current bytes");
   }
 
   // --- get_task manifest: no path leakage ---

@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { ulid } from "ulid";
+import type { SecretRedactionDisclosure } from "./sanitize.js";
 import type {
   ClaimResult,
   HandoffTask,
@@ -275,6 +276,40 @@ export class TaskRepository {
     if (!row?.context_json) return null;
     const ctx = JSON.parse(row.context_json) as { _probeToken?: string };
     return ctx._probeToken ?? null;
+  }
+
+  /** Attach-time secret redaction disclosure (ADR-005; never stores matched values). */
+  setAttachSecretRedaction(
+    taskId: string,
+    disclosure: SecretRedactionDisclosure
+  ): void {
+    const row = this.db
+      .prepare(`SELECT context_json FROM handoff_tasks WHERE id = ?`)
+      .get(taskId) as { context_json: string | null } | undefined;
+    if (!row) return;
+    const ctx = row.context_json
+      ? (JSON.parse(row.context_json) as Record<string, unknown>)
+      : {};
+    ctx._attachSecretRedaction = {
+      filesRedacted: disclosure.filesRedacted,
+      redactionCount: disclosure.redactionCount,
+      detectorIds: disclosure.detectorIds,
+      files: disclosure.files,
+    };
+    this.db
+      .prepare(`UPDATE handoff_tasks SET context_json = ? WHERE id = ?`)
+      .run(JSON.stringify(ctx), taskId);
+  }
+
+  getAttachSecretRedaction(taskId: string): SecretRedactionDisclosure | null {
+    const row = this.db
+      .prepare(`SELECT context_json FROM handoff_tasks WHERE id = ?`)
+      .get(taskId) as { context_json: string | null } | undefined;
+    if (!row?.context_json) return null;
+    const ctx = JSON.parse(row.context_json) as {
+      _attachSecretRedaction?: SecretRedactionDisclosure;
+    };
+    return ctx._attachSecretRedaction ?? null;
   }
 
   findPendingConnectorHandshake(workerId: string): string | null {

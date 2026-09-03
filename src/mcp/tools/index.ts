@@ -188,6 +188,7 @@ export function registerHandoffTools(
       const rawContext = (task.context ?? {}) as Record<string, unknown>;
       const {
         _probeToken: _ignored,
+        _attachSecretRedaction: _attachIgnored,
         submitTemplate: _submitTemplate,
         ...publicContext
       } = rawContext;

@@ -53,7 +53,16 @@ export interface HandoffResultMetadata {
     displayName: string;
     sizeBytes: number;
     sha256: string;
+    /** True when this artifact body was redacted before write. */
+    modifiedForSecretRemoval?: boolean;
+    redactionCount?: number;
+    detectorIds?: string[];
   }>;
+  /** Aggregate writeback/attach disclosure (ADR-005). */
+  filesRedacted?: boolean;
+  redactionCount?: number;
+  detectorIds?: string[];
+  modifiedForSecretRemoval?: boolean;
 }
 
 export type ResourceSource =
