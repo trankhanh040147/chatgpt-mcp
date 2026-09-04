@@ -14,29 +14,31 @@ export const WORKER_MCP_INSTRUCTIONS =
 /** Tool description for handoff_submit_result (ChatGPT worker). */
 export const SUBMIT_RESULT_TOOL_DESCRIPTION =
   "Submit the completed task result. " +
-  "When modifying or creating workspace files, pass artifacts[] with complete final UTF-8 file bodies — prose in result does NOT write to disk. " +
-  "overwrite replaces an existing/attached file; create adds a new path (default). " +
-  "Artifact writes are validated and committed as one batch — validation failures write nothing; " +
-  "if a commit fails, the server rolls back that batch before returning an error. " +
-  "Do not use artifacts for partial patches; describe those in result instead. " +
-  "Limits: 20 artifacts, 32 MiB per file, 128 MiB total. result must always be non-empty.";
+  "When modifying or creating workspace files, pass artifacts[] (max 20) with complete final UTF-8 bodies, " +
+  "OR archive={format:'tar.zst',encoding:'base64',data} for larger batches (max 100 members) — never both. " +
+  "Prose in result does NOT write to disk. " +
+  "overwrite replaces an existing/attached file; create adds a new path (default) for artifacts[]. " +
+  "Archive members upsert. Writes are validated then committed as one batch. " +
+  "Limits: artifacts 20/32MiB/128MiB; archive 100/64MiB/64MiB compressed. result must always be non-empty.";
 
 /** Per-task behavioral guidance for writeback (decision-oriented, not runtime rules). */
 export const WRITEBACK_POLICY = {
   whenToWrite: [
     "Write an artifact only when you can provide the complete final file content.",
-    "For an attached/existing workspace file, use mode=overwrite.",
-    "For a new workspace path, use mode=create.",
+    "For ≤20 files prefer artifacts[]; for larger batches use archive tar.zst.",
+    "Never send both artifacts[] and archive.",
+    "For an attached/existing workspace file via artifacts[], use mode=overwrite.",
+    "For a new workspace path via artifacts[], use mode=create.",
     "If the change cannot be safely represented as a complete final file, do not emit an artifact; describe it in result instead.",
   ],
   submission: [
-    "When you modified or created workspace files, artifacts[] is required — result prose alone does not write bytes.",
-    "Artifacts are validated and committed as one batch. Validation failures write nothing.",
+    "When you modified or created workspace files, artifacts[] or archive is required — result prose alone does not write bytes.",
+    "Writes are validated and committed as one batch. Validation failures write nothing.",
     "If a commit fails, the server rolls back that batch before returning an error.",
     "Always provide a non-empty result summarizing files written and any prose-only changes.",
   ],
   onRejection: [
-    "If artifact submission is rejected, assume no artifact from that batch was accepted.",
+    "If submission is rejected, assume no write from that batch was accepted.",
     "Correct the reported problem and retry only if it can be corrected safely.",
     "On create collision (target exists): do NOT automatically switch to overwrite — report conflict or use prose-only.",
   ],
@@ -51,11 +53,18 @@ export const SUBMIT_POLICY = {
 /** Playwright nudge when ChatGPT has not submitted within ~30s. */
 export const SUBMIT_NUDGE_MESSAGE = (
   taskId: string,
-  opts?: { hasAttachedFiles?: boolean }
-): string =>
-  opts?.hasAttachedFiles
+  opts?: { hasAttachedFiles?: boolean; preferArchive?: boolean }
+): string => {
+  if (opts?.preferArchive) {
+    return (
+      `Complete TASK_ID=${taskId} using handoff_submit_result with submitTemplate.archive ` +
+      `(format/encoding/data) — do not invent artifacts[].`
+    );
+  }
+  return opts?.hasAttachedFiles
     ? `Complete TASK_ID=${taskId} using handoff_submit_result with artifacts[] (complete file bodies) for each file you changed.`
     : `Complete TASK_ID=${taskId} using handoff_submit_result.`;
+};
 
 /** Minimal tool description for handoff_complete_probe (legacy; prefer handoff_ack). */
 export const PROBE_COMPLETE_TOOL_DESCRIPTION =

@@ -1,0 +1,32 @@
+export type ArchiveErrorCode =
+  | "ARCHIVE_WITH_ARTIFACTS"
+  | "ARCHIVE_FORMAT_UNSUPPORTED"
+  | "ARCHIVE_BASE64_INVALID"
+  | "ARCHIVE_COMPRESSED_TOO_LARGE"
+  | "ARCHIVE_ZSTD_INVALID"
+  | "ARCHIVE_ZSTD_WINDOW_TOO_LARGE"
+  | "ARCHIVE_UNCOMPRESSED_TOO_LARGE"
+  | "ARCHIVE_TOO_MANY_MEMBERS"
+  | "ARCHIVE_MEMBER_TOO_LARGE"
+  | "ARCHIVE_MEMBER_TYPE_UNSUPPORTED"
+  | "ARCHIVE_MEMBER_PATH_INVALID"
+  | "ARCHIVE_MEMBER_DUPLICATE"
+  | "ARCHIVE_MEMBER_BINARY"
+  | "ARCHIVE_MEMBER_SECRET"
+  | "ARCHIVE_MEMBER_EXT_REJECTED"
+  | "ARCHIVE_TAR_INVALID"
+  | "ARCHIVE_COMMIT_FAILED"
+  | "PACK_COMPRESSED_TOO_LARGE"
+  | "PACK_MEMBER_TOO_LARGE"
+  | "PACK_TOTAL_TOO_LARGE"
+  | "PACK_TOO_MANY_MEMBERS"
+  | "PACK_TASK_ID_INVALID";
+
+export class ArchiveError extends Error {
+  readonly code: ArchiveErrorCode;
+  constructor(code: ArchiveErrorCode, message: string) {
+    super(message);
+    this.name = "ArchiveError";
+    this.code = code;
+  }
+}

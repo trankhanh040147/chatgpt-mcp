@@ -57,31 +57,38 @@ function main(): void {
   );
 
   assert(
-    SUBMIT_RESULT_TOOL_DESCRIPTION.includes("20 artifacts"),
+    SUBMIT_RESULT_TOOL_DESCRIPTION.includes("20") &&
+      SUBMIT_RESULT_TOOL_DESCRIPTION.includes("artifacts"),
     "tool description: 20 artifacts"
   );
   assert(
-    SUBMIT_RESULT_TOOL_DESCRIPTION.includes("32 MiB"),
+    SUBMIT_RESULT_TOOL_DESCRIPTION.includes("32MiB") ||
+      SUBMIT_RESULT_TOOL_DESCRIPTION.includes("32 MiB"),
     "tool description: 32 MiB per file"
   );
   assert(
-    SUBMIT_RESULT_TOOL_DESCRIPTION.includes("128 MiB"),
+    SUBMIT_RESULT_TOOL_DESCRIPTION.includes("128MiB") ||
+      SUBMIT_RESULT_TOOL_DESCRIPTION.includes("128 MiB"),
     "tool description: 128 MiB total"
+  );
+  assert(
+    SUBMIT_RESULT_TOOL_DESCRIPTION.toLowerCase().includes("archive") &&
+      SUBMIT_RESULT_TOOL_DESCRIPTION.includes("tar.zst"),
+    "tool description: archive tar.zst path"
   );
   assert(
     !SUBMIT_RESULT_TOOL_DESCRIPTION.includes("10 files"),
     "tool description: no stale 10-file limit"
   );
   assert(
-    SUBMIT_RESULT_TOOL_DESCRIPTION.includes("prose in result does NOT write") ||
-      SUBMIT_RESULT_TOOL_DESCRIPTION.includes("prose in result does NOT write to disk"),
+    /prose in result does NOT write/i.test(SUBMIT_RESULT_TOOL_DESCRIPTION),
     "tool description: prose does not write disk"
   );
   assert(
     WRITEBACK_POLICY.submission.some((line) =>
-      line.toLowerCase().includes("artifacts[] is required")
+      /artifacts\[\] or archive is required/i.test(line)
     ),
-    "policy: artifacts required when modifying files"
+    "policy: artifacts or archive required when modifying files"
   );
 
   const err = new HandoffFileError(
@@ -137,7 +144,7 @@ function main(): void {
     rejected =
       e instanceof HandoffFileError &&
       e.code === "FILES_INVALID" &&
-      e.message.includes("artifacts[] required");
+      /artifacts\[\] or archive required/i.test(e.message);
   }
   assert(rejected, "runtime: prose-only rejected when writebackRequired");
 

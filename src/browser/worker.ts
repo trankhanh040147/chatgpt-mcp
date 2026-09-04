@@ -5,7 +5,9 @@ import { TaskService } from "../tasks/task.service.js";
 import { WorkerStateManager } from "./worker-state.js";
 import { ChatGptBrowser } from "./chatgpt.js";
 import { createNativeDeliveryTarget } from "../transport/native-delivery.js";
-import { materializeWorkspaceResources } from "../tasks/files.js";
+import { materializeResourcesForArchivePack } from "../tasks/files.js";
+import { packTaskResourcesAsTarZst } from "../archive/pack.js";
+import { ArchiveError } from "../archive/errors.js";
 import { HandoffFileError } from "../tasks/task.types.js";
 import {
   cleanupPreparedAttachSession,
@@ -449,7 +451,7 @@ export class BrowserWorker {
               "Task missing workspace root for file materialization"
             );
           }
-          preparedResources = materializeWorkspaceResources(taskFiles, root);
+          preparedResources = materializeResourcesForArchivePack(taskFiles, root);
           if (preparedResources.redaction) {
             taskService.recordAttachSecretRedaction(
               task.id,
@@ -462,15 +464,30 @@ export class BrowserWorker {
               message: `Attach secret redaction applied: count=${preparedResources.redaction.redactionCount} detectors=${preparedResources.redaction.detectorIds.join(",")}`,
             });
           }
+          const archiveChip = packTaskResourcesAsTarZst(
+            taskFiles,
+            preparedResources.resources,
+            task.id
+          );
+          preparedResources = {
+            resources: [archiveChip],
+            redaction: preparedResources.redaction,
+          };
         } catch (err) {
           const code =
-            err instanceof HandoffFileError ? err.code : "FILES_INVALID";
+            err instanceof ArchiveError
+              ? err.code
+              : err instanceof HandoffFileError
+                ? err.code
+                : "FILES_INVALID";
           const errMsg = `Resource materialize failed: ${code}`;
           const permanent =
             code === "FILES_SECRET_DETECTED" ||
             code === "FILE_TOO_LARGE" ||
             code === "FILES_INVALID" ||
-            code === "RESOURCES_MCP_DEFERRED";
+            code === "RESOURCES_MCP_DEFERRED" ||
+            (typeof code === "string" &&
+              (code.startsWith("PACK_") || code.startsWith("ARCHIVE_")));
           taskService.markDispatchFailed(task.id, errMsg, {
             workerId: this.workerId,
             leaseToken,
@@ -841,6 +858,10 @@ export class BrowserWorker {
                 skipIdleWait: true,
                 probe: isProbe,
                 hasAttachedFiles: (taskRow?.files?.length ?? 0) > 0,
+                preferArchive: Boolean(
+                  (taskRow?.context?.submitTemplate as { archive?: unknown } | undefined)
+                    ?.archive
+                ),
               });
               log({
                 event: "INFO",

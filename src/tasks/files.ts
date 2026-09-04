@@ -3,6 +3,11 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { ulid } from "ulid";
 import {
+  MAX_ARCHIVE_MEMBERS,
+  MAX_MEMBER_BYTES,
+  MAX_UNCOMPRESSED_BYTES,
+} from "../archive/constants.js";
+import {
   fileRedactionSummary,
   mergeSecretRedactionDisclosures,
   redactSecretsInBuffer,
@@ -135,9 +140,14 @@ export function registerTaskResourcePaths(
   paths: string[],
   now: string
 ): TaskResource[] {
+  if (paths.length > MAX_ARCHIVE_MEMBERS) {
+    throw new HandoffFileError(
+      "FILES_INVALID",
+      `Too many files (max ${MAX_ARCHIVE_MEMBERS})`
+    );
+  }
   const results: TaskResource[] = [];
   const seenRel = new Set<string>();
-  const seenBasename = new Set<string>();
 
   for (const raw of paths) {
     const relPosix = normalizeRelPosix(raw);
@@ -150,15 +160,6 @@ export function registerTaskResourcePaths(
       throw new HandoffFileError("FILES_INVALID", "Duplicate file");
     }
     seenRel.add(relPosix);
-
-    const displayBase = basename(relPosix).toLowerCase();
-    if (seenBasename.has(displayBase)) {
-      throw new HandoffFileError(
-        "FILES_DUPLICATE_BASENAME",
-        "Duplicate display basename rejected"
-      );
-    }
-    seenBasename.add(displayBase);
 
     const fileId = `f_${ulid()}`;
     results.push({
@@ -176,8 +177,11 @@ export function registerTaskResourcePaths(
 /** Authoritative validation + read at dispatch — ephemeral PreparedResource bytes. */
 export function materializeWorkspaceResources(
   resources: readonly TaskResource[],
-  workspaceRoot: string
+  workspaceRoot: string,
+  caps?: { maxBytesPerFile?: number; maxBytesTotal?: number }
 ): MaterializeWorkspaceResult {
+  const maxFile = caps?.maxBytesPerFile ?? MAX_BYTES_PER_FILE;
+  const maxTotal = caps?.maxBytesTotal ?? MAX_BYTES_PER_TASK;
   const root = realpathSync(workspaceRoot);
   const results: PreparedResource[] = [];
   const redactionParts: SecretRedactionDisclosure[] = [];
@@ -220,16 +224,16 @@ export function materializeWorkspaceResources(
     if (!isAllowedExtension(resolvedPosix)) {
       throw new HandoffFileError("FILES_INVALID", "Extension not allowed");
     }
-    if (lst.size > MAX_BYTES_PER_FILE) {
+    if (lst.size > maxFile) {
       throw new HandoffFileError("FILE_TOO_LARGE", "File exceeds per-file cap");
     }
 
     const raw = readFileSync(realCandidate);
-    if (raw.length > MAX_BYTES_PER_FILE) {
+    if (raw.length > maxFile) {
       throw new HandoffFileError("FILE_TOO_LARGE", "File exceeds per-file cap");
     }
     totalBytes += raw.length;
-    if (totalBytes > MAX_BYTES_PER_TASK) {
+    if (totalBytes > maxTotal) {
       throw new HandoffFileError("FILE_TOO_LARGE", "Task byte budget exceeded");
     }
 
@@ -268,4 +272,15 @@ export function materializeWorkspaceResources(
     resources: results,
     redaction: mergeSecretRedactionDisclosures(redactionParts),
   };
+}
+
+/** Materialize with v0.9 pack caps (64 MiB / 64 MiB) for always-one-chip dispatch. */
+export function materializeResourcesForArchivePack(
+  resources: readonly TaskResource[],
+  workspaceRoot: string
+): MaterializeWorkspaceResult {
+  return materializeWorkspaceResources(resources, workspaceRoot, {
+    maxBytesPerFile: MAX_MEMBER_BYTES,
+    maxBytesTotal: MAX_UNCOMPRESSED_BYTES,
+  });
 }

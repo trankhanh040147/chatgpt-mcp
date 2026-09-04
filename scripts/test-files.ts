@@ -223,17 +223,13 @@ async function main() {
     mkdirSync(join(wsDir, "tests"), { recursive: true });
     writeFileSync(join(wsDir, "src", "foo.ts"), "src foo");
     writeFileSync(join(wsDir, "tests", "foo.ts"), "tests foo");
-    expectFileError(
-      () =>
-        service.createTask({
-          type: "research",
-          prompt: "p",
-          cursorConversationId: "c7b",
-          files: ["src/foo.ts", "tests/foo.ts"],
-        }),
-      "FILES_DUPLICATE_BASENAME",
-      "reject: duplicate display basename"
-    );
+    const created = service.createTask({
+      type: "research",
+      prompt: "p",
+      cursorConversationId: "c7b",
+      files: ["src/foo.ts", "tests/foo.ts"],
+    });
+    assert(created.taskId.startsWith("ho_"), "allow: duplicate display basename different dirs");
   }
 
   // --- Secret content at materialize: redact + disclose (ADR-005 amend) ---
@@ -304,11 +300,11 @@ async function main() {
     );
 
     const sumNames: string[] = [];
-    const sumChunk = 1024 * 1024;
-    const fileCount = Math.ceil(MAX_BYTES_PER_TASK / sumChunk) + 1;
-    for (let i = 0; i < fileCount; i += 1) {
+    // Under member-count cap (100) but over default task byte budget (128 MiB).
+    const perFile = 25 * 1024 * 1024;
+    for (let i = 0; i < 6; i += 1) {
       const name = `sum${i}.ts`;
-      writeFileSync(join(wsDir, name), "y".repeat(sumChunk));
+      writeFileSync(join(wsDir, name), "y".repeat(perFile));
       sumNames.push(name);
     }
     const sumRefs = registerTaskResourcePaths(sumNames, now);
@@ -316,6 +312,17 @@ async function main() {
       () => materializeWorkspaceResources(sumRefs, wsDir),
       "FILE_TOO_LARGE",
       "reject: sum exceeds task byte cap at materialize"
+    );
+
+    const tooMany = Array.from({ length: 101 }, (_, i) => {
+      const name = `n${i}.ts`;
+      writeFileSync(join(wsDir, name), "z");
+      return name;
+    });
+    expectFileError(
+      () => registerTaskResourcePaths(tooMany, now),
+      "FILES_INVALID",
+      "reject: more than 100 files at register"
     );
   }
 
@@ -405,6 +412,23 @@ async function main() {
     process.env.HANDOFF_WORKSPACE_ROOT = prev;
     const task = service.getTask(taskId)!;
     assert(task.workspaceRoot === realpathSync(wsDir), "create: workspaceRoot override stored");
+  }
+
+  // --- workspaceRoot without files[] (archive writeback) ---
+  {
+    const { service } = freshDb(dbDir);
+    const { taskId } = service.createTask({
+      type: "research",
+      prompt: "p",
+      cursorConversationId: "c-root-only",
+      workspaceRoot: wsDir,
+    });
+    const task = service.getTask(taskId)!;
+    assert(
+      task.workspaceRoot === realpathSync(wsDir),
+      "create: workspaceRoot stored without files"
+    );
+    assert((task.files?.length ?? 0) === 0, "create: no files when omitted");
   }
 
   // --- missing file at create (fail fast) ---

@@ -10,6 +10,8 @@ import {
   assertWorkspaceFilesExist,
 } from "./files.js";
 import { writeResultArtifacts } from "./result-artifacts.js";
+import { ingestArchiveWriteback } from "../archive/ingest.js";
+import { ArchiveError } from "../archive/errors.js";
 import {
   HandoffFileError,
   type ClaimResult,
@@ -41,6 +43,9 @@ export class TaskService {
       workspaceRoot = resolveWorkspaceRoot(input.workspaceRoot);
       assertWorkspaceFilesExist(input.files, workspaceRoot);
       files = registerTaskResourcePaths(input.files, now);
+    } else if (input.workspaceRoot) {
+      // Writeback/archive tasks may omit files[] but still need a pinned root.
+      workspaceRoot = resolveWorkspaceRoot(input.workspaceRoot);
     }
 
     const task: HandoffTask = {
@@ -362,14 +367,40 @@ export class TaskService {
     }
 
     const artifactCount = input.artifacts?.length ?? 0;
-    if (task.context?.writebackRequired && artifactCount === 0) {
+    const hasArchive = Boolean(input.archive?.data);
+    if (hasArchive && artifactCount > 0) {
+      throw new ArchiveError(
+        "ARCHIVE_WITH_ARTIFACTS",
+        "Pass archive XOR artifacts[] — not both"
+      );
+    }
+    if (task.context?.writebackRequired && artifactCount === 0 && !hasArchive) {
       const hint = task.context.submitTemplate
         ? " Use submitTemplate from handoff_get_task as the handoff_submit_result payload."
         : "";
       throw new HandoffFileError(
         "FILES_INVALID",
-        `artifacts[] required for this task — result prose does not write workspace files.${hint}`
+        `artifacts[] or archive required for this task — result prose does not write workspace files.${hint}`
       );
+    }
+
+    // Archive: validate + commit before claiming COMPLETED.
+    let archiveWritten: ReturnType<typeof ingestArchiveWriteback> | undefined;
+    if (hasArchive) {
+      const root = task.workspaceRoot ?? resolveWorkspaceRoot();
+      archiveWritten = ingestArchiveWriteback(input.archive!, root);
+      metadata = {
+        ...metadata,
+        artifacts: archiveWritten.artifacts,
+        ...(archiveWritten.redaction
+          ? {
+              filesRedacted: true,
+              redactionCount: archiveWritten.redaction.redactionCount,
+              detectorIds: archiveWritten.redaction.detectorIds,
+              modifiedForSecretRemoval: true,
+            }
+          : {}),
+      };
     }
 
     const fromTimedOut = task.status === "TIMED_OUT";
@@ -387,7 +418,15 @@ export class TaskService {
     }
 
     let writebackRedaction: SecretRedactionDisclosure | undefined;
-    if (artifactCount > 0) {
+    if (hasArchive && archiveWritten) {
+      writebackRedaction = archiveWritten.redaction;
+      log({
+        event: "RESULT_ARTIFACTS_WRITTEN",
+        component: "task-service",
+        taskId: input.taskId,
+        message: `archive count=${archiveWritten.artifacts.length}`,
+      });
+    } else if (artifactCount > 0) {
       try {
         const root = task.workspaceRoot ?? resolveWorkspaceRoot();
         const written = writeResultArtifacts(input.artifacts!, root);

@@ -52,10 +52,11 @@ Local-first Cursor/agent ↔ ChatGPT handoff over MCP: independent review, resea
 | **0.5.0** | Agent UX + worker chat rotation | Skill/rule handoff policy (Light/Standard/Deep); **self-regulate context** — rotate worker chat over threshold | Scenario set passes; ≤1 handoff/decision; rotation fail-closed | Host-generic “chooser”; unattended login |
 | **0.6.0** | Worker Ops & Dashboard + public CLI | Health poll; assign/create URL; auto-canary; kill/recreate; SESSION_LOST heal (confirm); **`gptmcp` ops surface** | Dashboard ops without sqlite; broker registry SSOT; **`gptmcp status` exit 0** onboarding path | Claude host; transport abstraction |
 | **0.7.0** | Handoff Resources (P0) | Dispatch-time materialize; native CDP attach; `handoff_read_file` disabled for file tasks | Merged; formal E2E + CI → 0.7.x | Phase 2 items → 0.8+ |
-| **0.8.0** | Handoff Resources Phase 2 | Native writeback/artifacts; large-batch observability E2E; v0.7 E2E gate formalized | Writeback E2E; observability evidence; CI/hook reliability | MCP URI → 0.9; Claude → 0.11 |
-| **0.9.0** | MCP Resource URI transport | `mcp_resource` ingress; explicit transport selection; benchmark vs native | No silent MCP fallback; ADR-003 honored | Audit store → 0.10 |
-| **0.10.0** | Resource persistence / read APIs | Optional audit store; controlled `handoff_read_file` revival | Evidence-gated only | ZIP/context-pack experiments |
-| **0.11.0** | Claude host | Claude skill/hook; E2E by `taskId`; reuse resource contracts | Documented Claude path | Marketplace / Windows |
+| **0.8.0** | Handoff Resources Phase 2 | Native writeback/artifacts; large-batch observability E2E; v0.7 E2E gate formalized | Writeback E2E; observability evidence; CI/hook reliability | tar.zst pack → 0.9; MCP URI → 0.10 |
+| **0.9.0** | tar.zst pack (native path) | Always-one-chip inbound; hybrid `artifacts[]` XOR `archive` outbound | One `handoff-{taskId}.tar.zst` chip; fail-closed unpack; ADR-011 | MCP URI → 0.10 |
+| **0.10.0** | MCP Resource URI transport | `mcp_resource` ingress; explicit transport selection; benchmark vs native | No silent MCP fallback; ADR-003 honored | Audit store → 0.11 |
+| **0.11.0** | Resource persistence / read APIs | Optional audit store; controlled `handoff_read_file` revival | Evidence-gated only | Claude → 0.12 |
+| **0.12.0** | Claude host | Claude skill/hook; E2E by `taskId`; reuse resource contracts | Documented Claude path | Marketplace / Windows |
 
 ### 0.3.0 — CDP optimize + assisted create-worker (**shipped**)
 
@@ -226,29 +227,34 @@ Dispatch-time materialize → native CDP buffer attach before fence. Merged PR #
 
 Native symmetric writeback (ChatGPT → workspace), large-batch observability E2E, resource lifecycle hardening. Do not raise DOM chip cap without evidence.
 
-### 0.9.0 — MCP Resource URI transport
+### 0.9.0 — tar.zst pack (native path)
+
+**Spec:** [`.planning/active/0.9-zstd-pack.md`](../.planning/active/0.9-zstd-pack.md) · **ADR:** [ADR-011](../.planning/decisions/ADR-011-zstd-pack.md)
+
+Packing adapter on the native path (not a new transport): `files[]` → one `handoff-{taskId}.tar.zst` chip inbound; outbound `archive` XOR `artifacts[]`. Caps 100 / 64 MiB; window ≤ 8 MiB; fail closed.
+
+### 0.10.0 — MCP Resource URI transport
 
 `mcp_resource` source with explicit transport selection; benchmark against native attach (ADR-003: no silent fallback).
 
-### 0.10.0 — Resource persistence / read APIs
+### 0.11.0 — Resource persistence / read APIs
 
 Optional audit store; controlled `handoff_read_file` revival — evidence-gated.
 
-### 0.11.0 — Claude host
+### 0.12.0 — Claude host
 
 Same `taskId` contract; optional `files` from 0.7+; after resource family stabilized.
 
 ## Current milestone
 
-- **Shipped:** **0.1.0** … **0.7.0** (Handoff Resources P0).
-- **In progress:** **0.7.x** exit debt + **0.8.0** Handoff Resources Phase 2.
-- **Then:** **0.9.0** MCP URI → **0.10.0** persistence → **0.11.0** Claude host.
+- **Shipped:** **0.1.0** … **0.8.0** (Handoff Resources Phase 2).
+- **In progress:** **0.9.0** tar.zst pack.
+- **Then:** **0.10.0** MCP URI → **0.11.0** audit/read → **0.12.0** Claude host.
 
 ## Near-term queue
 
-1. **0.7.x** — rotation CI, formal E2E, #18, tag `v0.7.0`
-2. **0.8.0** — writeback + observability + lifecycle hardening
-3. **0.9.0+** — MCP URI, audit, Claude (sequenced)
+1. **0.9.0** — codec + one-chip attach + archive writeback E2E
+2. **0.10.0+** — MCP URI, audit, Claude (sequenced)
 
 ## Deferred / non-goals
 
@@ -262,14 +268,17 @@ Same `taskId` contract; optional `files` from 0.7+; after resource family stabil
 | Dashboard history/charts / create-worker UI | Dash **0.3+** later |
 | Handoff Resources P0 (dispatch materialize + native attach) | **0.7.0** (shipped) |
 | Handoff Resources Phase 2 (writeback, observability) | **0.8.0** |
-| MCP Resource URI transport | **0.9.0** |
-| Claude host | **0.11.0** |
+| tar.zst pack (native path) | **0.9.0** |
+| MCP Resource URI transport | **0.10.0** |
+| Resource persistence / read APIs | **0.11.0** |
+| Claude host | **0.12.0** |
 | Arbitrary workspace MCP (`read_file(path)`) | Never — task-scoped `handoff_read_file` only |
 
 ## Decision log
 
 | Date | Decision | Reason | Supersedes |
 |------|----------|--------|------------|
+| 2026-09-03 | **0.9 = tar.zst pack**; MCP URI → **0.10**; audit/read → **0.11**; Claude → **0.12** | Always-one-chip packing before new transport; ADR-011 | 2026-09-01 ladder (0.9 MCP URI) |
 | 2026-09-01 | **0.8 = HR Phase 2**; Claude → **0.11**; MCP URI → **0.9**; audit/read → **0.10** | 0.7 spec deferred resource work to v0.8+; Aug 30 ladder was host-driven too early; evidence before new hosts | 2026-08-30 ladder (0.8 Claude, 0.9 artifacts) |
 | 2026-08-30 | **`gptmcp` = sole public ops UX**; `make` / `npm run` = developer/CI only | Reduce onboarding surface; safe lifecycle (PID ownership, no cwd token leaks); user-scoped `$CHATGPT_MCP_HOME` | Scattered `make up` / script onboarding in README |
 | 2026-08-30 | **0.6 = Worker Ops**; **0.7 = Handoff Resources**; Claude → **0.8**; artifacts → **0.9** | Ops pain (CONSENT/URL/SESSION_LOST) blocks file-attach E2E; ship ops dashboard first | 2026-08-29 ladder (0.6 = Handoff Resources) |
