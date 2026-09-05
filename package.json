@@ -99,11 +99,11 @@
     "js-tiktoken": "^1.0.21",
     "playwright": "^1.62.1",
     "ulid": "^3.0.2",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "devDependencies": {
-    "@types/node": "^26.3.0",
-    "tsx": "^4.19.3",
+    "@types/node": "^26.4.1",
+    "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }
 }
